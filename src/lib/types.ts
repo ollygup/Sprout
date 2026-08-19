@@ -361,7 +361,7 @@ export interface QuickAction extends QuickActionInput {
 
 /** The assignment surface's gate + list (ticket 44): `supported` is false
  * below Windows 11 24H2 (or when winvd failed), which hides the whole
- * grouping surface — menu, labels, tray groups. */
+ * grouping surface — the page's labels and assignments. */
 export interface VirtualDesktops {
   supported: boolean;
   desktops: VirtualDesktop[];

@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
+  import { page } from "$app/state";
   import "../lib/styles/tokens.css";
   import { goto } from "$app/navigation";
   import { listen } from "@tauri-apps/api/event";
@@ -12,6 +13,14 @@
 
   let { children }: { children: Snippet } = $props();
 
+  // The Quick Launch window (ticket 52) is a second webview pointed at its
+  // own route: it gets the shared tokens, fonts, and theme — but none of the
+  // main window's chrome (NavRail, run banner) or import/run-awareness
+  // plumbing, which are meaningless in a miniature read-only surface.
+  const isQuickLaunchWindow = $derived(
+    page.route.id === "/quick-launch-window"
+  );
+
   // The theme store (ticket 31) applies its cached mode at import, before the
   // first paint; this wires the OS listener and backend reconciliation.
   $effect(() => {
@@ -20,12 +29,15 @@
 
   // The run-awareness poller (ticket 18) lives at the layout level, so the
   // banner survives navigation and completion is announced exactly once —
-  // page-local polling never had a vote.
+  // page-local polling never had a vote. The Quick Launch window has no
+  // banner; its Start button listens for `launch-run-done` itself.
   $effect(() => {
+    if (isQuickLaunchWindow) return;
     startRunAwareness();
   });
 
   $effect(() => {
+    if (isQuickLaunchWindow) return;
     takePendingImport()
       .then((path) => {
         if (path) {
@@ -40,6 +52,7 @@
   // an event from the single-instance hook (ticket 10) — route it to the same
   // import flow as a first-launch argument.
   $effect(() => {
+    if (isQuickLaunchWindow) return;
     let unlisten: (() => void) | undefined;
     listen<string>("pending-import", (event) => {
       launchImport.path = event.payload;
@@ -49,18 +62,29 @@
   });
 </script>
 
-<div class="shell">
-  <a class="skip-link" href="#main">Skip to content</a>
-  <NavRail />
-  <div class="stage">
-    <RunBanner />
-    <main id="main" class="main" tabindex="-1">
-      {@render children()}
-    </main>
+{#if isQuickLaunchWindow}
+  <div class="mini">
+    {@render children()}
   </div>
-</div>
+{:else}
+  <div class="shell">
+    <a class="skip-link" href="#main">Skip to content</a>
+    <NavRail />
+    <div class="stage">
+      <RunBanner />
+      <main id="main" class="main" tabindex="-1">
+        {@render children()}
+      </main>
+    </div>
+  </div>
+{/if}
 
 <style>
+  .mini {
+    height: 100vh;
+    overflow: hidden;
+  }
+
   .shell {
     display: flex;
     height: 100vh;

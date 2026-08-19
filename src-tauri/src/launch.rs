@@ -1,5 +1,6 @@
 //! Quick Launch (ticket 37-44): the machine-local list of Launch entries the
-//! tray one-click launcher starts, plus the search that finds installed apps.
+//! Quick Launch window and page start through the shared runner (ticket 54),
+//! plus the search that finds installed apps.
 //!
 //! Glossary (docs/CONTEXT.md): a **Launch entry** is one thing the Quick
 //! Launch list can start — a found app (shortcut or exe) or a command.

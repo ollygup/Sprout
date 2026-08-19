@@ -332,7 +332,7 @@
     entries: LaunchEntry[];
   }
 
-  /** The rack grouped the way the tray groups (ticket 44/46): unassigned
+  /** The rack grouped by desktop assignment (ticket 44/46): unassigned
    * entries under "Current desktop" first, then one group per desktop in Task
    * View order, then stale assignments (desktop no longer exists) in list
    * order — each labelled "Desktop ?". Empty groups never render, and the
@@ -535,7 +535,7 @@
           ? " matches your filter."
           : " match your filter."
         : "."}
-      The tray starts them together, in one click.
+      The tray's left-click opens Quick Launch — one click starts them together.
     </p>
   </header>
 
@@ -665,8 +665,8 @@
     <EmptyState icon="rocket" title="Nothing to launch yet">
       <p>
         Press <strong>Add</strong> to search this machine's installed apps,
-        pick a file, or write a custom command. The tray starts them together,
-        in one click.
+        pick a file, or write a custom command. The tray's left-click opens
+        Quick Launch — one click starts them together.
       </p>
     </EmptyState>
   {:else if visible.length === 0}
@@ -776,8 +776,8 @@
   oncancel={() => (deleting = null)}
 >
   <p>
-    <strong>{deleting?.name}</strong> will no longer be started by the tray.
-    The app itself is untouched.
+    <strong>{deleting?.name}</strong> will no longer be started by Quick
+    Launch. The app itself is untouched.
   </p>
 </ConfirmDialog>
 

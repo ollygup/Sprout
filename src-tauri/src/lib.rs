@@ -9,6 +9,7 @@ mod launch;
 mod logs;
 mod plan;
 mod quick_actions;
+mod quick_window;
 mod run;
 mod settings;
 mod tray;
@@ -427,69 +428,45 @@ fn list_launch_entries(state: State<'_, AppState>) -> Result<Vec<launch::LaunchE
     launch::list_launch_entries(&conn).map_err(|e| e.to_string())
 }
 
-/// Appends a Launch entry at the end of the Quick Launch list (ticket 38);
-/// the tray menu is rebuilt so the new entry shows up (ticket 43).
+/// Appends a Launch entry at the end of the Quick Launch list (ticket 38).
 #[tauri::command]
 fn create_launch_entry(
     state: State<'_, AppState>,
-    app: AppHandle,
     entry: launch::LaunchEntryInput,
 ) -> Result<launch::LaunchEntry, String> {
     launch::validate_launch_entry(&entry)?;
     let conn = lock(&state)?;
-    let created = launch::create_launch_entry(&conn, &entry).map_err(|e| e.to_string())?;
-    drop(conn);
-    tray::rebuild_menu(&app);
-    Ok(created)
+    launch::create_launch_entry(&conn, &entry).map_err(|e| e.to_string())
 }
 
 /// Replaces a Launch entry's metadata in place; position is untouched
-/// (ticket 38). The tray menu is rebuilt so renamed items show the new text
-/// (ticket 43).
+/// (ticket 38).
 #[tauri::command]
 fn update_launch_entry(
     state: State<'_, AppState>,
-    app: AppHandle,
     entry: launch::LaunchEntry,
 ) -> Result<(), String> {
     launch::validate_launch_entry(&entry.entry)?;
     let conn = lock(&state)?;
-    let result = launch::update_launch_entry(&conn, &entry).map_err(|e| e.to_string());
-    drop(conn);
-    tray::rebuild_menu(&app);
-    result
+    launch::update_launch_entry(&conn, &entry).map_err(|e| e.to_string())
 }
 
-/// Removes a Launch entry and compacts the list (ticket 38); the tray menu
-/// is rebuilt so the entry disappears (ticket 43).
+/// Removes a Launch entry and compacts the list (ticket 38).
 #[tauri::command]
-fn delete_launch_entry(
-    state: State<'_, AppState>,
-    app: AppHandle,
-    id: i64,
-) -> Result<(), String> {
+fn delete_launch_entry(state: State<'_, AppState>, id: i64) -> Result<(), String> {
     let conn = lock(&state)?;
-    let result = launch::delete_launch_entry(&conn, id).map_err(|e| e.to_string());
-    drop(conn);
-    tray::rebuild_menu(&app);
-    result
+    launch::delete_launch_entry(&conn, id).map_err(|e| e.to_string())
 }
 
-/// Moves a Launch entry to another position in the list (ticket 38); the
-/// tray menu is rebuilt so the per-app items follow the new order
-/// (ticket 43).
+/// Moves a Launch entry to another position in the list (ticket 38).
 #[tauri::command]
 fn move_launch_entry(
     state: State<'_, AppState>,
-    app: AppHandle,
     id: i64,
     to_position: i64,
 ) -> Result<(), String> {
     let conn = lock(&state)?;
-    let result = launch::move_launch_entry(&conn, id, to_position).map_err(|e| e.to_string());
-    drop(conn);
-    tray::rebuild_menu(&app);
-    result
+    launch::move_launch_entry(&conn, id, to_position).map_err(|e| e.to_string())
 }
 
 /// One Test click in the add-command dialog (ticket 41): runs the command
@@ -508,7 +485,8 @@ fn test_launch_command(
 }
 
 /// Starts the whole Quick Launch list through the capped, queued pipeline
-/// (ticket 42) — the same path the tray triggers (ticket 43). The cap is
+/// (ticket 42) — the launch trigger for both the Quick Launch window's Start
+/// button and the Quick Launch page's Start button (ticket 54). The cap is
 /// read from Settings at click time; the orchestrator runs on a background
 /// thread so the UI never blocks; a second click while one run is in flight
 /// is rejected — never stacked. When the run finishes, the summary lands as
@@ -524,11 +502,12 @@ fn start_quick_launch(state: State<'_, AppState>, app: AppHandle) -> Result<(), 
     launch_entries(&app, &state, entries)
 }
 
-/// The shared launch-run body behind the page's Start button and every tray
-/// trigger (tickets 42 & 43): the single-flight guard, the background thread
-/// running the capped, queued pipeline, the `launch-run-done` event the page
-/// listens for, and the summary notification. A second trigger while a run
-/// is in flight is rejected — never stacked.
+/// The shared launch-run body behind the Quick Launch window's and the
+/// page's Start buttons (tickets 42 & 54): the single-flight guard, the
+/// background thread running the capped, queued pipeline, the
+/// `launch-run-done` event the page listens for, and the summary
+/// notification. A second trigger while a run is in flight is rejected —
+/// never stacked.
 fn launch_entries(
     app: &AppHandle,
     state: &AppState,
@@ -613,9 +592,9 @@ async fn candidate_icon(target: String) -> Result<Option<String>, String> {
 /// The virtual-desktop assignment surface (ticket 44): every desktop with
 /// its label, in Task View order, plus the gate. `supported` is false below
 /// Windows 11 24H2 (and on any winvd failure), which hides the whole
-/// assignment surface — menu, labels, tray groups. Ids are GUIDs and stay
-/// stable across Task View reorder; labels are the Windows name when a
-/// desktop has one, "Desktop N" otherwise.
+/// assignment surface — the page's grouping, labels, and assignments. Ids
+/// are GUIDs and stay stable across Task View reorder; labels are the
+/// Windows name when a desktop has one, "Desktop N" otherwise.
 #[tauri::command]
 fn list_virtual_desktops(state: State<'_, AppState>) -> Result<VirtualDesktops, String> {
     let desktops = state.launcher.desktops();
@@ -727,6 +706,14 @@ fn test_quick_action(command: String, cwd: Option<String>) -> Result<launch::Tes
     Ok(quick_actions::test_quick_action(&command, cwd.as_deref()))
 }
 
+/// The Quick Launch window's × button (ticket 52): remembers the floating
+/// window's size and position, then destroys it. Blur and close both hide
+/// the window to the tray, and the tray's left-click reopens it.
+#[tauri::command]
+fn close_quick_launch_window(app: AppHandle) -> Result<(), String> {
+    quick_window::close(&app).map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Lazy init: %LOCALAPPDATA%\Sprout\sprout.db + logs\ are created here on
@@ -760,10 +747,30 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .on_window_event(|window, event| {
-            // Ticket 43: closing the window (× or Alt+F4) destroys it — the
-            // webview goes away and the lean Rust backend stays resident in
-            // the tray. Open Sprout (or a second launch) recreates the
+            // Ticket 43: closing the main window (× or Alt+F4) destroys it —
+            // the webview goes away and the lean Rust backend stays resident
+            // in the tray. Open Sprout (or a second launch) recreates the
             // window; Quit lives in the tray menu.
+            //
+            // Ticket 52: the Quick Launch window is a palette — blur hides it
+            // (its geometry is remembered, then it is destroyed, keeping the
+            // backend lean), and its × button / Alt+F4 take the same path.
+            // The tray's left-click reopens it.
+            if window.label() == quick_window::QUICK_LAUNCH_WINDOW {
+                match event {
+                    tauri::WindowEvent::Focused(false) => {
+                        quick_window::save_geometry(window);
+                        let _ = window.destroy();
+                    }
+                    tauri::WindowEvent::CloseRequested { api, .. } => {
+                        api.prevent_close();
+                        quick_window::save_geometry(window);
+                        let _ = window.destroy();
+                    }
+                    _ => {}
+                }
+                return;
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.destroy();
@@ -771,7 +778,8 @@ pub fn run() {
         })
         .setup(|app| {
             // The tray icon is the resident surface (ticket 43): created at
-            // startup, left-click = start all, right-click menu, Quit.
+            // startup, left-click opens the Quick Launch window, right-click
+            // menu is Open Sprout / Quit (ticket 54).
             tray::init(app.handle())?;
             Ok(())
         })
@@ -828,7 +836,8 @@ pub fn run() {
             delete_quick_action,
             move_quick_action,
             run_quick_action,
-            test_quick_action
+            test_quick_action,
+            close_quick_launch_window
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

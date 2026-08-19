@@ -192,9 +192,10 @@ export function testLaunchCommand(
 }
 
 /** Starts the whole Quick Launch list (ticket 42): capped, queued, on a
- * background thread — the same path the tray will trigger (ticket 43). The
- * page listens for the `launch-run-done` event and the summary arrives as a
- * system notification. Rejected while a run is already in flight. */
+ * background thread — the shared trigger for the Quick Launch window's and
+ * the page's Start buttons (ticket 54). The page listens for the
+ * `launch-run-done` event and the summary arrives as a system notification.
+ * Rejected while a run is already in flight. */
 export function startQuickLaunch(): Promise<void> {
   return invoke<void>("start_quick_launch");
 }

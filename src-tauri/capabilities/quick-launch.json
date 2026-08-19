@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "quick-launch",
+  "description": "Capability for the Quick Launch window",
+  "windows": ["quick-launch"],
+  "permissions": ["core:default", "core:window:allow-start-dragging"]
+}

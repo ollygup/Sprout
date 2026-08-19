@@ -179,8 +179,8 @@ pub trait PlatformEngine: Send + Sync {
 /// One virtual desktop the assignment surface offers (ticket 44): its GUID
 /// — stable across Task View reorder, which is why assignments reference it —
 /// and its label: the Windows name when the desktop has one, "Desktop N"
-/// otherwise. The label is resolved by the engine, so the tray and the page
-/// never format GUIDs.
+/// otherwise. The label is resolved by the engine, so the page never formats
+/// GUIDs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DesktopInfo {
     pub id: String,

@@ -4,9 +4,9 @@
 
 **Blocked by:** 52 — Quick Launch window (floating) — the window must exist to be the tray's left-click target
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Right-click menu rebuilt to two items: Open Sprout (recreates/focuses the main window) and Quit (the only real exit)
-- [ ] Left-click opens/raises the Quick Launch window; when the window is docked (ticket 53), left-click raises it into focus
-- [ ] Launch-item menu building removed (~the menu-building path for start-all, desktop groups, and per-entry items); the window's Start button and the page's Start button remain the launch triggers through the shared runner
-- [ ] `cargo test` green; `npm run check` 0 errors; synced to the share
+- [x] Right-click menu rebuilt to two items: Open Sprout (recreates/focuses the main window) and Quit (the only real exit)
+- [x] Left-click opens/raises the Quick Launch window; when the window is docked (ticket 53), left-click raises it into focus
+- [x] Launch-item menu building removed (~the menu-building path for start-all, desktop groups, and per-entry items); the window's Start button and the page's Start button remain the launch triggers through the shared runner
+- [x] `cargo test` green; `npm run check` 0 errors; synced to the share

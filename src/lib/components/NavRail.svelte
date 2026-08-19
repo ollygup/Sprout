@@ -7,6 +7,7 @@
     { id: "presets", label: "Presets", href: "/presets" },
     { id: "plan", label: "Plan", href: "/plan" },
     { id: "launch", label: "Quick Launch", href: "/launch" },
+    { id: "quick-actions", label: "Quick Actions", href: "/quick-actions" },
     { id: "history", label: "History", href: "/history" },
     { id: "logs", label: "Logs", href: "/logs" },
     { id: "settings", label: "Settings", href: "/settings" },

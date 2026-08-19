@@ -767,6 +767,78 @@ pub fn get_run(conn: &Connection, id: &str) -> Result<Option<RunRecord>> {
     }))
 }
 
+/// The Quick Launch window's remembered outer position and size (ticket 52).
+/// Stored in the `meta` table like the Settings keys — no schema change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuickWindowGeometry {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+const KEY_QLW_X: &str = "quicklaunch.window.x";
+const KEY_QLW_Y: &str = "quicklaunch.window.y";
+const KEY_QLW_WIDTH: &str = "quicklaunch.window.width";
+const KEY_QLW_HEIGHT: &str = "quicklaunch.window.height";
+
+/// Persists the Quick Launch window's outer position and size before it is
+/// destroyed (blur or close, ticket 52) so the next open lands in the same
+/// spot. Written as four `meta` keys — the table is a generic string store,
+/// so the values round-trip as text like every other setting.
+pub fn save_quick_window_geometry(
+    conn: &Connection,
+    geometry: &QuickWindowGeometry,
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    upsert_meta(&tx, KEY_QLW_X, &geometry.x.to_string())?;
+    upsert_meta(&tx, KEY_QLW_Y, &geometry.y.to_string())?;
+    upsert_meta(&tx, KEY_QLW_WIDTH, &geometry.width.to_string())?;
+    upsert_meta(&tx, KEY_QLW_HEIGHT, &geometry.height.to_string())?;
+    tx.commit()
+}
+
+/// The remembered Quick Launch window geometry, when a sane one is stored.
+/// Unparsable or out-of-range values (a leftover from a broken build, or a
+/// size no window could ever have) read back as `None`, so the window falls
+/// back to its default placement instead of opening off-screen.
+pub fn load_quick_window_geometry(conn: &Connection) -> Option<QuickWindowGeometry> {
+    let get = |key: &str| -> Option<i64> {
+        conn.query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            params![key],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+    };
+    let x = get(KEY_QLW_X)?;
+    let y = get(KEY_QLW_Y)?;
+    let width = get(KEY_QLW_WIDTH)?;
+    let height = get(KEY_QLW_HEIGHT)?;
+    if !(200..=4000).contains(&width) || !(200..=4000).contains(&height) {
+        return None;
+    }
+    if !(-100_000..=100_000).contains(&x) || !(-100_000..=100_000).contains(&y) {
+        return None;
+    }
+    Some(QuickWindowGeometry {
+        x: x as i32,
+        y: y as i32,
+        width: width as u32,
+        height: height as u32,
+    })
+}
+
+fn upsert_meta(conn: &Connection, key: &str, value: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )?;
+    Ok(())
+}
+
 /// Validates a Product before it is written to the Library.
 pub fn validate_product(product: &Product) -> std::result::Result<(), String> {
     if product.id.trim().is_empty() {
@@ -2042,5 +2114,79 @@ mod tests {
         let conn = init_at(&dir).unwrap();
         assert!(delete_product(&conn, "no-such").is_err());
         assert_eq!(count_presets_using_product(&conn, "no-such").unwrap(), 0);
+    }
+
+    #[test]
+    fn quick_window_geometry_roundtrips_across_reopen() {
+        let dir = test_dir();
+        let geometry = QuickWindowGeometry {
+            x: 2100,
+            y: 140,
+            width: 340,
+            height: 460,
+        };
+        {
+            let conn = init_at(&dir).unwrap();
+            // Nothing is remembered on a fresh database.
+            assert_eq!(load_quick_window_geometry(&conn), None);
+            save_quick_window_geometry(&conn, &geometry).unwrap();
+            assert_eq!(load_quick_window_geometry(&conn), Some(geometry));
+        }
+        // Re-open: the geometry survives the connection.
+        let conn = init_at(&dir).unwrap();
+        assert_eq!(load_quick_window_geometry(&conn), Some(geometry));
+    }
+
+    #[test]
+    fn quick_window_geometry_updates_in_place() {
+        let dir = test_dir();
+        let conn = init_at(&dir).unwrap();
+        let first = QuickWindowGeometry {
+            x: 10,
+            y: 10,
+            width: 320,
+            height: 420,
+        };
+        let moved = QuickWindowGeometry {
+            x: 1200,
+            y: 700,
+            width: 380,
+            height: 500,
+        };
+        save_quick_window_geometry(&conn, &first).unwrap();
+        save_quick_window_geometry(&conn, &moved).unwrap();
+        // The second save overwrites, never stacks.
+        assert_eq!(load_quick_window_geometry(&conn), Some(moved));
+    }
+
+    #[test]
+    fn quick_window_geometry_ignores_nonsense_values() {
+        let dir = test_dir();
+        let conn = init_at(&dir).unwrap();
+        // Missing keys read back as None (fresh database).
+        assert_eq!(load_quick_window_geometry(&conn), None);
+        // Unparsable values are ignored.
+        conn.execute("INSERT INTO meta (key, value) VALUES (?1, ?2)", params![KEY_QLW_X, "abc"])
+            .unwrap();
+        assert_eq!(load_quick_window_geometry(&conn), None);
+        // A size no window could ever have is ignored — a leftover from a
+        // broken build must never push the window off-screen.
+        let geometry = QuickWindowGeometry {
+            x: 0,
+            y: 0,
+            width: 999_999,
+            height: 460,
+        };
+        save_quick_window_geometry(&conn, &geometry).unwrap();
+        assert_eq!(load_quick_window_geometry(&conn), None);
+        // So is a position leagues off any monitor.
+        let geometry = QuickWindowGeometry {
+            x: 9_000_000,
+            y: 0,
+            width: 340,
+            height: 460,
+        };
+        save_quick_window_geometry(&conn, &geometry).unwrap();
+        assert_eq!(load_quick_window_geometry(&conn), None);
     }
 }

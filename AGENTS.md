@@ -16,13 +16,21 @@ Read this first. These rules exist so every session (including fresh ones) build
   - **Working copy (develop here):** `C:\Sprout`
 - **Never work directly on the share.** UNC paths break `.cmd`/`.bat` (npm, cargo helpers) — builds fail with "UNC paths are not supported". Always work in `C:\Sprout`.
 - **Never delete or restructure anything on the share.** The share is the fallback if the working copy messes up.
-- After finishing changes in `C:\Sprout`, sync back with add/update-only robocopy (never `/MIR`, which deletes):
+- **Sync with `tools\sync.ps1`, never raw robocopy.** The share's git working tree is owned by the other device (the only git client); a blind robocopy overwrites whatever it committed and produces merge conflicts. The script snapshots the share's content hashes at session start and refuses to overwrite any file the other device changed mid-session — divergences are reported as `SHARE-NEWER` for explicit resolution:
 
 ```powershell
-robocopy "C:\Sprout" "\\vmware-host\Shared Folders\Projects\Sprout" /E /R:1 /W:1 /NFL /NDL /NJH /NP /XD node_modules target build .svelte-kit .vscode
+# session start (refreshes C:\Sprout from the share, then snapshots it)
+tools\sync.ps1 -Down
+# session end (copies only what we changed, guarded by the snapshot)
+tools\sync.ps1 -Up
 ```
 
-- Verify the sync with the same command plus `/L` (list-only) — expect `Copied: 0` when in sync.
+- Verify the sync by running `-Up` again — expect `0 copied` when in sync. Never run `-Up` without a snapshot; the script refuses.
+- The snapshot lives in `C:\Sprout\.sync-state.json` (excluded from the sync itself). If you must fall back to raw robocopy, add `/XF .sync-state.json` to the command below — and know that it silently clobbers newer share content:
+
+```powershell
+robocopy "C:\Sprout" "\\vmware-host\Shared Folders\Projects\Sprout" /E /R:1 /W:1 /NFL /NDL /NJH /NP /XD node_modules target build .svelte-kit .vscode /XF .sync-state.json
+```
 
 ## Toolchain (already installed on this machine)
 
@@ -60,9 +68,10 @@ copied to the distribution folder `dist\` (both locations).
 4. Copy (overwrite) both into `C:\Sprout\dist\` — the distribution folder.
 5. Cleanup: run the "Cleanup (device storage)" step below — AFTER step 4, so
    the fresh exe is safe in `dist\`.
-6. Sync to the share with the robocopy command above — note its `/XD` list
-   excludes `node_modules target build .svelte-kit .vscode`, NOT `dist`, so
-   the new installers reach the share. Verify with `/L` (expect `Copied: 0`).
+6. Sync to the share with `tools\sync.ps1 -Up` (the script's exclusions keep
+   `node_modules target build .svelte-kit .vscode` off the share, NOT `dist`,
+   so the new installers reach it). Verify with a second `-Up` — expect
+   `0 copied`.
 
 ## Cleanup (device storage)
 
@@ -87,4 +96,4 @@ here is deleted from the repo or the share.
 
 - `src/` — Svelte 5 frontend (`lib/styles/tokens.css` = design tokens; `lib/components/` = accessible component foundation; `routes/+page.svelte` = Library view).
 - `src-tauri/src/` — Rust backend (`domain.rs` = domain model, `db.rs` = lazy SQLite (empty on first run — ADR-0008), `engine/` = PlatformEngine strategy seam, `lib.rs` = Tauri commands).
-- `docs/` — CONTEXT.md (glossary), specs/, adr/, research/, release/ (parity gate record + archived legacy log). `tools/` — parity compare + parity preset. `.scratch/sprout-app/issues/` — ticket tracker (mark ACs done as you go).
+- `docs/` — CONTEXT.md (glossary), specs/, adr/, research/, release/ (parity gate record + archived legacy log). `tools/` — parity compare, parity preset, sync.ps1 (guarded share sync). `.scratch/sprout-app/issues/` — ticket tracker (mark ACs done as you go).

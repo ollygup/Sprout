@@ -4,11 +4,11 @@
 
 **Blocked by:** 50 — Quick Actions: storage and runner
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] New NavRail entry "Quick Actions" (sibling of Quick Launch) rendering the list from the storage commands
-- [ ] Compose/add form: name, multi-line command, optional working directory, Test button reporting exit code + output (prior art: CommandFormDialog and the Launch entry Test button); validation messages per the plain-technical copy style
-- [ ] Reorder and remove actions; removal is immediate with a confirm dialog only when it adds value (prior art: Launch page context menu patterns)
-- [ ] Empty state inviting the first action; list shows actions in stored order with names readable at a glance
-- [ ] Reuses existing components (TextInput, Select, Button, IconButton, ContextMenu, EmptyState, Dialog/ConfirmDialog); any new shared component goes through the component foundation and the AGENTS.md design rule
-- [ ] `cargo test` green; `npm run check` 0 errors; synced to the share
+- [x] New NavRail entry "Quick Actions" (sibling of Quick Launch) rendering the list from the storage commands
+- [x] Compose/add form: name, multi-line command, optional working directory, Test button reporting exit code + output (prior art: CommandFormDialog and the Launch entry Test button); validation messages per the plain-technical copy style
+- [x] Reorder and remove actions; removal is immediate with a confirm dialog only when it adds value (prior art: Launch page context menu patterns)
+- [x] Empty state inviting the first action; list shows actions in stored order with names readable at a glance
+- [x] Reuses existing components (TextInput, Select, Button, IconButton, ContextMenu, EmptyState, Dialog/ConfirmDialog); any new shared component goes through the component foundation and the AGENTS.md design rule
+- [x] `cargo test` green; `npm run check` 0 errors; synced to the share
