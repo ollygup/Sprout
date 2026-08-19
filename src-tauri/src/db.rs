@@ -108,6 +108,13 @@ fn migrate(conn: &Connection) -> Result<()> {
              show_window INTEGER NOT NULL DEFAULT 0,
              desktop_id  TEXT,
              position    INTEGER NOT NULL DEFAULT 0
+         );
+         CREATE TABLE IF NOT EXISTS quick_actions (
+             id       INTEGER PRIMARY KEY AUTOINCREMENT,
+             name     TEXT NOT NULL,
+             command  TEXT NOT NULL,
+             cwd      TEXT,
+             position INTEGER NOT NULL DEFAULT 0
          );",
     )?;
     ensure_preset_imported_column(conn)?;
@@ -1620,6 +1627,87 @@ mod tests {
         };
         crate::launch::create_launch_entry(&conn, &entry).unwrap();
         assert_eq!(crate::launch::list_launch_entries(&conn).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn migrates_databases_created_before_quick_actions() {
+        let dir = test_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        // Simulate a pre-50 database: the full pre-38 schema without the
+        // quick_actions table, plus one existing product row.
+        {
+            let conn = Connection::open(dir.join("sprout.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE meta (
+                     key   TEXT PRIMARY KEY,
+                     value TEXT NOT NULL
+                 );
+                 CREATE TABLE products (
+                     id                     TEXT PRIMARY KEY,
+                     name                   TEXT NOT NULL,
+                     winget_id              TEXT,
+                     install_location_hint  TEXT,
+                     install_dir            TEXT,
+                     created_at             INTEGER NOT NULL DEFAULT 0,
+                     updated_at             INTEGER NOT NULL DEFAULT 0
+                 );
+                 CREATE TABLE product_env (
+                     product_id TEXT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+                     action     TEXT NOT NULL CHECK (action IN ('set', 'prepend')),
+                     name       TEXT NOT NULL,
+                     value      TEXT NOT NULL
+                 );
+                 CREATE TABLE presets (
+                     id          TEXT PRIMARY KEY,
+                     name        TEXT NOT NULL,
+                     description TEXT NOT NULL,
+                     version     TEXT NOT NULL,
+                     data        TEXT NOT NULL,
+                     imported    INTEGER NOT NULL DEFAULT 0
+                 );
+                 CREATE TABLE runs (
+                     id          TEXT PRIMARY KEY,
+                     started_at  INTEGER NOT NULL,
+                     finished_at INTEGER NOT NULL,
+                     presets     TEXT NOT NULL,
+                     outcome     TEXT NOT NULL
+                 );
+                 CREATE TABLE run_results (
+                     run_id          TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+                     product_id      TEXT NOT NULL,
+                     product_name    TEXT NOT NULL,
+                     status          TEXT NOT NULL,
+                     detail          TEXT NOT NULL,
+                     reboot_required INTEGER NOT NULL DEFAULT 0,
+                     log_path        TEXT NOT NULL
+                 );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO products (id, name, winget_id, created_at, updated_at)
+                 VALUES ('vscode', 'Visual Studio Code', 'Microsoft.VisualStudioCode', 0, 0)",
+                [],
+            )
+            .unwrap();
+        }
+        let conn = init_at(&dir).unwrap();
+        let has_table: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'quick_actions'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_table, 1);
+        // Pre-existing data survives, and the new table is usable.
+        assert_eq!(get_product(&conn, "vscode").unwrap().unwrap().product.name, "Visual Studio Code");
+        let action = crate::quick_actions::QuickActionInput {
+            name: "docker-start".into(),
+            command: "docker compose up -d".into(),
+            cwd: None,
+        };
+        crate::quick_actions::create_quick_action(&conn, &action).unwrap();
+        assert_eq!(crate::quick_actions::list_quick_actions(&conn).unwrap().len(), 1);
     }
 
     #[test]

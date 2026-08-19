@@ -8,6 +8,7 @@ mod import_export;
 mod launch;
 mod logs;
 mod plan;
+mod quick_actions;
 mod run;
 mod settings;
 mod tray;
@@ -640,6 +641,92 @@ fn create_virtual_desktop(state: State<'_, AppState>) -> Result<Option<String>, 
     Ok(state.launcher.create_desktop())
 }
 
+/// Lists every Quick Action in list order (ticket 50).
+#[tauri::command]
+fn list_quick_actions(
+    state: State<'_, AppState>,
+) -> Result<Vec<quick_actions::QuickAction>, String> {
+    let conn = lock(&state)?;
+    quick_actions::list_quick_actions(&conn).map_err(|e| e.to_string())
+}
+
+/// Appends a Quick Action at the end of the list, validated first — a blank
+/// name or command, or a relative working directory, never reaches the list
+/// (ticket 50).
+#[tauri::command]
+fn create_quick_action(
+    state: State<'_, AppState>,
+    action: quick_actions::QuickActionInput,
+) -> Result<quick_actions::QuickAction, String> {
+    quick_actions::validate_quick_action(&action)?;
+    let conn = lock(&state)?;
+    quick_actions::create_quick_action(&conn, &action).map_err(|e| e.to_string())
+}
+
+/// Replaces a Quick Action's command and metadata in place, validated first;
+/// position is untouched — reorders go through `move_quick_action` (ticket
+/// 50).
+#[tauri::command]
+fn update_quick_action(
+    state: State<'_, AppState>,
+    action: quick_actions::QuickAction,
+) -> Result<(), String> {
+    quick_actions::validate_quick_action(&action.action)?;
+    let conn = lock(&state)?;
+    quick_actions::update_quick_action(&conn, &action).map_err(|e| e.to_string())
+}
+
+/// Removes a Quick Action and compacts the list (ticket 50).
+#[tauri::command]
+fn delete_quick_action(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+    let conn = lock(&state)?;
+    quick_actions::delete_quick_action(&conn, id).map_err(|e| e.to_string())
+}
+
+/// Moves a Quick Action to another position in the list, clamped (ticket 50).
+#[tauri::command]
+fn move_quick_action(
+    state: State<'_, AppState>,
+    id: i64,
+    to_position: i64,
+) -> Result<(), String> {
+    let conn = lock(&state)?;
+    quick_actions::move_quick_action(&conn, id, to_position).map_err(|e| e.to_string())
+}
+
+/// Runs one stored Quick Action fire-and-forget (ticket 50): the action's
+/// PowerShell command, hidden (`CREATE_NO_WINDOW`), working directory honored
+/// when set, spawned on a background thread so the UI never blocks. Current
+/// user, no elevation, no status UI, no notification.
+#[tauri::command]
+fn run_quick_action(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+    let conn = lock(&state)?;
+    let action = quick_actions::get_quick_action(&conn, id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| {
+            "This quick action is no longer in the list — refresh and try again".to_string()
+        })?;
+    drop(conn);
+    std::thread::spawn(move || {
+        let _ = quick_actions::spawn_quick_action(&action.action);
+    });
+    Ok(())
+}
+
+/// One Test click in the Quick Actions editor (ticket 50, prior art: the
+/// Launch entry Test button, ticket 41): runs the command under PowerShell,
+/// timeboxed, and reports exit code + captured output. A command that
+/// outlives the box comes back timed out — honestly not headless-verifiable,
+/// never passed.
+#[tauri::command]
+fn test_quick_action(command: String, cwd: Option<String>) -> Result<launch::TestResult, String> {
+    if command.trim().is_empty() {
+        return Err("The command is empty — nothing to test.".into());
+    }
+    quick_actions::validate_cwd(cwd.as_deref())?;
+    Ok(quick_actions::test_quick_action(&command, cwd.as_deref()))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Lazy init: %LOCALAPPDATA%\Sprout\sprout.db + logs\ are created here on
@@ -734,7 +821,14 @@ pub fn run() {
             list_launch_candidates,
             candidate_icon,
             list_virtual_desktops,
-            create_virtual_desktop
+            create_virtual_desktop,
+            list_quick_actions,
+            create_quick_action,
+            update_quick_action,
+            delete_quick_action,
+            move_quick_action,
+            run_quick_action,
+            test_quick_action
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

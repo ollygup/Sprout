@@ -59,3 +59,25 @@ _Avoid_: Install location hint (a Product property, not a setting), install path
 **Verify command**:
 A command declared on a Requirement and run after install; a non-zero exit or non-matching output fails the Requirement.
 _Avoid_: Post-install check
+
+## Quick access (tray, window, dock)
+
+**Launch entry**:
+A single item in the Quick Launch list — either a picked app (`.lnk`/`.exe`, launched as-is) or a user-written command (PowerShell/cmd/no-shell, optional show-window) — optionally assigned to a virtual-desktop group. Machine-local; never part of Presets or exports.
+_Avoid_: App entry, shortcut
+
+**Quick Launch**:
+The machine-local list of Launch entries that the tray one-click launcher and the Quick Launch window start. Never part of Presets, Plan, Run, or exports.
+_Avoid_: Quick start, launcher
+
+**Quick Launch window**:
+The miniature window opened from the tray icon with two tabs — Quick Launch (a single Start button that starts the whole Quick Launch list) and Quick Actions — for read-only, fast access. It floats as a window (hides to the tray on blur) or docks as a Win32 AppBar (the Quick Launch dock) on the left/right screen edge. It has no configuration surface; all configuration happens in the main app.
+_Avoid_: Miniature window, palette, tray menu
+
+**Quick Launch dock**:
+The Quick Launch window's docked form — a Win32 AppBar reserving a slim strip on a screen edge, either auto-hiding (slides to a sliver when not hovered, like the taskbar) or fixed (always visible). Never part of Presets or exports.
+_Avoid_: Sidebar, tray bar, launcher bar
+
+**Quick Action**:
+A machine-local, user-authored named command (PowerShell, optional working directory) run fire-and-forget from the Quick Launch window's Quick Actions tab (e.g. "docker start" → `docker compose up -d`); runs hidden as the current user with no elevation and no status UI. Configured in the main app's Quick Actions page; never part of Presets, Plan, Run, or exports.
+_Avoid_: Action (a Plan term), command entry, script

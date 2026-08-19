@@ -12,6 +12,8 @@ import type {
   PresetRecord,
   Product,
   ProductPresetImpact,
+  QuickAction,
+  QuickActionInput,
   Requirement,
   RunProgressChunk,
   RunRecord,
@@ -222,4 +224,42 @@ export function listVirtualDesktops(): Promise<VirtualDesktops> {
  * unsupported or the OS refused. */
 export function createVirtualDesktop(): Promise<string | null> {
   return invoke<string | null>("create_virtual_desktop");
+}
+
+export function listQuickActions(): Promise<QuickAction[]> {
+  return invoke<QuickAction[]>("list_quick_actions");
+}
+
+export function createQuickAction(action: QuickActionInput): Promise<QuickAction> {
+  return invoke<QuickAction>("create_quick_action", { action });
+}
+
+export function updateQuickAction(action: QuickAction): Promise<void> {
+  return invoke<void>("update_quick_action", { action });
+}
+
+export function deleteQuickAction(id: number): Promise<void> {
+  return invoke<void>("delete_quick_action", { id });
+}
+
+export function moveQuickAction(id: number, toPosition: number): Promise<void> {
+  return invoke<void>("move_quick_action", { id, toPosition });
+}
+
+/** Runs one stored Quick Action fire-and-forget (ticket 50): hidden
+ * PowerShell, working directory honored, current user, no elevation, no
+ * status UI, no notification. */
+export function runQuickAction(id: number): Promise<void> {
+  return invoke<void>("run_quick_action", { id });
+}
+
+/** One Test click in the Quick Actions editor (ticket 50): runs the command
+ * under PowerShell, timeboxed, and returns exit code + captured output. A
+ * timed-out result means the command is interactive — not
+ * headless-verifiable. */
+export function testQuickAction(
+  command: string,
+  cwd: string | null
+): Promise<LaunchCommandTest> {
+  return invoke<LaunchCommandTest>("test_quick_action", { command, cwd });
 }

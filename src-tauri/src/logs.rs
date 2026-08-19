@@ -319,6 +319,8 @@ mod tests {
                 theme: "system".to_string(),
                 install_dir: String::new(),
                 launch_concurrency: 8,
+                dock_mode: settings::DEFAULT_DOCK_MODE.to_string(),
+                dock_edge: settings::DEFAULT_DOCK_EDGE.to_string(),
             },
         )
         .unwrap();

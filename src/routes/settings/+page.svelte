@@ -5,6 +5,7 @@
   import Button from "$lib/components/Button.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
   import Notice from "$lib/components/Notice.svelte";
+  import Select from "$lib/components/Select.svelte";
   import { open } from "@tauri-apps/plugin-dialog";
   import { theme, restoreTheme, selectTheme } from "$lib/theme.svelte";
   import type { ThemeMode } from "$lib/theme.svelte";
@@ -15,11 +16,23 @@
     { mode: "dark", label: "Dark" },
   ];
 
+  const dockModeOptions: { value: string; label: string }[] = [
+    { value: "auto-hide", label: "Auto-hide" },
+    { value: "fixed", label: "Fixed" },
+  ];
+
+  const dockEdgeOptions: { value: string; label: string }[] = [
+    { value: "left", label: "Left" },
+    { value: "right", label: "Right" },
+  ];
+
   let settings: Settings | null = $state(null);
   let timeout = $state(10);
   let retention = $state(30);
   let installDir = $state("");
   let launchConcurrency = $state(8);
+  let dockMode = $state("auto-hide");
+  let dockEdge = $state("left");
   let loading = $state(true);
   let loadFailed = $state(false);
   let saving = $state(false);
@@ -41,6 +54,8 @@
       retention = loaded.log_retention_days;
       installDir = loaded.install_dir;
       launchConcurrency = loaded.launch_concurrency;
+      dockMode = loaded.dock_mode;
+      dockEdge = loaded.dock_edge;
       const persisted = loaded.theme as ThemeMode;
       if (persisted === "system" || persisted === "light" || persisted === "dark") {
         if (persisted !== theme.mode) restoreTheme(persisted);
@@ -89,6 +104,8 @@
         theme: theme.mode,
         install_dir: installDir.trim(),
         launch_concurrency: Math.min(50, Math.max(1, Math.floor(launchConcurrency) || 1)),
+        dock_mode: dockMode,
+        dock_edge: dockEdge,
       });
       saved = "Saved — the next run honors these.";
       // Reflect any clamping back into the fields.
@@ -262,6 +279,41 @@
             oninput={(e) => (launchConcurrency = Number((e.target as HTMLInputElement).value))}
           />
           <span class="knob__unit">apps</span>
+        </div>
+      </article>
+
+      <article class="knob">
+        <div class="knob__body">
+          <label class="knob__label" for="dock-mode">Dock mode</label>
+          <p class="knob__hint">
+            How the Quick Launch dock behaves when docked to a screen edge. Auto-hide slides it to a
+            sliver when not hovered and reclaims the space; fixed keeps the strip permanently
+            reserved, like a pinned taskbar.
+          </p>
+        </div>
+        <div class="knob__input">
+          <Select id="dock-mode" variant="small" value={dockMode} onchange={(v) => (dockMode = v)}>
+            {#each dockModeOptions as option (option.value)}
+              <option value={option.value}>{option.label}</option>
+            {/each}
+          </Select>
+        </div>
+      </article>
+
+      <article class="knob">
+        <div class="knob__body">
+          <label class="knob__label" for="dock-edge">Default dock edge</label>
+          <p class="knob__hint">
+            Which screen edge the dock attaches to when first docked. The dock's own left/right
+            switch overrides it per monitor.
+          </p>
+        </div>
+        <div class="knob__input">
+          <Select id="dock-edge" variant="small" value={dockEdge} onchange={(v) => (dockEdge = v)}>
+            {#each dockEdgeOptions as option (option.value)}
+              <option value={option.value}>{option.label}</option>
+            {/each}
+          </Select>
         </div>
       </article>
 

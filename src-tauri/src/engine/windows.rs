@@ -65,7 +65,9 @@ const DEFAULT_SUCCESS_CODE: i32 = 0;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Applies `CREATE_NO_WINDOW` to a Command builder before it is spawned.
-fn hidden(mut command: Command) -> Command {
+/// Shared with the Quick Actions runner (ticket 50) — every subprocess in the
+/// app carries the flag, so a run never flashes a console window.
+pub(crate) fn hidden(mut command: Command) -> Command {
     command.creation_flags(CREATE_NO_WINDOW);
     command
 }
@@ -690,12 +692,24 @@ pub struct WingetReason {
 /// runner's behavior) and the run is recorded as timed out — a hung installer
 /// must never wedge the machine.
 pub fn run_timed_process(exe: &str, args: &[String], timeout: Duration) -> ProcessRun {
-    let mut child = match hidden(Command::new(exe))
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
+    run_timed_process_in(None, exe, args, timeout)
+}
+
+/// The same as [`run_timed_process`] with an explicit working directory —
+/// `cwd` `None` inherits the caller's. Shared with the Quick Actions Test
+/// (ticket 50), whose commands honor their configured directory.
+pub fn run_timed_process_in(
+    cwd: Option<&str>,
+    exe: &str,
+    args: &[String],
+    timeout: Duration,
+) -> ProcessRun {
+    let mut command = hidden(Command::new(exe));
+    command.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    let mut child = match command.spawn() {
         Ok(child) => child,
         Err(e) => {
             return ProcessRun {

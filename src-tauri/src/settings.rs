@@ -16,7 +16,13 @@
 //!   (ADR-0009);
 //! - `launch_concurrency` — the Quick Launch cap (ticket 37/42): how many
 //!   Launch entries may be in flight at once; the rest queue until a slot
-//!   frees.
+//!   frees;
+//! - `dock_mode` — the Quick Launch dock's visibility mode (tickets 49/50):
+//!   "auto-hide" slides to a sliver when not hovered (default), "fixed" keeps
+//!   the strip permanently reserved;
+//! - `dock_edge` — the screen edge the Quick Launch dock attaches to by
+//!   default: "left" or "right" (the window's own live controls override it
+//!   per monitor).
 
 use rusqlite::{params, Connection, Result};
 
@@ -30,12 +36,19 @@ pub const DEFAULT_RETENTION_DAYS: u32 = 30;
 pub const DEFAULT_THEME: &str = "system";
 /// How many Quick Launch entries may launch at once before the rest queue.
 pub const DEFAULT_LAUNCH_CONCURRENCY: u32 = 8;
+/// The dock's default visibility mode: auto-hide slides to a sliver when not
+/// hovered; "fixed" keeps the strip permanently reserved (ADR-0011).
+pub const DEFAULT_DOCK_MODE: &str = "auto-hide";
+/// The dock's default screen edge.
+pub const DEFAULT_DOCK_EDGE: &str = "left";
 
 const KEY_TIMEOUT: &str = "settings.timeout_minutes";
 const KEY_RETENTION: &str = "settings.log_retention_days";
 const KEY_THEME: &str = "settings.theme";
 const KEY_INSTALL_DIR: &str = "settings.install_dir";
 const KEY_LAUNCH_CONCURRENCY: &str = "launch.concurrency";
+const KEY_DOCK_MODE: &str = "dock.mode";
+const KEY_DOCK_EDGE: &str = "dock.edge";
 
 /// The persisted knobs. `u32` fields keep the frontend's number inputs safe;
 /// validation lives in [`Settings::validate`]. `install_dir` is empty when
@@ -51,6 +64,12 @@ pub struct Settings {
     /// The Quick Launch concurrency cap (ticket 37/42): entries beyond it
     /// queue until a slot frees.
     pub launch_concurrency: u32,
+    /// The Quick Launch dock's visibility mode (tickets 49/50): "auto-hide"
+    /// or "fixed".
+    pub dock_mode: String,
+    /// The screen edge the Quick Launch dock attaches to by default (tickets
+    /// 49/50): "left" or "right".
+    pub dock_edge: String,
 }
 
 impl Default for Settings {
@@ -61,6 +80,8 @@ impl Default for Settings {
             theme: DEFAULT_THEME.to_string(),
             install_dir: String::new(),
             launch_concurrency: DEFAULT_LAUNCH_CONCURRENCY,
+            dock_mode: DEFAULT_DOCK_MODE.to_string(),
+            dock_edge: DEFAULT_DOCK_EDGE.to_string(),
         }
     }
 }
@@ -91,11 +112,28 @@ pub fn validate_install_dir(install_dir: &str) -> std::result::Result<(), String
     }
 }
 
+/// Accepts only the two dock visibility modes the dock offers (ADR-0011).
+pub fn validate_dock_mode(mode: &str) -> std::result::Result<(), String> {
+    match mode {
+        "auto-hide" | "fixed" => Ok(()),
+        _ => Err("Dock mode must be \"auto-hide\" or \"fixed\"".into()),
+    }
+}
+
+/// Accepts only the two screen edges the dock attaches to.
+pub fn validate_dock_edge(edge: &str) -> std::result::Result<(), String> {
+    match edge {
+        "left" | "right" => Ok(()),
+        _ => Err("Dock edge must be \"left\" or \"right\"".into()),
+    }
+}
+
 impl Settings {
     /// Rejects values that would break a run or empty the log archive.
     /// Timeouts must be at least 1 minute and at most a day; retention at
     /// least 1 day and at most 10 years; the install directory, when set,
-    /// must be an absolute path.
+    /// must be an absolute path; the dock mode and edge must be one of the
+    /// offered choices.
     pub fn validate(&self) -> std::result::Result<(), String> {
         if !(1..=1440).contains(&self.default_timeout_minutes) {
             return Err("Default timeout must be between 1 and 1440 minutes (24 h)".into());
@@ -108,6 +146,8 @@ impl Settings {
         if !(1..=50).contains(&self.launch_concurrency) {
             return Err("Launch concurrency must be between 1 and 50".into());
         }
+        validate_dock_mode(&self.dock_mode)?;
+        validate_dock_edge(&self.dock_edge)?;
         Ok(())
     }
 }
@@ -144,12 +184,32 @@ pub fn load(conn: &Connection) -> Settings {
     let launch_concurrency = get(KEY_LAUNCH_CONCURRENCY)
         .filter(|value| (1..=50).contains(value))
         .unwrap_or(DEFAULT_LAUNCH_CONCURRENCY);
+    let dock_mode = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            params![KEY_DOCK_MODE],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .filter(|v| validate_dock_mode(v).is_ok())
+        .unwrap_or_else(|| DEFAULT_DOCK_MODE.to_string());
+    let dock_edge = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            params![KEY_DOCK_EDGE],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .filter(|v| validate_dock_edge(v).is_ok())
+        .unwrap_or_else(|| DEFAULT_DOCK_EDGE.to_string());
     Settings {
         default_timeout_minutes: get(KEY_TIMEOUT).unwrap_or(DEFAULT_TIMEOUT_MINUTES),
         log_retention_days: get(KEY_RETENTION).unwrap_or(DEFAULT_RETENTION_DAYS),
         theme: theme.unwrap_or_else(|| DEFAULT_THEME.to_string()),
         install_dir,
         launch_concurrency,
+        dock_mode,
+        dock_edge,
     }
 }
 
@@ -166,6 +226,8 @@ pub fn save(conn: &Connection, settings: &Settings) -> std::result::Result<(), S
     upsert(&tx, KEY_INSTALL_DIR, &settings.install_dir).map_err(|e| e.to_string())?;
     upsert(&tx, KEY_LAUNCH_CONCURRENCY, &settings.launch_concurrency.to_string())
         .map_err(|e| e.to_string())?;
+    upsert(&tx, KEY_DOCK_MODE, &settings.dock_mode).map_err(|e| e.to_string())?;
+    upsert(&tx, KEY_DOCK_EDGE, &settings.dock_edge).map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())
 }
 
@@ -216,6 +278,8 @@ mod tests {
         assert_eq!(load(&conn).log_retention_days, 30);
         assert_eq!(load(&conn).theme, DEFAULT_THEME);
         assert_eq!(load(&conn).install_dir, "");
+        assert_eq!(load(&conn).dock_mode, DEFAULT_DOCK_MODE);
+        assert_eq!(load(&conn).dock_edge, DEFAULT_DOCK_EDGE);
     }
 
     #[test]
@@ -227,6 +291,8 @@ mod tests {
             theme: "dark".to_string(),
             install_dir: r"D:\Apps".to_string(),
             launch_concurrency: 12,
+            dock_mode: "fixed".to_string(),
+            dock_edge: "right".to_string(),
         };
         {
             let conn = crate::db::init_at(&dir).unwrap();
@@ -262,6 +328,14 @@ mod tests {
         assert!(s.validate().is_err());
         s.launch_concurrency = 50;
         assert!(s.validate().is_ok());
+        s.dock_mode = "overlay".to_string();
+        assert!(s.validate().is_err());
+        s.dock_mode = DEFAULT_DOCK_MODE.to_string();
+        assert!(s.validate().is_ok());
+        s.dock_edge = "top".to_string();
+        assert!(s.validate().is_err());
+        s.dock_edge = DEFAULT_DOCK_EDGE.to_string();
+        assert!(s.validate().is_ok());
     }
 
     #[test]
@@ -273,6 +347,17 @@ mod tests {
         assert_eq!(load(&conn).launch_concurrency, DEFAULT_LAUNCH_CONCURRENCY);
         upsert(&conn, KEY_LAUNCH_CONCURRENCY, "99").unwrap();
         assert_eq!(load(&conn).launch_concurrency, DEFAULT_LAUNCH_CONCURRENCY);
+    }
+
+    #[test]
+    fn invalid_stored_dock_values_fall_back_to_defaults() {
+        let conn = conn();
+        // Broken values written by an older build must never reach the dock —
+        // they read back as the defaults.
+        upsert(&conn, KEY_DOCK_MODE, "overlay").unwrap();
+        assert_eq!(load(&conn).dock_mode, DEFAULT_DOCK_MODE);
+        upsert(&conn, KEY_DOCK_EDGE, "top").unwrap();
+        assert_eq!(load(&conn).dock_edge, DEFAULT_DOCK_EDGE);
     }
 
     #[test]
@@ -363,6 +448,8 @@ mod tests {
             theme: "dark".to_string(),
             install_dir: String::new(),
             launch_concurrency: 8,
+            dock_mode: DEFAULT_DOCK_MODE.to_string(),
+            dock_edge: DEFAULT_DOCK_EDGE.to_string(),
         };
         assert!(save(&conn, &bad).is_err());
         // Nothing was persisted.

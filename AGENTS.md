@@ -3,7 +3,11 @@
 Read this first. These rules exist so every session (including fresh ones) builds without surprises and never damages the source of truth.
 
 ## Default query
-- Always look for codegraph folder or codegraph in the root of the repository, if found, default to use codegraph for queries, if not fallback to grep method.
+- Use grep-based queries to explore the codebase.
+
+## Design rules
+
+- Every UI change must follow the `web-design-guidelines` and `frontend-design` skills and reuse the existing design system: tokens from `src/lib/styles/tokens.css` and components from `src/lib/components/`. No ad-hoc colors, type sizes, radii, or one-off component patterns; if a shared pattern genuinely doesn't fit, capture the deviation in the ticket and get it reviewed before shipping.
 
 ## Working copy rule (important)
 

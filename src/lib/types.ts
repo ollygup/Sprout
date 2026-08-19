@@ -268,6 +268,13 @@ export interface Settings {
   /** Quick Launch concurrency cap (ticket 38): how many Launch entries may
    * be in flight at once before the rest queue. */
   launch_concurrency: number;
+  /** The Quick Launch dock's visibility mode (tickets 49/50): "auto-hide"
+   * slides to a sliver when not hovered; "fixed" keeps the strip
+   * permanently reserved. */
+  dock_mode: string;
+  /** The screen edge the Quick Launch dock attaches to by default (tickets
+   * 49/50): "left" or "right". */
+  dock_edge: string;
 }
 
 /** What a Launch entry starts: a picked app (shortcut or exe) or a command
@@ -333,6 +340,23 @@ export interface VirtualDesktop {
   id: string;
   /** The Windows name when the desktop has one; "Desktop N" otherwise. */
   name: string;
+}
+
+/** The editable shape of a Quick Action (ticket 50): a named PowerShell
+ * command with an optional working directory, run fire-and-forget from the
+ * Quick Launch window's Quick Actions tab. Machine-local — never part of
+ * Presets, Plan, Run, or exports. */
+export interface QuickActionInput {
+  name: string;
+  /** The PowerShell script, multi-line allowed. */
+  command: string;
+  /** Working directory the command starts in; null = the app's own. */
+  cwd: string | null;
+}
+
+/** A Quick Action as stored: the input plus its library id. */
+export interface QuickAction extends QuickActionInput {
+  id: number;
 }
 
 /** The assignment surface's gate + list (ticket 44): `supported` is false
