@@ -1,0 +1,313 @@
+/* Sprout design tokens — the "Planting Ledger" (ticket 11).
+   A dual-mode token system sourced from Notion's shipped in-app palette:
+   light (#FFFFFF page, #F7F6F3 surface, #37352F text, alpha borders) and
+   dark (#191919 / #252525, alpha-white text and borders). The theme store
+   (ticket 31) pins the mode on <html> as data-theme — "system" resolves to
+   light or dark via prefers-color-scheme; the tokens never read the media
+   query themselves.
+   Every value in the UI derives from this file; see docs/CONTEXT.md glossary.
+   Contrast for every pair is verified by tools/contrast-check.mjs (WCAG AA). */
+
+@font-face {
+  font-family: "Figtree";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("../fonts/figtree-400.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Figtree";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("../fonts/figtree-500.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Figtree";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("../fonts/figtree-600.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("../fonts/jetbrains-mono-400.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("../fonts/jetbrains-mono-500.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("../fonts/jetbrains-mono-700.woff2") format("woff2");
+}
+
+:root {
+  color-scheme: light;
+
+  /* type */
+  --font-display: "Figtree", system-ui, "Segoe UI", sans-serif;
+  --font-body: "Figtree", system-ui, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
+
+  /* scale */
+  --text-2xs: 0.625rem;   /* 10px  micro meta */
+  --text-xs: 0.6875rem;   /* 11px  meta */
+  --text-sm: 0.8125rem;   /* 13px  body small */
+  --text-base: 0.875rem;  /* 14px  body default */
+  --text-lg: 1.0625rem;   /* 17px  packet names */
+  --text-xl: 1.25rem;     /* 20px  section titles */
+  --text-2xl: 1.75rem;    /* 28px  page titles */
+  --leading-tight: 1.25;
+  --leading-body: 1.5;
+  --tracking-display: -0.01em;
+  --tracking-mono: 0.06em;
+
+  /* space */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+
+  /* shape + shadow */
+  --radius-sm: 3px;
+  --radius: 5px;
+  --radius-lg: 8px;
+  --radius-pill: 999px;
+
+  /* motion */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --dur-fast: 120ms;
+  --dur: 200ms;
+
+  /* palette — light */
+  --bg-page: #ffffff;
+  --bg-surface: #f7f6f3;
+  --bg-sunken: #efeeeb;
+  --bg-hover: #f1f1ef;
+
+  --text: #37352f;
+  --text-muted: #6f6e69;
+  --text-faint: #9b9a97;
+
+  --border: rgba(55, 53, 47, 0.09);
+  --border-strong: rgba(55, 53, 47, 0.16);
+
+  --accent: #0f7b6c;
+  --accent-hover: #0b6356;
+  --accent-tint: rgba(15, 123, 108, 0.08);
+  --accent-tint-border: rgba(15, 123, 108, 0.45);
+  --on-accent: #ffffff;
+
+  --warm: #9f6b53;
+  --warm-text: #8f5d46;
+  --warm-tint: rgba(159, 107, 83, 0.09);
+  --warm-tint-border: rgba(159, 107, 83, 0.45);
+
+  --danger: #e03e3d;
+  --danger-text: #c43030;
+  --danger-tint: rgba(224, 62, 61, 0.09);
+  --danger-tint-border: rgba(224, 62, 61, 0.45);
+
+  --info: #2383e2;
+  --info-text: #1e6fbf;
+  --info-tint: rgba(35, 131, 226, 0.09);
+  --info-tint-border: rgba(35, 131, 226, 0.45);
+
+  --warn: #dfab01;
+  --warn-text: #825f00;
+  --warn-tint: rgba(223, 171, 1, 0.12);
+  --warn-tint-border: rgba(130, 95, 0, 0.45);
+
+  --gray: #787774;
+
+  /* brand (ticket 24) — the sprout glyph: stem + two leaves in botanical
+     greens on the neutral surface. Values verified by tools/contrast-check
+     for WCAG 3:1 on both the light field (#f7f6f3) and the page. */
+  --brand-stem: #2f5a44;
+  --brand-leaf-deep: #3f8a53;
+  --brand-leaf-light: #55995f;
+
+  /* run outcome tiers (ticket 16) — mapped onto the Notion semantic set
+     above; every tier also carries a text label, color is never the only
+     channel. */
+  --status-applied: var(--accent);
+  --status-applied-text: var(--accent);
+  --status-applied-tint: var(--accent-tint);
+  --status-applied-tint-border: var(--accent-tint-border);
+  --status-notes: var(--warn);
+  --status-notes-text: var(--warn-text);
+  --status-notes-tint: var(--warn-tint);
+  --status-notes-tint-border: var(--warn-tint-border);
+  --status-cancelled: var(--warm);
+  --status-cancelled-text: var(--warm-text);
+  --status-cancelled-tint: var(--warm-tint);
+  --status-cancelled-tint-border: var(--warm-tint-border);
+  --status-failed: var(--danger);
+  --status-failed-text: var(--danger-text);
+  --status-failed-tint: var(--danger-tint);
+  --status-failed-tint-border: var(--danger-tint-border);
+
+  --ring: var(--accent);
+  --ring-glow: 0 0 0 2px rgba(15, 123, 108, 0.25);
+  --scrim: rgba(15, 15, 15, 0.45);
+  --shadow-card: 0 1px 2px rgba(15, 15, 15, 0.06);
+  --shadow-dialog: 0 12px 40px rgba(15, 15, 15, 0.3);
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  /* palette — dark */
+  --bg-page: #191919;
+  --bg-surface: #252525;
+  --bg-sunken: #2e2e2e;
+  --bg-hover: #2e2e2e;
+
+  --text: rgba(255, 255, 255, 0.81);
+  --text-muted: rgba(255, 255, 255, 0.5);
+  --text-faint: rgba(255, 255, 255, 0.28);
+
+  --border: rgba(255, 255, 255, 0.09);
+  --border-strong: rgba(255, 255, 255, 0.16);
+
+  --accent: #4dab9a;
+  --accent-hover: #5ab8a7;
+  --accent-tint: rgba(77, 171, 154, 0.14);
+  --accent-tint-border: rgba(77, 171, 154, 0.45);
+  --on-accent: #06312b;
+
+  --warm: #b58d74;
+  --warm-text: #c79c81;
+  --warm-tint: rgba(181, 141, 116, 0.14);
+  --warm-tint-border: rgba(181, 141, 116, 0.45);
+
+  --danger: #eb5757;
+  --danger-text: #f26d6d;
+  --danger-tint: rgba(235, 87, 87, 0.14);
+  --danger-tint-border: rgba(235, 87, 87, 0.45);
+
+  --info: #4483f7;
+  --info-text: #6ba6f8;
+  --info-tint: rgba(68, 131, 247, 0.14);
+  --info-tint-border: rgba(68, 131, 247, 0.45);
+
+  --warn: #e5a754;
+  --warn-text: #e5a754;
+  --warn-tint: rgba(229, 167, 84, 0.14);
+  --warn-tint-border: rgba(229, 167, 84, 0.45);
+
+  --gray: #9b9a97;
+
+  /* brand (ticket 24) — dark-mode greens: lighter so they read on the
+     dark neutral field and page. */
+  --brand-stem: #8fd6a8;
+  --brand-leaf-deep: #66ab5f;
+  --brand-leaf-light: #7dbf69;
+
+  /* run outcome tiers (ticket 16) — same mapping in dark mode. */
+  --status-applied: var(--accent);
+  --status-applied-text: var(--accent);
+  --status-applied-tint: var(--accent-tint);
+  --status-applied-tint-border: var(--accent-tint-border);
+  --status-notes: var(--warn);
+  --status-notes-text: var(--warn-text);
+  --status-notes-tint: var(--warn-tint);
+  --status-notes-tint-border: var(--warn-tint-border);
+  --status-cancelled: var(--warm);
+  --status-cancelled-text: var(--warm-text);
+  --status-cancelled-tint: var(--warm-tint);
+  --status-cancelled-tint-border: var(--warm-tint-border);
+  --status-failed: var(--danger);
+  --status-failed-text: var(--danger-text);
+  --status-failed-tint: var(--danger-tint);
+  --status-failed-tint-border: var(--danger-tint-border);
+
+  --ring: var(--accent);
+  --ring-glow: 0 0 0 2px rgba(77, 171, 154, 0.3);
+  --scrim: rgba(0, 0, 0, 0.6);
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-dialog: 0 12px 40px rgba(0, 0, 0, 0.55);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  line-height: var(--leading-body);
+  color: var(--text);
+  background: var(--bg-page);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+h1,
+h2,
+h3 {
+  margin: 0;
+  font-weight: 600;
+  letter-spacing: var(--tracking-display);
+}
+
+::selection {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: var(--radius);
+  border: 2px solid var(--bg-page);
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

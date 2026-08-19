@@ -1,0 +1,16 @@
+# 20 — Plan page: run stage
+
+**What to build:** The Plan page's third stage rebuilt on the new shell. The Run button carries the promise line: "Checks what you've already got, then installs only what's missing or outdated." Live progress renders check-then-act per requirement — each row visibly goes Checking… then Already good — skipped / Installing… / Upgrading… — so "validate first" is seen, not just promised. Cancelling requires confirmation and is honest about its behavior ("Stops after the current step"). The results section groups by outcome with reboot notes, links into History, and preserves "Run again". No worker/UAC jargon in user-facing copy.
+
+**Blocked by:** 18 — Run awareness; 19 — Plan page: auto-validate and grouped preview
+
+**Status:** done
+
+- [x] Promise line under the Run button: "Checks what you've already got, then installs only what's missing or outdated."
+- [x] Live rows render check-then-act per requirement (Checking… → Already good — skipped / Installing… / Upgrading…); empty-live-progress shows a placeholder, not a blank list
+- [x] Cancel requires confirmation and clearly states it stops after the current step; hung installers still killed by their timebox
+- [x] Results grouped by outcome with reboot notes ("Restart, then re-run to finish") and a link to History; "Run again" preserved; "Save as new preset" reachable
+- [x] No worker/UAC jargon in any run-stage copy; errors say what happened + next step
+- [x] `npm run check` 0 errors, `cargo test` green, `cargo check` clean, `npm run build` ok
+
+**Verification notes (2026-08-16):** The stage-3 shell (live progress, cancel marker, grouped results, Run again) landed with earlier tickets; this pass filled the ticket's remaining ACs. Live list now seeds one "Checking…" row per requirement in the run (mirroring the composed selection, conflicts only when decided-and-included) and each row visibly resolves check-then-act: Installing…/Upgrading… while acting, Already good — skipped / Satisfied by newer — skipped / Skipped — unmanaged the moment the check is the answer, and the outcome badge on finish (failed/timed-out rows also show the reason inline). Empty live progress renders "Checking what's already on this machine…" instead of a blank list. Cancel now goes through a ConfirmDialog ("Stop the run? — Stop after this step") that states the current step finishes first and that a hung installer is still killed by its timebox. Results header gains "See it in History" linking to `/history?run=<id>`; History honors that param (unknown ids degrade to the plain list). Promise line sits under the Run CTA: "Checks what you've already got, then installs only what's missing or outdated."; all worker/UAC wording removed from user-facing run copy (hint, live title/sub, timeout errors, History's missing-results error). Gates: `svelte-check` 0/0, `cargo test --lib` 159 passed, `cargo check` clean, `npm run build` ok. Not smoke-tested in the dev window this pass (no run was executed); logic verified via the existing fake-run CDP path from ticket 18's session and code review.

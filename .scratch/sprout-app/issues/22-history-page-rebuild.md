@@ -1,0 +1,15 @@
+# 22 — History page rebuild
+
+**What to build:** The History page in the new identity. Runs show outcome labels Applied / With notes / Cancelled / Failed with Notion status colors (attention items visibly distinct from success — never green). Each run gains "Open in Plan", which prefills the Plan page with the run's stored preset names and degrades gracefully when those presets have been removed or renamed. Copy, dynamic loading, and empty state align with the voice; the run-row accessibility bug is fixed (expander content announced, not overridden by a single aria-label).
+
+**Blocked by:** 11 — App shell and design foundation; 16 — Honest run outcomes; 18 — Run awareness; 19 — Plan page: auto-validate and grouped preview
+
+**Status:** done
+
+- [x] Outcome labels: Applied / With notes / Cancelled / Failed with Notion status colors in both themes; "with notes" runs render attention items distinctly from success
+- [x] "Open in Plan" prefills the Plan page by stored preset names; missing/renamed presets produce a clear message, never a broken page
+- [x] Copy, empty state, and dynamic loading aligned with the voice; error states give what happened + next step
+- [x] Screen-reader expansion announces the row content (date, presets, outcome, duration) — not overridden by a blanket aria-label
+- [x] `npm run check` 0 errors, `cargo test` green, `cargo check` clean, `npm run build` ok
+
+**Verification notes (2026-08-16):** Row outcome badges now use the Notion status tokens directly — Badge gained four `status-*` tones backed by new `--status-*-tint` / `-tint-border` tokens in both light and dark (`tokens.css`); Applied is green, With notes amber, Cancelled brown, Failed red, so "with notes" can never read as success. The expanded run detail adds an outcome note per tier in the matching status color (unmanaged-product count for with_notes, re-run guidance for failed/cancelled) — the with-notes attention line reuses the plan page's "installed outside winget need manual attention" voice. Every run row gains an "Open in Plan" button (sibling of the toggle, play icon) that routes to `/plan?presets=<comma-joined, encoded names>`; the Plan page's existing bootstrap matches by name and shows its clear notice when presets were removed or renamed (quick-install runs degrade the same way — their stored label never matches a library preset), never a broken page. The blanket `aria-label` on the expander was removed: the toggle now announces its visible content (date, presets, outcome, duration) and gets `aria-controls`/`id` wiring to the detail panel. Loading rotates gardening phrases with `aria-live="polite"` like the Library; the load-failed state gained the sibling "Try again" button and the standard what-happened + next-step copy; the empty state and header sub copy were aligned ("This ledger is still blank…"); the Refresh button finally shows a refresh icon (new `refresh` glyph in Icon.svelte) instead of a plus. Gates: `svelte-check` 0/0, `cargo test --lib` 159 passed, `cargo check` clean, `npm run build` ok. Not smoke-tested in a dev window; verified by code review and gates.

@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "platform": "windows",
+  "name": "Parity Smoke Preset",
+  "description": "Device-based parity smoke preset (ticket 10 AC3) — git + openjdk21 (with the legacy catalog's env wiring) + dbeaver, matching legacy/config/catalog.yaml semantics.",
+  "author": "Release Verification",
+  "version": "1",
+  "requirements": [
+    {
+      "product": {
+        "id": "git",
+        "name": "Git",
+        "winget_id": "Git.Git",
+        "install_location_hint": null,
+        "default_env": []
+      },
+      "step": { "type": "winget", "id": "Git.Git", "scope": "machine" },
+      "version_policy": { "kind": "latest" },
+      "depends_on": [],
+      "timeout_minutes": 10,
+      "env": [],
+      "verify": []
+    },
+    {
+      "product": {
+        "id": "openjdk21",
+        "name": "Eclipse Temurin OpenJDK 21 (LTS)",
+        "winget_id": "EclipseAdoptium.Temurin.21.JDK",
+        "install_location_hint": "Eclipse Temurin",
+        "default_env": []
+      },
+      "step": { "type": "winget", "id": "EclipseAdoptium.Temurin.21.JDK", "scope": "machine" },
+      "version_policy": { "kind": "latest" },
+      "depends_on": [],
+      "timeout_minutes": 10,
+      "env": [
+        { "action": "set", "name": "JAVA_HOME", "value": "<InstallLocation:Eclipse Temurin>" },
+        { "action": "prepend", "name": "PATH", "value": "<InstallLocation:Eclipse Temurin>\\bin" }
+      ],
+      "verify": []
+    },
+    {
+      "product": {
+        "id": "dbeaver",
+        "name": "DBeaver",
+        "winget_id": "DBeaver.DBeaver.Community",
+        "install_location_hint": null,
+        "default_env": []
+      },
+      "step": { "type": "winget", "id": "DBeaver.DBeaver.Community", "scope": "user" },
+      "version_policy": { "kind": "latest" },
+      "depends_on": [],
+      "timeout_minutes": 10,
+      "env": [],
+      "verify": []
+    }
+  ]
+}

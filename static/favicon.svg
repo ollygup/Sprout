@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <style>
+    .field { fill: #f7f6f3; }
+    .stem { stroke: #2f5a44; }
+    .leaf-deep { fill: #3f8a53; }
+    .leaf-light { fill: #55995f; }
+    @media (prefers-color-scheme: dark) {
+      .field { fill: #252525; }
+      .stem { stroke: #8fd6a8; }
+      .leaf-deep { fill: #66ab5f; }
+      .leaf-light { fill: #7dbf69; }
+    }
+  </style>
+  <rect class="field" width="32" height="32" rx="7" />
+  <path class="stem" d="M16 25v-9" stroke-width="1.8" stroke-linecap="round" fill="none" />
+  <path class="leaf-deep" d="M16 17c0-5.6-4.1-8.4-10.6-7.8-.5 5.4 2.9 8.6 10.6 7.8z" />
+  <path class="leaf-light" d="M16 14.5c0-4.5 3.2-7.2 8-6.5-.7 5.2-3.2 7.2-8 6.5z" />
+</svg>
