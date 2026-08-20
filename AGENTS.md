@@ -8,6 +8,7 @@ Read this first. These rules exist so every session (including fresh ones) build
 ## Design rules
 
 - Every UI change must follow the `web-design-guidelines` and `frontend-design` skills and reuse the existing design system: tokens from `src/lib/styles/tokens.css` and components from `src/lib/components/`. No ad-hoc colors, type sizes, radii, or one-off component patterns; if a shared pattern genuinely doesn't fit, capture the deviation in the ticket and get it reviewed before shipping.
+- Reusable UI geometry constants live in `src-tauri/src/window_constants.rs` — never re-declared in another module. Scan that file first before any UI-dimension change.
 
 ## Working copy rule (important)
 

@@ -22,7 +22,10 @@
 //!   the strip permanently reserved;
 //! - `dock_edge` — the screen edge the Quick Launch dock attaches to by
 //!   default: "left" or "right" (the window's own live controls override it
-//!   per monitor).
+//!   per monitor);
+//! - `dock_state` — the Quick Launch window's dock/undock state (ticket 57):
+//!   "floating" (default) or "docked", persisted so the window reopens in the
+//!   state it was left in, and written back by the in-window dock controls.
 
 use rusqlite::{params, Connection, Result};
 
@@ -41,6 +44,9 @@ pub const DEFAULT_LAUNCH_CONCURRENCY: u32 = 8;
 pub const DEFAULT_DOCK_MODE: &str = "auto-hide";
 /// The dock's default screen edge.
 pub const DEFAULT_DOCK_EDGE: &str = "left";
+/// The dock's default state: floating — the window only docks when the user
+/// docks it (or sets the state to "docked" in Settings).
+pub const DEFAULT_DOCK_STATE: &str = "floating";
 
 const KEY_TIMEOUT: &str = "settings.timeout_minutes";
 const KEY_RETENTION: &str = "settings.log_retention_days";
@@ -49,6 +55,7 @@ const KEY_INSTALL_DIR: &str = "settings.install_dir";
 const KEY_LAUNCH_CONCURRENCY: &str = "launch.concurrency";
 const KEY_DOCK_MODE: &str = "dock.mode";
 const KEY_DOCK_EDGE: &str = "dock.edge";
+const KEY_DOCK_STATE: &str = "dock.state";
 
 /// The persisted knobs. `u32` fields keep the frontend's number inputs safe;
 /// validation lives in [`Settings::validate`]. `install_dir` is empty when
@@ -70,6 +77,10 @@ pub struct Settings {
     /// The screen edge the Quick Launch dock attaches to by default (tickets
     /// 49/50): "left" or "right".
     pub dock_edge: String,
+    /// The Quick Launch window's dock state (ticket 57): "floating" or
+    /// "docked" — what the window reopens as, and what the in-window dock
+    /// toggle writes back.
+    pub dock_state: String,
 }
 
 impl Default for Settings {
@@ -82,6 +93,7 @@ impl Default for Settings {
             launch_concurrency: DEFAULT_LAUNCH_CONCURRENCY,
             dock_mode: DEFAULT_DOCK_MODE.to_string(),
             dock_edge: DEFAULT_DOCK_EDGE.to_string(),
+            dock_state: DEFAULT_DOCK_STATE.to_string(),
         }
     }
 }
@@ -128,12 +140,20 @@ pub fn validate_dock_edge(edge: &str) -> std::result::Result<(), String> {
     }
 }
 
+/// Accepts only the two dock states the Quick Launch window can be in.
+pub fn validate_dock_state(state: &str) -> std::result::Result<(), String> {
+    match state {
+        "floating" | "docked" => Ok(()),
+        _ => Err("Dock state must be \"floating\" or \"docked\"".into()),
+    }
+}
+
 impl Settings {
     /// Rejects values that would break a run or empty the log archive.
     /// Timeouts must be at least 1 minute and at most a day; retention at
     /// least 1 day and at most 10 years; the install directory, when set,
-    /// must be an absolute path; the dock mode and edge must be one of the
-    /// offered choices.
+    /// must be an absolute path; the dock mode, edge, and state must be one
+    /// of the offered choices.
     pub fn validate(&self) -> std::result::Result<(), String> {
         if !(1..=1440).contains(&self.default_timeout_minutes) {
             return Err("Default timeout must be between 1 and 1440 minutes (24 h)".into());
@@ -148,6 +168,7 @@ impl Settings {
         }
         validate_dock_mode(&self.dock_mode)?;
         validate_dock_edge(&self.dock_edge)?;
+        validate_dock_state(&self.dock_state)?;
         Ok(())
     }
 }
@@ -202,6 +223,15 @@ pub fn load(conn: &Connection) -> Settings {
         .ok()
         .filter(|v| validate_dock_edge(v).is_ok())
         .unwrap_or_else(|| DEFAULT_DOCK_EDGE.to_string());
+    let dock_state = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            params![KEY_DOCK_STATE],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .filter(|v| validate_dock_state(v).is_ok())
+        .unwrap_or_else(|| DEFAULT_DOCK_STATE.to_string());
     Settings {
         default_timeout_minutes: get(KEY_TIMEOUT).unwrap_or(DEFAULT_TIMEOUT_MINUTES),
         log_retention_days: get(KEY_RETENTION).unwrap_or(DEFAULT_RETENTION_DAYS),
@@ -210,6 +240,7 @@ pub fn load(conn: &Connection) -> Settings {
         launch_concurrency,
         dock_mode,
         dock_edge,
+        dock_state,
     }
 }
 
@@ -228,6 +259,7 @@ pub fn save(conn: &Connection, settings: &Settings) -> std::result::Result<(), S
         .map_err(|e| e.to_string())?;
     upsert(&tx, KEY_DOCK_MODE, &settings.dock_mode).map_err(|e| e.to_string())?;
     upsert(&tx, KEY_DOCK_EDGE, &settings.dock_edge).map_err(|e| e.to_string())?;
+    upsert(&tx, KEY_DOCK_STATE, &settings.dock_state).map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())
 }
 
@@ -236,6 +268,22 @@ pub fn save(conn: &Connection, settings: &Settings) -> std::result::Result<(), S
 pub fn save_theme(conn: &Connection, theme: &str) -> std::result::Result<(), String> {
     validate_theme(theme)?;
     upsert(conn, KEY_THEME, theme).map_err(|e| e.to_string())
+}
+
+/// Persists only the dock state (ticket 57) — the in-window dock/undock
+/// toggle writes back "floating"/"docked" without touching the other knobs,
+/// so the Settings screen and the window never diverge.
+pub fn save_dock_state(conn: &Connection, state: &str) -> std::result::Result<(), String> {
+    validate_dock_state(state)?;
+    upsert(conn, KEY_DOCK_STATE, state).map_err(|e| e.to_string())
+}
+
+/// Persists only the dock edge (ticket 57) — the in-window edge-switch
+/// arrows write back "left"/"right" without touching the other knobs, so the
+/// Settings screen's default edge stays aligned with where the dock lives.
+pub fn save_dock_edge(conn: &Connection, edge: &str) -> std::result::Result<(), String> {
+    validate_dock_edge(edge)?;
+    upsert(conn, KEY_DOCK_EDGE, edge).map_err(|e| e.to_string())
 }
 
 fn upsert(conn: &Connection, key: &str, value: &str) -> Result<()> {
@@ -280,6 +328,7 @@ mod tests {
         assert_eq!(load(&conn).install_dir, "");
         assert_eq!(load(&conn).dock_mode, DEFAULT_DOCK_MODE);
         assert_eq!(load(&conn).dock_edge, DEFAULT_DOCK_EDGE);
+        assert_eq!(load(&conn).dock_state, DEFAULT_DOCK_STATE);
     }
 
     #[test]
@@ -293,6 +342,7 @@ mod tests {
             launch_concurrency: 12,
             dock_mode: "fixed".to_string(),
             dock_edge: "right".to_string(),
+            dock_state: "docked".to_string(),
         };
         {
             let conn = crate::db::init_at(&dir).unwrap();
@@ -336,6 +386,12 @@ mod tests {
         assert!(s.validate().is_err());
         s.dock_edge = DEFAULT_DOCK_EDGE.to_string();
         assert!(s.validate().is_ok());
+        s.dock_state = "minimized".to_string();
+        assert!(s.validate().is_err());
+        s.dock_state = DEFAULT_DOCK_STATE.to_string();
+        assert!(s.validate().is_ok());
+        s.dock_state = "docked".to_string();
+        assert!(s.validate().is_ok());
     }
 
     #[test]
@@ -358,6 +414,32 @@ mod tests {
         assert_eq!(load(&conn).dock_mode, DEFAULT_DOCK_MODE);
         upsert(&conn, KEY_DOCK_EDGE, "top").unwrap();
         assert_eq!(load(&conn).dock_edge, DEFAULT_DOCK_EDGE);
+        upsert(&conn, KEY_DOCK_STATE, "minimized").unwrap();
+        assert_eq!(load(&conn).dock_state, DEFAULT_DOCK_STATE);
+    }
+
+    #[test]
+    fn dock_state_roundtrips_on_its_own() {
+        let dir = clean_dir();
+        {
+            let conn = crate::db::init_at(&dir).unwrap();
+            save_dock_state(&conn, "docked").unwrap();
+            assert_eq!(load(&conn).dock_state, "docked");
+        }
+        // Re-open: the dock state survives the connection.
+        let conn = crate::db::init_at(&dir).unwrap();
+        assert_eq!(load(&conn).dock_state, "docked");
+        // And the in-window toggle's edge write-back persists on its own too.
+        save_dock_edge(&conn, "right").unwrap();
+        assert_eq!(load(&conn).dock_edge, "right");
+    }
+
+    #[test]
+    fn save_dock_state_rejects_unknown_values_and_keeps_the_old_one() {
+        let conn = conn();
+        assert!(save_dock_state(&conn, "minimized").is_err());
+        // Nothing was persisted.
+        assert_eq!(load(&conn).dock_state, DEFAULT_DOCK_STATE);
     }
 
     #[test]
@@ -450,6 +532,7 @@ mod tests {
             launch_concurrency: 8,
             dock_mode: DEFAULT_DOCK_MODE.to_string(),
             dock_edge: DEFAULT_DOCK_EDGE.to_string(),
+            dock_state: DEFAULT_DOCK_STATE.to_string(),
         };
         assert!(save(&conn, &bad).is_err());
         // Nothing was persisted.

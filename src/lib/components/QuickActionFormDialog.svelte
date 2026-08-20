@@ -4,6 +4,7 @@
   import Dialog from "./Dialog.svelte";
   import Button from "./Button.svelte";
   import TextInput from "./TextInput.svelte";
+  import InfoTip from "./InfoTip.svelte";
   import Icon from "./Icon.svelte";
 
   let {
@@ -142,11 +143,20 @@
       placeholder="e.g. docker start"
       value={name}
       onchange={(v) => (name = v)}
-      hint="The name shown in the Quick Launch window's Quick Actions tab."
-    />
+      info="Where the name is shown"
+    >
+      {#snippet infobody()}
+        <p>Shown in the Quick Actions tab.</p>
+      {/snippet}
+    </TextInput>
 
     <div class="field">
-      <label class="field__label" for="qa-command">Command</label>
+      <div class="field__label-row">
+        <label class="field__label" for="qa-command">Command</label>
+        <InfoTip label="How the command runs">
+          <p>PowerShell script; runs with -NoProfile -NonInteractive. Multi-line is fine.</p>
+        </InfoTip>
+      </div>
       <textarea
         id="qa-command"
         class="field__cmd"
@@ -157,10 +167,6 @@
         value={command}
         oninput={(e) => (command = (e.target as HTMLTextAreaElement).value)}
       ></textarea>
-      <p class="field__hint">
-        The PowerShell script, run with -NoProfile -NonInteractive. Multi-line
-        scripts work — each line runs as part of one command.
-      </p>
     </div>
 
     <TextInput
@@ -169,8 +175,12 @@
       placeholder="e.g. D:\Work"
       value={cwd}
       onchange={(v) => (cwd = v)}
-      hint="Optional. The absolute path the command starts in; empty runs from the app's own directory."
-    />
+      info="How the working directory works"
+    >
+      {#snippet infobody()}
+        <p>Working directory; empty = the app's folder.</p>
+      {/snippet}
+    </TextInput>
 
     <div class="test">
       <div class="test__row">
@@ -245,6 +255,13 @@
     min-width: 0;
   }
 
+  .field__label-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    min-width: 0;
+  }
+
   .field__label {
     font-family: var(--font-mono);
     font-size: var(--text-2xs);
@@ -279,12 +296,6 @@
   .field__cmd::placeholder {
     color: var(--text-muted);
     opacity: 0.75;
-  }
-
-  .field__hint {
-    margin: 0;
-    font-size: var(--text-xs);
-    color: var(--text-muted);
   }
 
   .test {

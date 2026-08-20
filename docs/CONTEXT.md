@@ -71,7 +71,7 @@ The machine-local list of Launch entries that the tray one-click launcher and th
 _Avoid_: Quick start, launcher
 
 **Quick Launch window**:
-The miniature window opened from the tray icon with two tabs — Quick Launch (a single Start button that starts the whole Quick Launch list) and Quick Actions — for read-only, fast access. It floats as a window (hides to the tray on blur) or docks as a Win32 AppBar (the Quick Launch dock) on the left/right screen edge. It has no configuration surface; all configuration happens in the main app.
+The miniature window opened from the tray icon with two tabs — Quick Launch (a single Start button that starts the whole Quick Launch list) and Quick Actions — for read-only, fast access. It floats as a persistent window (stays open until closed with × / Alt+F4 — blur never hides it — and is freely draggable) or docks as a Win32 AppBar (the Quick Launch dock) on the left/right screen edge. It has no configuration surface; all configuration happens in the main app.
 _Avoid_: Miniature window, palette, tray menu
 
 **Quick Launch dock**:

@@ -1,6 +1,6 @@
 [package]
 name = "sprout"
-version = "0.1.0"
+version = "0.2.0"
 description = "Preset-driven Windows software-installation desktop app"
 authors = ["Sprout contributors"]
 edition = "2021"

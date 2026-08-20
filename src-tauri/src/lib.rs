@@ -15,6 +15,7 @@ mod run;
 mod settings;
 mod tray;
 mod walker;
+mod window_constants;
 mod winget;
 mod worker;
 
@@ -397,19 +398,43 @@ fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
     Ok(settings::load(&conn))
 }
 
-/// Persists the Settings screen's knobs, validated first.
+/// Persists the Settings screen's knobs, validated first. Ticket 57: dock
+/// changes apply to a live Quick Launch window right away (state change →
+/// dock/undock, edge change → reposition, mode change → re-apply auto-hide),
+/// and the window is told via `quick-launch-changed` so its chrome re-reads
+/// the truth. A live dock failure is logged, never a save failure — the
+/// settings are persisted regardless.
 #[tauri::command]
-fn update_settings(state: State<'_, AppState>, settings: Settings) -> Result<(), String> {
+fn update_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    settings: Settings,
+) -> Result<(), String> {
     let conn = lock(&state)?;
-    settings::save(&conn, &settings)
+    settings::save(&conn, &settings)?;
+    drop(conn);
+    if let Err(e) = quick_window::apply_settings(&app, &settings) {
+        eprintln!("Could not apply dock settings to the live window: {e}");
+    }
+    let _ = app.emit("quick-launch-changed", ());
+    Ok(())
 }
 
 /// Persists the theme on its own — the Settings screen applies it the moment
-/// it is selected, before the rest of the form is saved (ticket 31).
+/// it is selected, before the rest of the form is saved (ticket 31). The
+/// Quick Launch window is told via `quick-launch-changed` (ticket 57) so it
+/// re-applies the theme without reopening.
 #[tauri::command]
-fn update_theme(state: State<'_, AppState>, theme: String) -> Result<(), String> {
+fn update_theme(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    theme: String,
+) -> Result<(), String> {
     let conn = lock(&state)?;
-    settings::save_theme(&conn, &theme)
+    settings::save_theme(&conn, &theme)?;
+    drop(conn);
+    let _ = app.emit("quick-launch-changed", ());
+    Ok(())
 }
 
 /// The Logs screen's picture of where logs live and how big they are — no
@@ -433,44 +458,65 @@ fn list_launch_entries(state: State<'_, AppState>) -> Result<Vec<launch::LaunchE
 }
 
 /// Appends a Launch entry at the end of the Quick Launch list (ticket 38).
+/// The Quick Launch window is told via `quick-launch-changed` (ticket 57) so
+/// a new entry appears without reopening it.
 #[tauri::command]
 fn create_launch_entry(
+    app: AppHandle,
     state: State<'_, AppState>,
     entry: launch::LaunchEntryInput,
 ) -> Result<launch::LaunchEntry, String> {
     launch::validate_launch_entry(&entry)?;
     let conn = lock(&state)?;
-    launch::create_launch_entry(&conn, &entry).map_err(|e| e.to_string())
+    let created = launch::create_launch_entry(&conn, &entry).map_err(|e| e.to_string())?;
+    drop(conn);
+    let _ = app.emit("quick-launch-changed", ());
+    Ok(created)
 }
 
 /// Replaces a Launch entry's metadata in place; position is untouched
 /// (ticket 38).
 #[tauri::command]
 fn update_launch_entry(
+    app: AppHandle,
     state: State<'_, AppState>,
     entry: launch::LaunchEntry,
 ) -> Result<(), String> {
     launch::validate_launch_entry(&entry.entry)?;
     let conn = lock(&state)?;
-    launch::update_launch_entry(&conn, &entry).map_err(|e| e.to_string())
+    launch::update_launch_entry(&conn, &entry).map_err(|e| e.to_string())?;
+    drop(conn);
+    let _ = app.emit("quick-launch-changed", ());
+    Ok(())
 }
 
 /// Removes a Launch entry and compacts the list (ticket 38).
 #[tauri::command]
-fn delete_launch_entry(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+fn delete_launch_entry(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<(), String> {
     let conn = lock(&state)?;
-    launch::delete_launch_entry(&conn, id).map_err(|e| e.to_string())
+    launch::delete_launch_entry(&conn, id).map_err(|e| e.to_string())?;
+    drop(conn);
+    let _ = app.emit("quick-launch-changed", ());
+    Ok(())
 }
 
 /// Moves a Launch entry to another position in the list (ticket 38).
 #[tauri::command]
 fn move_launch_entry(
+    app: AppHandle,
     state: State<'_, AppState>,
     id: i64,
     to_position: i64,
 ) -> Result<(), String> {
     let conn = lock(&state)?;
-    launch::move_launch_entry(&conn, id, to_position).map_err(|e| e.to_string())
+    launch::move_launch_entry(&conn, id, to_position).map_err(|e| e.to_string())?;
+    drop(conn);
+    let _ = app.emit("quick-launch-changed", ());
+    Ok(())
 }
 
 /// One Test click in the add-command dialog (ticket 41): runs the command
@@ -556,7 +602,8 @@ fn notify_launch_summary(app: &AppHandle, report: &launch::LaunchReport) -> Resu
 /// Opens the main window: focuses the existing one, or recreates it when it
 /// was destroyed by closing it (ticket 43). Shared by the tray's Open Sprout
 /// and the single-instance focus hook. The recreated window keeps the
-/// configured size and minimums (tauri.conf.json).
+/// configured size and minimums (`window_constants`, mirroring
+/// tauri.conf.json).
 pub(crate) fn open_main_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
     use tauri::Manager;
     if let Some(window) = app.get_webview_window("main") {
@@ -565,8 +612,14 @@ pub(crate) fn open_main_window(app: &AppHandle) -> tauri::Result<tauri::WebviewW
     } else {
         tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
             .title("Sprout")
-            .inner_size(1200.0, 800.0)
-            .min_inner_size(900.0, 620.0)
+            .inner_size(
+                window_constants::MAIN_WINDOW_WIDTH,
+                window_constants::MAIN_WINDOW_HEIGHT,
+            )
+            .min_inner_size(
+                window_constants::MAIN_WINDOW_MIN_WIDTH,
+                window_constants::MAIN_WINDOW_MIN_HEIGHT,
+            )
             .build()
     }
 }
@@ -635,15 +688,20 @@ fn list_quick_actions(
 
 /// Appends a Quick Action at the end of the list, validated first — a blank
 /// name or command, or a relative working directory, never reaches the list
-/// (ticket 50).
+/// (ticket 50). The Quick Launch window is told via `quick-launch-changed`
+/// (ticket 57) so a new action appears without reopening it.
 #[tauri::command]
 fn create_quick_action(
+    app: AppHandle,
     state: State<'_, AppState>,
     action: quick_actions::QuickActionInput,
 ) -> Result<quick_actions::QuickAction, String> {
     quick_actions::validate_quick_action(&action)?;
     let conn = lock(&state)?;
-    quick_actions::create_quick_action(&conn, &action).map_err(|e| e.to_string())
+    let created = quick_actions::create_quick_action(&conn, &action).map_err(|e| e.to_string())?;
+    drop(conn);
+    let _ = app.emit("quick-launch-changed", ());
+    Ok(created)
 }
 
 /// Replaces a Quick Action's command and metadata in place, validated first;
@@ -651,30 +709,45 @@ fn create_quick_action(
 /// 50).
 #[tauri::command]
 fn update_quick_action(
+    app: AppHandle,
     state: State<'_, AppState>,
     action: quick_actions::QuickAction,
 ) -> Result<(), String> {
     quick_actions::validate_quick_action(&action.action)?;
     let conn = lock(&state)?;
-    quick_actions::update_quick_action(&conn, &action).map_err(|e| e.to_string())
+    quick_actions::update_quick_action(&conn, &action).map_err(|e| e.to_string())?;
+    drop(conn);
+    let _ = app.emit("quick-launch-changed", ());
+    Ok(())
 }
 
 /// Removes a Quick Action and compacts the list (ticket 50).
 #[tauri::command]
-fn delete_quick_action(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+fn delete_quick_action(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<(), String> {
     let conn = lock(&state)?;
-    quick_actions::delete_quick_action(&conn, id).map_err(|e| e.to_string())
+    quick_actions::delete_quick_action(&conn, id).map_err(|e| e.to_string())?;
+    drop(conn);
+    let _ = app.emit("quick-launch-changed", ());
+    Ok(())
 }
 
 /// Moves a Quick Action to another position in the list, clamped (ticket 50).
 #[tauri::command]
 fn move_quick_action(
+    app: AppHandle,
     state: State<'_, AppState>,
     id: i64,
     to_position: i64,
 ) -> Result<(), String> {
     let conn = lock(&state)?;
-    quick_actions::move_quick_action(&conn, id, to_position).map_err(|e| e.to_string())
+    quick_actions::move_quick_action(&conn, id, to_position).map_err(|e| e.to_string())?;
+    drop(conn);
+    let _ = app.emit("quick-launch-changed", ());
+    Ok(())
 }
 
 /// Runs one stored Quick Action fire-and-forget (ticket 50): the action's
@@ -710,51 +783,96 @@ fn test_quick_action(command: String, cwd: Option<String>) -> Result<launch::Tes
     Ok(quick_actions::test_quick_action(&command, cwd.as_deref()))
 }
 
-/// The Quick Launch window's × button (ticket 52): remembers the floating
-/// window's size and position, then destroys it. Blur and close both hide
-/// the window to the tray, and the tray's left-click reopens it. When the
-/// window is docked (ticket 53), the AppBar is released first so the edge is
-/// never left occupied.
+/// The Quick Launch window's × button (tickets 52, 53 & 56): destroys the
+/// window — the only way the floating palette closes, since blur is a no-op
+/// (ticket 56) — and the tray's left-click reopens it at its fixed centered
+/// size (it never remembers geometry). When the window is docked (ticket 53),
+/// the AppBar is released first so the edge is never left occupied.
 #[tauri::command]
 fn close_quick_launch_window(app: AppHandle) -> Result<(), String> {
     quick_window::close(&app).map_err(|e| e.to_string())
 }
 
-/// The frontend's view of the live dock state (ticket 53): `None` while the
-/// window floats, otherwise the edge and visibility mode it is docked with.
+/// The frontend's view of the live dock state (tickets 53 & 59): the edge and
+/// visibility mode — the values the window is docked with, or, while it
+/// floats, the target values the toggle would dock to — plus `docked`, which
+/// tells the two apart. The header's dock/undock toggle renders the target
+/// edge's icon from it, so the chrome always tells the truth.
 #[derive(serde::Serialize)]
 pub struct DockStateView {
     pub edge: String,
     pub mode: String,
+    pub docked: bool,
 }
 
 /// The dock/undock toggle (ticket 53): docks the window to its current
 /// monitor's remembered (or Settings-default) edge, or undocks back to the
-/// floating window when already docked.
+/// floating window when already docked. Ticket 57: the outcome is written
+/// back to Settings (`dock.state`, and `dock.edge` when docking) so the
+/// Settings screen and the window never diverge — the window reopens in the
+/// state it was left in.
 #[tauri::command]
 fn toggle_quick_launch_dock(app: AppHandle) -> Result<(), String> {
     if quick_window::is_docked(&app) {
-        quick_window::undock(&app)
+        quick_window::undock(&app)?;
+        persist_dock_setting(&app, "dock.state", "floating")?;
     } else {
-        quick_window::dock(&app, None)
+        quick_window::dock(&app, None)?;
+        persist_dock_setting(&app, "dock.state", "docked")?;
+        let edge = quick_window::docked_state(&app).map(|d| d.edge);
+        if let Some(edge) = edge {
+            persist_dock_setting(&app, "dock.edge", &edge)?;
+        }
     }
+    Ok(())
 }
 
 /// The left↔right edge-switch arrows (ticket 53): moves the docked window to
-/// the given edge without unregistering the AppBar.
+/// the given edge without unregistering the AppBar. Ticket 57: the outcome is
+/// written back to Settings (`dock.edge`) so the Settings screen's default
+/// edge stays aligned with the window.
 #[tauri::command]
 fn switch_quick_launch_dock_edge(app: AppHandle, edge: String) -> Result<(), String> {
-    quick_window::dock(&app, Some(&edge))
+    quick_window::dock(&app, Some(&edge))?;
+    persist_dock_setting(&app, "dock.edge", &edge)?;
+    persist_dock_setting(&app, "dock.state", "docked")?;
+    Ok(())
 }
 
-/// The dock chrome's state query (ticket 53): the current edge and mode, or
-/// `None` while the window floats — the header renders its controls from this.
+/// Writes one dock knob back to Settings (ticket 57) — the in-window dock
+/// controls persist their outcome so the two surfaces never diverge. The
+/// targeted writers never touch the other knobs.
+fn persist_dock_setting(app: &AppHandle, key: &str, value: &str) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    match key {
+        "dock.state" => settings::save_dock_state(&conn, value),
+        "dock.edge" => settings::save_dock_edge(&conn, value),
+        _ => Err(format!("unknown dock setting '{key}'")),
+    }
+}
+
+/// The dock chrome's state query (tickets 53 & 59): the current edge and mode
+/// when docked, or — while the window floats — the target edge/mode the
+/// toggle would dock to; `docked` tells the two apart. The header renders its
+/// controls from this.
 #[tauri::command]
-fn get_quick_launch_dock_state(app: AppHandle) -> Result<Option<DockStateView>, String> {
-    Ok(quick_window::docked_state(&app).map(|d| DockStateView {
-        edge: d.edge,
-        mode: d.mode,
-    }))
+fn get_quick_launch_dock_state(app: AppHandle) -> Result<DockStateView, String> {
+    Ok(match quick_window::docked_state(&app) {
+        Some(d) => DockStateView {
+            edge: d.edge,
+            mode: d.mode,
+            docked: true,
+        },
+        None => {
+            let (edge, mode) = quick_window::pending_dock(&app)?;
+            DockStateView {
+                edge,
+                mode,
+                docked: false,
+            }
+        }
+    })
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -795,22 +913,13 @@ pub fn run() {
             // in the tray. Open Sprout (or a second launch) recreates the
             // window; Quit lives in the tray menu.
             //
-            // Ticket 52: the Quick Launch window is a palette — blur hides it
-            // (it is destroyed, keeping the backend lean), and its × button /
-            // Alt+F4 take the same path. The tray's left-click reopens it at
-            // its fixed centered size (it never remembers geometry).
+            // Ticket 56: the Quick Launch window is a persistent palette —
+            // blur does nothing (the floating window stays open until closed,
+            // and the OS owns the docked bar's visibility), and its × button /
+            // Alt+F4 destroy it. The tray's left-click reopens it at its
+            // fixed centered size (it never remembers geometry).
             if window.label() == quick_window::QUICK_LAUNCH_WINDOW {
                 match event {
-                    tauri::WindowEvent::Focused(false) => {
-                        // Ticket 52: the floating window is a palette — blur
-                        // hides it to the tray (window destroyed, backend
-                        // stays lean). Ticket 53: while docked, losing focus
-                        // is normal (auto-hide, other apps) and the OS owns
-                        // the visibility — blur must not hide the docked bar.
-                        if !quick_window::is_docked(window.app_handle()) {
-                            let _ = window.destroy();
-                        }
-                    }
                     tauri::WindowEvent::CloseRequested { api, .. } => {
                         api.prevent_close();
                         let _ = quick_window::close(window.app_handle());
@@ -829,6 +938,9 @@ pub fn run() {
             // startup, left-click opens the Quick Launch window, right-click
             // menu is Open Sprout / Quit (ticket 54).
             tray::init(app.handle())?;
+            // The dock drift watchdog (ticket 61): one background thread that
+            // re-docks the bar when its window drifts from its edge.
+            quick_window::start_drift_guard(app.handle().clone());
             Ok(())
         })
         .manage(AppState {

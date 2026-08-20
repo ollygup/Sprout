@@ -26,6 +26,11 @@
     { value: "right", label: "Right" },
   ];
 
+  const dockStateOptions: { value: string; label: string }[] = [
+    { value: "floating", label: "Floating" },
+    { value: "docked", label: "Docked" },
+  ];
+
   let settings: Settings | null = $state(null);
   let timeout = $state(10);
   let retention = $state(30);
@@ -33,6 +38,7 @@
   let launchConcurrency = $state(8);
   let dockMode = $state("auto-hide");
   let dockEdge = $state("left");
+  let dockState = $state("floating");
   let loading = $state(true);
   let loadFailed = $state(false);
   let saving = $state(false);
@@ -56,6 +62,7 @@
       launchConcurrency = loaded.launch_concurrency;
       dockMode = loaded.dock_mode;
       dockEdge = loaded.dock_edge;
+      dockState = loaded.dock_state;
       const persisted = loaded.theme as ThemeMode;
       if (persisted === "system" || persisted === "light" || persisted === "dark") {
         if (persisted !== theme.mode) restoreTheme(persisted);
@@ -106,6 +113,7 @@
         launch_concurrency: Math.min(50, Math.max(1, Math.floor(launchConcurrency) || 1)),
         dock_mode: dockMode,
         dock_edge: dockEdge,
+        dock_state: dockState,
       });
       saved = "Saved — the next run honors these.";
       // Reflect any clamping back into the fields.
@@ -279,6 +287,29 @@
             oninput={(e) => (launchConcurrency = Number((e.target as HTMLInputElement).value))}
           />
           <span class="knob__unit">apps</span>
+        </div>
+      </article>
+
+      <article class="knob">
+        <div class="knob__body">
+          <label class="knob__label" for="dock-state">Quick Launch window</label>
+          <p class="knob__hint">
+            Whether the Quick Launch window floats as a palette or docks to a screen edge as a
+            bar. Applied to an open window on save and remembered next time it opens; the dock
+            toggle inside the window writes back here.
+          </p>
+        </div>
+        <div class="knob__input">
+          <Select
+            id="dock-state"
+            variant="small"
+            value={dockState}
+            onchange={(v) => (dockState = v)}
+          >
+            {#each dockStateOptions as option (option.value)}
+              <option value={option.value}>{option.label}</option>
+            {/each}
+          </Select>
         </div>
       </article>
 

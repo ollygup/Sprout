@@ -275,6 +275,10 @@ export interface Settings {
   /** The screen edge the Quick Launch dock attaches to by default (tickets
    * 49/50): "left" or "right". */
   dock_edge: string;
+  /** The Quick Launch window's dock state (ticket 57): "floating" or
+   * "docked" — what the window reopens as, and what the in-window dock
+   * toggle writes back. */
+  dock_state: string;
 }
 
 /** What a Launch entry starts: a picked app (shortcut or exe) or a command
@@ -395,9 +399,12 @@ export interface LogLocations {
   runs: LogEntry[];
 }
 
-/** The Quick Launch dock's live state (ticket 53): the edge and visibility
- * mode the window is currently docked with, or null while it floats. */
+/** The Quick Launch dock's live state (tickets 53 & 59): the edge and
+ * visibility mode the window is docked with — or, while it floats, the edge
+ * and mode the toggle would dock to — plus whether the window is currently
+ * docked. The header renders its dock chrome from this. */
 export interface QuickLaunchDockState {
   edge: "left" | "right";
   mode: "auto-hide" | "fixed";
+  docked: boolean;
 }

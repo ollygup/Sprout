@@ -321,6 +321,7 @@ mod tests {
                 launch_concurrency: 8,
                 dock_mode: settings::DEFAULT_DOCK_MODE.to_string(),
                 dock_edge: settings::DEFAULT_DOCK_EDGE.to_string(),
+                dock_state: settings::DEFAULT_DOCK_STATE.to_string(),
             },
         )
         .unwrap();

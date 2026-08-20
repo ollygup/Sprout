@@ -279,8 +279,9 @@ export function switchQuickLaunchDockEdge(edge: string): Promise<void> {
   return invoke<void>("switch_quick_launch_dock_edge", { edge });
 }
 
-/** The dock chrome's state query (ticket 53): the current edge and mode, or
- * null while the window floats. */
-export function getQuickLaunchDockState(): Promise<QuickLaunchDockState | null> {
-  return invoke<QuickLaunchDockState | null>("get_quick_launch_dock_state");
+/** The dock chrome's state query (tickets 53 & 59): the current edge and
+ * mode when docked, or — while the window floats — the target edge/mode the
+ * toggle would dock to; `docked` tells the two apart. */
+export function getQuickLaunchDockState(): Promise<QuickLaunchDockState> {
+  return invoke<QuickLaunchDockState>("get_quick_launch_dock_state");
 }

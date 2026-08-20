@@ -5,6 +5,7 @@
   import type { LaunchEntry, LaunchReport, QuickAction } from "$lib/types";
   import {
     getQuickLaunchDockState,
+    getSettings,
     listLaunchEntries,
     listQuickActions,
     runQuickAction,
@@ -13,6 +14,7 @@
     toggleQuickLaunchDock,
   } from "$lib/api";
   import type { QuickLaunchDockState } from "$lib/types";
+  import { restoreTheme, type ThemeMode } from "$lib/theme.svelte";
   import Button from "$lib/components/Button.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import IconButton from "$lib/components/IconButton.svelte";
@@ -21,9 +23,10 @@
 
   // The Quick Launch window (ticket 52): the tray's left-click target — a
   // miniature, frameless, read-only window with two tabs. The backend owns
-  // its life cycle (blur/close destroy it, the tray reopens it at a fixed
-  // centered size — no geometry is remembered); this page only renders and
-  // fires the existing runners.
+  // its life cycle (ticket 56: blur does nothing; the × button / Alt+F4
+  // destroy it and the tray reopens it at a fixed centered size — no
+  // geometry is remembered); this page only renders and fires the existing
+  // runners.
   // Docking (ticket 53) is controlled from this header: the toggle pins the
   // window to the current monitor's remembered (or Settings-default) edge as
   // a Win32 AppBar, and the arrows move it left↔right while docked.
@@ -34,7 +37,14 @@
   let launching = $state(false);
   let error = $state("");
   let tab = $state("launch");
-  let dock = $state<QuickLaunchDockState | null>(null);
+  // Ticket 59: the dock state is never null — while the window floats it
+  // carries the target edge/mode the toggle would dock to (`docked: false`),
+  // so the toggle's icon tells the truth before the first dock.
+  let dock = $state<QuickLaunchDockState>({
+    edge: "left",
+    mode: "auto-hide",
+    docked: false,
+  });
 
   onMount(() => {
     load();
@@ -42,12 +52,41 @@
     // Ticket 42: the run finishes on the backend's background thread — the
     // summary lands as a system notification, and this event just releases
     // the Start button.
-    let unlisten: (() => void) | undefined;
+    // Ticket 57: the backend emits `quick-launch-changed` after every command
+    // that mutates what this window renders — Launch entry mutations, Quick
+    // Action mutations, `update_settings`, `update_theme`. The window listens
+    // once and re-runs its loads plus its dock-state refresh and theme
+    // re-apply, so entries/actions/settings added in the main app appear
+    // without reopening it.
+    const unlisteners: (() => void)[] = [];
     listen<LaunchReport>("launch-run-done", () => {
       launching = false;
-    }).then((fn) => (unlisten = fn));
-    return () => unlisten?.();
+    }).then((fn) => unlisteners.push(fn));
+    listen("quick-launch-changed", () => {
+      load();
+      refreshDock();
+      applyPersistedTheme();
+    }).then((fn) => unlisteners.push(fn));
+    // Ticket 61: a background dock failure — a shell-initiated re-assert
+    // (ABN_POSCHANGED) or the drift watchdog — surfaces in the window's error
+    // banner instead of leaving a half-docked bar.
+    listen<string>("quick-launch-dock-error", (e) => {
+      error = e.payload;
+    }).then((fn) => unlisteners.push(fn));
+    return () => unlisteners.forEach((fn) => fn());
   });
+
+  async function applyPersistedTheme() {
+    try {
+      const s = await getSettings();
+      const mode = s.theme as ThemeMode;
+      if (mode === "system" || mode === "light" || mode === "dark") {
+        restoreTheme(mode);
+      }
+    } catch {
+      // The cached theme still applies; nothing to reconcile.
+    }
+  }
 
   async function refreshDock() {
     try {
@@ -72,7 +111,7 @@
     error = "";
     try {
       await switchQuickLaunchDockEdge(edge);
-      dock = { edge, mode: dock?.mode ?? "auto-hide" };
+      dock = { ...dock, edge };
     } catch (e) {
       console.error(e);
       error = String(e);
@@ -128,13 +167,21 @@
   <title>Quick Launch</title>
 </svelte:head>
 
-<div class="qlw" class:qlw--docked={dock !== null}>
+<div
+  class="qlw"
+  class:qlw--docked={dock.docked}
+  class:qlw--docked-left={dock.docked && dock.edge === "left"}
+  class:qlw--docked-right={dock.docked && dock.edge === "right"}
+>
   <header class="qlw__bar" data-tauri-drag-region="deep">
     <span class="qlw__mark" aria-hidden="true"><SproutMark size={16} /></span>
     <h1 class="qlw__title">Quick Launch</h1>
-    {#if dock}
+    {#if dock.docked}
       <span class="qlw__dock-hint" aria-hidden="true">
-        <Icon name="dock" size={13} />
+        <Icon
+          name={dock.edge === "left" ? "dock-left" : "dock-right"}
+          size={13}
+        />
       </span>
       <IconButton
         icon="chevron-left"
@@ -152,8 +199,16 @@
       />
     {/if}
     <IconButton
-      icon={dock ? "undock" : "dock"}
-      label={dock ? "Undock — float again" : "Dock to a screen edge"}
+      icon={dock.docked
+        ? "undock"
+        : dock.edge === "left"
+          ? "dock-left"
+          : "dock-right"}
+      label={dock.docked
+        ? "Undock — float again"
+        : dock.edge === "left"
+          ? "Dock to the left edge"
+          : "Dock to the right edge"}
       quiet
       onclick={toggleDock}
     />
@@ -261,9 +316,22 @@
 
   /* The docked strip (ticket 53) gets a distinct edge: a hint in the header
      and a slightly deeper page background so the pinned bar reads as one
-     surface against the desktop. */
+     surface against the desktop. Ticket 59: the header padding mirrors on
+     both docked edges — the wider inset lands on the screen-edge side, so a
+     left- and right-docked strip have identical side spacing (no gap
+     asymmetry, no crowding against the neighboring application's space). */
   .qlw--docked {
     background: var(--bg-card);
+  }
+
+  .qlw--docked-left .qlw__bar {
+    padding-left: var(--space-4);
+    padding-right: var(--space-2);
+  }
+
+  .qlw--docked-right .qlw__bar {
+    padding-left: var(--space-2);
+    padding-right: var(--space-4);
   }
 
   .qlw__dock-hint {
