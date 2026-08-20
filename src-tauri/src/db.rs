@@ -767,67 +767,53 @@ pub fn get_run(conn: &Connection, id: &str) -> Result<Option<RunRecord>> {
     }))
 }
 
-/// The Quick Launch window's remembered outer position and size (ticket 52).
-/// Stored in the `meta` table like the Settings keys — no schema change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct QuickWindowGeometry {
-    pub x: i32,
-    pub y: i32,
-    pub width: u32,
-    pub height: u32,
+/// The Quick Launch dock's per-monitor memory (ticket 53): which screen edge
+/// and visibility mode the dock last used on each monitor. Stored in the
+/// `meta` table keyed by the monitor's device name (e.g. `\\.\DISPLAY1`), so
+/// each monitor remembers its own dock — re-docking elsewhere uses that
+/// monitor's remembered edge/mode, falling back to the Settings defaults the
+/// first time.
+const KEY_DOCK_EDGE_PREFIX: &str = "quicklaunch.dock.edge.";
+const KEY_DOCK_MODE_PREFIX: &str = "quicklaunch.dock.mode.";
+
+/// The monitor-scoped meta key for a dock property.
+fn dock_key(prefix: &str, monitor: &str) -> String {
+    format!("{prefix}{monitor}")
 }
 
-const KEY_QLW_X: &str = "quicklaunch.window.x";
-const KEY_QLW_Y: &str = "quicklaunch.window.y";
-const KEY_QLW_WIDTH: &str = "quicklaunch.window.width";
-const KEY_QLW_HEIGHT: &str = "quicklaunch.window.height";
-
-/// Persists the Quick Launch window's outer position and size before it is
-/// destroyed (blur or close, ticket 52) so the next open lands in the same
-/// spot. Written as four `meta` keys — the table is a generic string store,
-/// so the values round-trip as text like every other setting.
-pub fn save_quick_window_geometry(
-    conn: &Connection,
-    geometry: &QuickWindowGeometry,
-) -> Result<()> {
-    let tx = conn.unchecked_transaction()?;
-    upsert_meta(&tx, KEY_QLW_X, &geometry.x.to_string())?;
-    upsert_meta(&tx, KEY_QLW_Y, &geometry.y.to_string())?;
-    upsert_meta(&tx, KEY_QLW_WIDTH, &geometry.width.to_string())?;
-    upsert_meta(&tx, KEY_QLW_HEIGHT, &geometry.height.to_string())?;
-    tx.commit()
+/// Persists which edge the dock last used on `monitor`. The caller validates
+/// the edge (the Settings validators); a broken value must never reach the
+/// dock, and `load` guards reads regardless.
+pub fn save_dock_edge(conn: &Connection, monitor: &str, edge: &str) -> Result<()> {
+    upsert_meta(conn, &dock_key(KEY_DOCK_EDGE_PREFIX, monitor), edge)
 }
 
-/// The remembered Quick Launch window geometry, when a sane one is stored.
-/// Unparsable or out-of-range values (a leftover from a broken build, or a
-/// size no window could ever have) read back as `None`, so the window falls
-/// back to its default placement instead of opening off-screen.
-pub fn load_quick_window_geometry(conn: &Connection) -> Option<QuickWindowGeometry> {
-    let get = |key: &str| -> Option<i64> {
-        conn.query_row(
-            "SELECT value FROM meta WHERE key = ?1",
-            params![key],
-            |row| row.get::<_, String>(0),
-        )
-        .ok()
-        .and_then(|value| value.trim().parse().ok())
-    };
-    let x = get(KEY_QLW_X)?;
-    let y = get(KEY_QLW_Y)?;
-    let width = get(KEY_QLW_WIDTH)?;
-    let height = get(KEY_QLW_HEIGHT)?;
-    if !(200..=4000).contains(&width) || !(200..=4000).contains(&height) {
-        return None;
-    }
-    if !(-100_000..=100_000).contains(&x) || !(-100_000..=100_000).contains(&y) {
-        return None;
-    }
-    Some(QuickWindowGeometry {
-        x: x as i32,
-        y: y as i32,
-        width: width as u32,
-        height: height as u32,
-    })
+/// Persists which visibility mode the dock last used on `monitor` (ticket 53).
+pub fn save_dock_mode(conn: &Connection, monitor: &str, mode: &str) -> Result<()> {
+    upsert_meta(conn, &dock_key(KEY_DOCK_MODE_PREFIX, monitor), mode)
+}
+
+/// The remembered edge for `monitor`, when a valid one is stored — broken
+/// values (a leftover from a buggy build) read back as `None`, so the dock
+/// falls back to the Settings default.
+pub fn load_dock_edge(conn: &Connection, monitor: &str) -> Option<String> {
+    read_meta(conn, &dock_key(KEY_DOCK_EDGE_PREFIX, monitor))
+        .filter(|v| crate::settings::validate_dock_edge(v).is_ok())
+}
+
+/// The remembered visibility mode for `monitor`, when a valid one is stored.
+pub fn load_dock_mode(conn: &Connection, monitor: &str) -> Option<String> {
+    read_meta(conn, &dock_key(KEY_DOCK_MODE_PREFIX, monitor))
+        .filter(|v| crate::settings::validate_dock_mode(v).is_ok())
+}
+
+fn read_meta(conn: &Connection, key: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT value FROM meta WHERE key = ?1",
+        params![key],
+        |row| row.get::<_, String>(0),
+    )
+    .ok()
 }
 
 fn upsert_meta(conn: &Connection, key: &str, value: &str) -> Result<()> {
@@ -2117,76 +2103,57 @@ mod tests {
     }
 
     #[test]
-    fn quick_window_geometry_roundtrips_across_reopen() {
+    fn dock_state_roundtrips_across_reopen() {
         let dir = test_dir();
-        let geometry = QuickWindowGeometry {
-            x: 2100,
-            y: 140,
-            width: 340,
-            height: 460,
-        };
+        let monitor = r"\\.\DISPLAY1";
         {
             let conn = init_at(&dir).unwrap();
             // Nothing is remembered on a fresh database.
-            assert_eq!(load_quick_window_geometry(&conn), None);
-            save_quick_window_geometry(&conn, &geometry).unwrap();
-            assert_eq!(load_quick_window_geometry(&conn), Some(geometry));
+            assert_eq!(load_dock_edge(&conn, monitor), None);
+            assert_eq!(load_dock_mode(&conn, monitor), None);
+            save_dock_edge(&conn, monitor, "right").unwrap();
+            save_dock_mode(&conn, monitor, "fixed").unwrap();
+            assert_eq!(load_dock_edge(&conn, monitor), Some("right".into()));
+            assert_eq!(load_dock_mode(&conn, monitor), Some("fixed".into()));
         }
-        // Re-open: the geometry survives the connection.
+        // Re-open: the memory survives the connection.
         let conn = init_at(&dir).unwrap();
-        assert_eq!(load_quick_window_geometry(&conn), Some(geometry));
+        assert_eq!(load_dock_edge(&conn, monitor), Some("right".into()));
+        assert_eq!(load_dock_mode(&conn, monitor), Some("fixed".into()));
     }
 
     #[test]
-    fn quick_window_geometry_updates_in_place() {
+    fn dock_state_updates_in_place() {
         let dir = test_dir();
         let conn = init_at(&dir).unwrap();
-        let first = QuickWindowGeometry {
-            x: 10,
-            y: 10,
-            width: 320,
-            height: 420,
-        };
-        let moved = QuickWindowGeometry {
-            x: 1200,
-            y: 700,
-            width: 380,
-            height: 500,
-        };
-        save_quick_window_geometry(&conn, &first).unwrap();
-        save_quick_window_geometry(&conn, &moved).unwrap();
+        let monitor = r"\\.\DISPLAY2";
+        save_dock_edge(&conn, monitor, "left").unwrap();
+        save_dock_edge(&conn, monitor, "right").unwrap();
         // The second save overwrites, never stacks.
-        assert_eq!(load_quick_window_geometry(&conn), Some(moved));
+        assert_eq!(load_dock_edge(&conn, monitor), Some("right".into()));
     }
 
     #[test]
-    fn quick_window_geometry_ignores_nonsense_values() {
+    fn dock_memory_is_per_monitor() {
         let dir = test_dir();
         let conn = init_at(&dir).unwrap();
-        // Missing keys read back as None (fresh database).
-        assert_eq!(load_quick_window_geometry(&conn), None);
-        // Unparsable values are ignored.
-        conn.execute("INSERT INTO meta (key, value) VALUES (?1, ?2)", params![KEY_QLW_X, "abc"])
-            .unwrap();
-        assert_eq!(load_quick_window_geometry(&conn), None);
-        // A size no window could ever have is ignored — a leftover from a
-        // broken build must never push the window off-screen.
-        let geometry = QuickWindowGeometry {
-            x: 0,
-            y: 0,
-            width: 999_999,
-            height: 460,
-        };
-        save_quick_window_geometry(&conn, &geometry).unwrap();
-        assert_eq!(load_quick_window_geometry(&conn), None);
-        // So is a position leagues off any monitor.
-        let geometry = QuickWindowGeometry {
-            x: 9_000_000,
-            y: 0,
-            width: 340,
-            height: 460,
-        };
-        save_quick_window_geometry(&conn, &geometry).unwrap();
-        assert_eq!(load_quick_window_geometry(&conn), None);
+        save_dock_edge(&conn, r"\\.\DISPLAY1", "left").unwrap();
+        save_dock_edge(&conn, r"\\.\DISPLAY2", "right").unwrap();
+        // Each monitor remembers its own edge.
+        assert_eq!(load_dock_edge(&conn, r"\\.\DISPLAY1"), Some("left".into()));
+        assert_eq!(load_dock_edge(&conn, r"\\.\DISPLAY2"), Some("right".into()));
+    }
+
+    #[test]
+    fn invalid_stored_dock_state_falls_back_to_none() {
+        let dir = test_dir();
+        let conn = init_at(&dir).unwrap();
+        let monitor = r"\\.\DISPLAY1";
+        // Broken values written by a buggy build must never reach the dock —
+        // they read back as None so the dock falls back to the Settings.
+        upsert_meta(&conn, &dock_key(KEY_DOCK_EDGE_PREFIX, monitor), "top").unwrap();
+        assert_eq!(load_dock_edge(&conn, monitor), None);
+        upsert_meta(&conn, &dock_key(KEY_DOCK_MODE_PREFIX, monitor), "overlay").unwrap();
+        assert_eq!(load_dock_mode(&conn, monitor), None);
     }
 }

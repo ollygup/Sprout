@@ -1,5 +1,6 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 
+mod appbar;
 mod db;
 mod domain;
 mod engine;
@@ -23,7 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rusqlite::Connection;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use domain::{Preset, PresetRecord, Product, ProductRecord, Requirement};
 use engine::{windows::WindowsWingetEngine, DesktopInfo, LauncherEngine, PlatformEngine};
@@ -47,6 +48,9 @@ pub struct AppState {
     pub launcher: Arc<dyn LauncherEngine>,
     pub launch_in_progress: Arc<AtomicBool>,
     pub pending_import: Mutex<Option<String>>,
+    /// The Quick Launch window's live dock state (ticket 53): `Some` while the
+    /// window is docked as a Win32 AppBar, cleared on undock/close/quit.
+    pub dock: Mutex<Option<quick_window::DockState>>,
 }
 
 fn lock<'a>(state: &'a State<'a, AppState>) -> Result<std::sync::MutexGuard<'a, Connection>, String> {
@@ -708,10 +712,49 @@ fn test_quick_action(command: String, cwd: Option<String>) -> Result<launch::Tes
 
 /// The Quick Launch window's × button (ticket 52): remembers the floating
 /// window's size and position, then destroys it. Blur and close both hide
-/// the window to the tray, and the tray's left-click reopens it.
+/// the window to the tray, and the tray's left-click reopens it. When the
+/// window is docked (ticket 53), the AppBar is released first so the edge is
+/// never left occupied.
 #[tauri::command]
 fn close_quick_launch_window(app: AppHandle) -> Result<(), String> {
     quick_window::close(&app).map_err(|e| e.to_string())
+}
+
+/// The frontend's view of the live dock state (ticket 53): `None` while the
+/// window floats, otherwise the edge and visibility mode it is docked with.
+#[derive(serde::Serialize)]
+pub struct DockStateView {
+    pub edge: String,
+    pub mode: String,
+}
+
+/// The dock/undock toggle (ticket 53): docks the window to its current
+/// monitor's remembered (or Settings-default) edge, or undocks back to the
+/// floating window when already docked.
+#[tauri::command]
+fn toggle_quick_launch_dock(app: AppHandle) -> Result<(), String> {
+    if quick_window::is_docked(&app) {
+        quick_window::undock(&app)
+    } else {
+        quick_window::dock(&app, None)
+    }
+}
+
+/// The left↔right edge-switch arrows (ticket 53): moves the docked window to
+/// the given edge without unregistering the AppBar.
+#[tauri::command]
+fn switch_quick_launch_dock_edge(app: AppHandle, edge: String) -> Result<(), String> {
+    quick_window::dock(&app, Some(&edge))
+}
+
+/// The dock chrome's state query (ticket 53): the current edge and mode, or
+/// `None` while the window floats — the header renders its controls from this.
+#[tauri::command]
+fn get_quick_launch_dock_state(app: AppHandle) -> Result<Option<DockStateView>, String> {
+    Ok(quick_window::docked_state(&app).map(|d| DockStateView {
+        edge: d.edge,
+        mode: d.mode,
+    }))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -753,19 +796,24 @@ pub fn run() {
             // window; Quit lives in the tray menu.
             //
             // Ticket 52: the Quick Launch window is a palette — blur hides it
-            // (its geometry is remembered, then it is destroyed, keeping the
-            // backend lean), and its × button / Alt+F4 take the same path.
-            // The tray's left-click reopens it.
+            // (it is destroyed, keeping the backend lean), and its × button /
+            // Alt+F4 take the same path. The tray's left-click reopens it at
+            // its fixed centered size (it never remembers geometry).
             if window.label() == quick_window::QUICK_LAUNCH_WINDOW {
                 match event {
                     tauri::WindowEvent::Focused(false) => {
-                        quick_window::save_geometry(window);
-                        let _ = window.destroy();
+                        // Ticket 52: the floating window is a palette — blur
+                        // hides it to the tray (window destroyed, backend
+                        // stays lean). Ticket 53: while docked, losing focus
+                        // is normal (auto-hide, other apps) and the OS owns
+                        // the visibility — blur must not hide the docked bar.
+                        if !quick_window::is_docked(window.app_handle()) {
+                            let _ = window.destroy();
+                        }
                     }
                     tauri::WindowEvent::CloseRequested { api, .. } => {
                         api.prevent_close();
-                        quick_window::save_geometry(window);
-                        let _ = window.destroy();
+                        let _ = quick_window::close(window.app_handle());
                     }
                     _ => {}
                 }
@@ -789,6 +837,7 @@ pub fn run() {
             launcher: Arc::new(engine::windows::WindowsLauncherEngine),
             launch_in_progress: Arc::new(AtomicBool::new(false)),
             pending_import: Mutex::new(pending_import),
+            dock: Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
             list_products,
@@ -837,7 +886,10 @@ pub fn run() {
             move_quick_action,
             run_quick_action,
             test_quick_action,
-            close_quick_launch_window
+            close_quick_launch_window,
+            toggle_quick_launch_dock,
+            switch_quick_launch_dock_edge,
+            get_quick_launch_dock_state
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -849,10 +901,24 @@ pub fn run() {
         // (`app.exit(0)` from the tray's Quit) carries a code and is never
         // suppressed.
         .run(|app, event| {
-            if let tauri::RunEvent::ExitRequested { code: None, api, .. } = event {
-                if app.tray_by_id(tray::TRAY_ID).is_some() {
-                    api.prevent_exit();
+            match event {
+                // The window was destroyed, not the app: with the tray
+                // resident, an exit requested by user interaction (the last
+                // window closing) is suppressed — the backend keeps running
+                // with zero windows (ticket 43). A programmatic exit
+                // (`app.exit(0)` from the tray's Quit) carries a code and is
+                // never suppressed.
+                tauri::RunEvent::ExitRequested { code: None, api, .. } => {
+                    if app.tray_by_id(tray::TRAY_ID).is_some() {
+                        api.prevent_exit();
+                    }
                 }
+                // Ticket 53: the docked AppBar is unregistered on quit so the
+                // screen edge is never left occupied after the process dies.
+                tauri::RunEvent::Exit => {
+                    let _ = quick_window::release_dock(app);
+                }
+                _ => {}
             }
         });
 }

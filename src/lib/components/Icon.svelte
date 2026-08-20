@@ -39,6 +39,12 @@
     check: '<path d="m4.5 12.5 5 5L19.5 7"/>',
     layout:
       '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9.5h18"/><path d="M9 9.5V20"/>',
+    dock:
+      '<rect x="3" y="3" width="7" height="18" rx="1.5"/><rect x="14" y="3" width="7" height="18" rx="1.5"/>',
+    undock:
+      '<rect x="6" y="4" width="14" height="16" rx="2"/><path d="M4 9h16"/>',
+    "chevron-left": '<path d="m15 6-6 6 6 6"/>',
+    "chevron-right": '<path d="m9 6 6 6-6 6"/>',
   };
 </script>
 

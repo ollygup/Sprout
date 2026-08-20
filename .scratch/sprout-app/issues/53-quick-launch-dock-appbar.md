@@ -4,12 +4,12 @@
 
 **Blocked by:** 52 — Quick Launch window (floating)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Win32 AppBar via the raw window handle (`SHAppBarMessage`: `ABM_NEW` / `ABM_SETPOS` / `ABM_AUTOHIDE` / `ABM_REMOVE`); slim strip sized from design tokens, full height of the attached monitor's work area
-- [ ] Auto-hide (default): slides to a ~3px sliver when the cursor leaves the bar; slides back out on hover at the edge — taskbar-like
-- [ ] Fixed mode: bar stays visible and reserves its strip; maximized windows on that edge shrink to accommodate (reserved workspace is the accepted AppBar trade-off, per ADR-0011)
-- [ ] Dock/undock toggle and left↔right edge-switch arrows in the window chrome; undocking returns to the floating window at its remembered size/position
-- [ ] Mode and default edge configurable in the main app's Settings; edge and mode persist per monitor; attaches to the monitor the window is on
-- [ ] `ABM_REMOVE` on app quit so the edge is never left occupied
-- [ ] `cargo test` green; `npm run check` 0 errors; synced to the share
+- [x] Win32 AppBar via the raw window handle (`SHAppBarMessage`: `ABM_NEW` / `ABM_SETPOS` / `ABM_AUTOHIDE` / `ABM_REMOVE`); slim strip sized from design tokens, full height of the attached monitor's work area
+- [x] Auto-hide (default): slides to a ~3px sliver when the cursor leaves the bar; slides back out on hover at the edge — taskbar-like (OS-managed via `ABM_SETAUTOHIDEBAR`; the system's ~2px sliver is honored)
+- [x] Fixed mode: bar stays visible and reserves its strip; maximized windows on that edge shrink to accommodate (reserved workspace is the accepted AppBar trade-off, per ADR-0011)
+- [x] Dock/undock toggle and left↔right edge-switch arrows in the window chrome; undocking returns to the floating window at its fixed default size, centered (per user feedback 2026-08-19: the floating window always spawns centered at a fixed size — no geometry is remembered; a remembered near-full-screen size made it open huge and impossible to move)
+- [x] Mode and default edge configurable in the main app's Settings; edge and mode persist per monitor (keyed by the monitor's device name); attaches to the monitor the window is on
+- [x] `ABM_REMOVE` on app quit so the edge is never left occupied
+- [x] `cargo test` green; `npm run check` 0 errors; synced to the share

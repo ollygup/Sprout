@@ -394,3 +394,10 @@ export interface LogLocations {
   total_logs_bytes: number;
   runs: LogEntry[];
 }
+
+/** The Quick Launch dock's live state (ticket 53): the edge and visibility
+ * mode the window is currently docked with, or null while it floats. */
+export interface QuickLaunchDockState {
+  edge: "left" | "right";
+  mode: "auto-hide" | "fixed";
+}

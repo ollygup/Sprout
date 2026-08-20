@@ -14,6 +14,7 @@ import type {
   ProductPresetImpact,
   QuickAction,
   QuickActionInput,
+  QuickLaunchDockState,
   Requirement,
   RunProgressChunk,
   RunRecord,
@@ -263,4 +264,23 @@ export function testQuickAction(
   cwd: string | null
 ): Promise<LaunchCommandTest> {
   return invoke<LaunchCommandTest>("test_quick_action", { command, cwd });
+}
+
+/** The Quick Launch dock's toggle (ticket 53): docks the window to its
+ * current monitor's remembered (or Settings-default) edge, or undocks back
+ * to the floating window when already docked. */
+export function toggleQuickLaunchDock(): Promise<void> {
+  return invoke<void>("toggle_quick_launch_dock");
+}
+
+/** The left↔right edge-switch arrows (ticket 53): moves the docked window to
+ * the given edge without unregistering the AppBar. */
+export function switchQuickLaunchDockEdge(edge: string): Promise<void> {
+  return invoke<void>("switch_quick_launch_dock_edge", { edge });
+}
+
+/** The dock chrome's state query (ticket 53): the current edge and mode, or
+ * null while the window floats. */
+export function getQuickLaunchDockState(): Promise<QuickLaunchDockState | null> {
+  return invoke<QuickLaunchDockState | null>("get_quick_launch_dock_state");
 }

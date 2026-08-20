@@ -4,11 +4,15 @@
   import { listen } from "@tauri-apps/api/event";
   import type { LaunchEntry, LaunchReport, QuickAction } from "$lib/types";
   import {
+    getQuickLaunchDockState,
     listLaunchEntries,
     listQuickActions,
     runQuickAction,
     startQuickLaunch,
+    switchQuickLaunchDockEdge,
+    toggleQuickLaunchDock,
   } from "$lib/api";
+  import type { QuickLaunchDockState } from "$lib/types";
   import Button from "$lib/components/Button.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import IconButton from "$lib/components/IconButton.svelte";
@@ -17,8 +21,12 @@
 
   // The Quick Launch window (ticket 52): the tray's left-click target — a
   // miniature, frameless, read-only window with two tabs. The backend owns
-  // its life cycle (blur/close destroy it, the tray reopens it, the geometry
-  // is remembered); this page only renders and fires the existing runners.
+  // its life cycle (blur/close destroy it, the tray reopens it at a fixed
+  // centered size — no geometry is remembered); this page only renders and
+  // fires the existing runners.
+  // Docking (ticket 53) is controlled from this header: the toggle pins the
+  // window to the current monitor's remembered (or Settings-default) edge as
+  // a Win32 AppBar, and the arrows move it left↔right while docked.
 
   let entries = $state<LaunchEntry[]>([]);
   let actions = $state<QuickAction[]>([]);
@@ -26,9 +34,11 @@
   let launching = $state(false);
   let error = $state("");
   let tab = $state("launch");
+  let dock = $state<QuickLaunchDockState | null>(null);
 
   onMount(() => {
     load();
+    refreshDock();
     // Ticket 42: the run finishes on the backend's background thread — the
     // summary lands as a system notification, and this event just releases
     // the Start button.
@@ -38,6 +48,36 @@
     }).then((fn) => (unlisten = fn));
     return () => unlisten?.();
   });
+
+  async function refreshDock() {
+    try {
+      dock = await getQuickLaunchDockState();
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  async function toggleDock() {
+    error = "";
+    try {
+      await toggleQuickLaunchDock();
+      await refreshDock();
+    } catch (e) {
+      console.error(e);
+      error = String(e);
+    }
+  }
+
+  async function switchEdge(edge: "left" | "right") {
+    error = "";
+    try {
+      await switchQuickLaunchDockEdge(edge);
+      dock = { edge, mode: dock?.mode ?? "auto-hide" };
+    } catch (e) {
+      console.error(e);
+      error = String(e);
+    }
+  }
 
   async function load() {
     loading = true;
@@ -88,10 +128,35 @@
   <title>Quick Launch</title>
 </svelte:head>
 
-<div class="qlw">
+<div class="qlw" class:qlw--docked={dock !== null}>
   <header class="qlw__bar" data-tauri-drag-region="deep">
     <span class="qlw__mark" aria-hidden="true"><SproutMark size={16} /></span>
     <h1 class="qlw__title">Quick Launch</h1>
+    {#if dock}
+      <span class="qlw__dock-hint" aria-hidden="true">
+        <Icon name="dock" size={13} />
+      </span>
+      <IconButton
+        icon="chevron-left"
+        label="Dock to the left edge"
+        quiet
+        disabled={dock.edge === "left"}
+        onclick={() => switchEdge("left")}
+      />
+      <IconButton
+        icon="chevron-right"
+        label="Dock to the right edge"
+        quiet
+        disabled={dock.edge === "right"}
+        onclick={() => switchEdge("right")}
+      />
+    {/if}
+    <IconButton
+      icon={dock ? "undock" : "dock"}
+      label={dock ? "Undock — float again" : "Dock to a screen edge"}
+      quiet
+      onclick={toggleDock}
+    />
     <IconButton icon="x" label="Close window" onclick={close} />
   </header>
 
@@ -192,6 +257,19 @@
   .qlw__mark {
     display: inline-flex;
     flex-shrink: 0;
+  }
+
+  /* The docked strip (ticket 53) gets a distinct edge: a hint in the header
+     and a slightly deeper page background so the pinned bar reads as one
+     surface against the desktop. */
+  .qlw--docked {
+    background: var(--bg-card);
+  }
+
+  .qlw__dock-hint {
+    display: inline-flex;
+    flex-shrink: 0;
+    color: var(--accent);
   }
 
   .qlw__title {
