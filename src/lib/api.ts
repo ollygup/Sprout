@@ -248,11 +248,24 @@ export function moveQuickAction(id: number, toPosition: number): Promise<void> {
   return invoke<void>("move_quick_action", { id, toPosition });
 }
 
-/** Runs one stored Quick Action fire-and-forget (ticket 50): hidden
- * PowerShell, working directory honored, current user, no elevation, no
- * status UI, no notification. */
+/** Runs one stored Quick Action (tickets 50 & 62): hidden PowerShell,
+ *  working directory honored, current user, no elevation, no status UI. The
+ *  run is tracked for its lifetime — the window learns Run ↔ Stop through
+ *  `quick-action-run-state-changed` events. */
 export function runQuickAction(id: number): Promise<void> {
   return invoke<void>("run_quick_action", { id });
+}
+
+/** Stops a running Quick Action (ticket 62): runs its stop command when it
+ *  has one, otherwise kills the process tree. */
+export function stopQuickAction(id: number): Promise<void> {
+  return invoke<void>("stop_quick_action", { id });
+}
+
+/** The ids of every Quick Action whose tracked process is still alive
+ *  (ticket 62) — the window's starting picture; events keep it current. */
+export function listRunningQuickActions(): Promise<number[]> {
+  return invoke<number[]>("list_running_quick_actions");
 }
 
 /** One Test click in the Quick Actions editor (ticket 50): runs the command

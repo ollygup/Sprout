@@ -28,6 +28,7 @@
     dots: '<path d="M5 12h.01M12 12h.01M19 12h.01"/>',
     info: '<circle cx="12" cy="12" r="9"/><path d="M12 8h.01"/><path d="M12 12v4"/>',
     play: '<path d="M7 4.5v15l13-7.5z"/>',
+    stop: '<rect x="6" y="6" width="12" height="12" rx="1.5"/>',
     chevron: '<path d="m6 9 6 6 6-6"/>',
     "chevron-up": '<path d="m6 15 6-6 6 6"/>',
     "chevron-down": '<path d="m6 9 6 6 6-6"/>',
@@ -45,6 +46,8 @@
       '<rect x="6" y="4" width="14" height="16" rx="2"/><path d="M4 9h16"/>',
     "chevron-left": '<path d="m15 6-6 6 6 6"/>',
     "chevron-right": '<path d="m9 6 6 6-6 6"/>',
+    warn:
+      '<path d="M12 4 2.8 20h18.4L12 4Z"/><path d="M12 10.5v4.5"/><path d="M12 18h.01"/>',
   };
 </script>
 

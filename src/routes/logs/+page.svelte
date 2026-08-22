@@ -87,6 +87,7 @@
           <p class="root__path">{loc.logs_dir}</p>
           <p class="root__meta">
             {loc.runs.length} run folder{loc.runs.length === 1 ? "" : "s"} ·{" "}
+            {loc.quick_action_runs.length} Quick Action run{loc.quick_action_runs.length === 1 ? "" : "s"} ·{" "}
             {formatBytes(loc.total_logs_bytes)}
           </p>
         </div>
@@ -118,6 +119,33 @@
       {:else}
         <ul class="runs__list">
           {#each loc.runs as entry (entry.name)}
+            <li class="runs__row">
+              <span class="runs__name">{entry.name}</span>
+              <span class="runs__meta">
+                {formatBytes(entry.size_bytes)}
+                {#if entry.modified_at}
+                  <span class="runs__date">{formatTimestamp(entry.modified_at)}</span>
+                {/if}
+              </span>
+              <Button variant="secondary" onclick={() => open(entry.path)} disabled={opening !== null}>
+                <Icon name="folder" size={13} /> Open
+              </Button>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    </div>
+
+    <div class="runs">
+      <p class="runs__label">Quick Action runs</p>
+      {#if loc.quick_action_runs.length === 0}
+        <p class="runs__none">
+          No Quick Action runs yet. Each run's live output and its stop/exit
+          lines land in its own folder.
+        </p>
+      {:else}
+        <ul class="runs__list">
+          {#each loc.quick_action_runs as entry (entry.name)}
             <li class="runs__row">
               <span class="runs__name">{entry.name}</span>
               <span class="runs__meta">

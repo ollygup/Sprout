@@ -23,6 +23,8 @@
   let name = $state("");
   let command = $state("");
   let cwd = $state("");
+  let stoppable = $state(false);
+  let stopCommand = $state("");
   let saving = $state(false);
   let error = $state("");
   let test: LaunchCommandTest | null = $state(null);
@@ -36,6 +38,8 @@
       name = action?.name ?? "";
       command = action?.command ?? "";
       cwd = action?.cwd ?? "";
+      stoppable = action?.stoppable ?? false;
+      stopCommand = action?.stop_command ?? "";
       saving = false;
       error = "";
       test = null;
@@ -103,6 +107,8 @@
           name: name.trim(),
           command: command.trim(),
           cwd: cwd.trim() || null,
+          stoppable,
+          stop_command: stoppable ? stopCommand.trim() || null : null,
         });
         await onsave(`${name.trim()} saved.`);
       } else {
@@ -110,6 +116,8 @@
           name: name.trim(),
           command: command.trim(),
           cwd: cwd.trim() || null,
+          stoppable,
+          stop_command: stoppable ? stopCommand.trim() || null : null,
         });
         await onsave(`${name.trim()} added to Quick Actions.`);
       }
@@ -181,6 +189,45 @@
         <p>Working directory; empty = the app's folder.</p>
       {/snippet}
     </TextInput>
+
+    <label class="stoppable">
+      <input
+        type="checkbox"
+        class="stoppable__check"
+        checked={stoppable}
+        onchange={(e) => (stoppable = (e.target as HTMLInputElement).checked)}
+      />
+      <span class="stoppable__title">Show Stop button</span>
+      <InfoTip label="What the Stop button does">
+        <p>
+          While the command runs, its Run button becomes Stop. Tracking covers
+          foreground commands only — detached commands (e.g.
+          <span class="mono">docker compose up -d</span>) report as not running
+          because the process exits while the service continues.
+        </p>
+      </InfoTip>
+    </label>
+
+    {#if stoppable}
+      <div class="field">
+        <div class="field__label-row">
+          <label class="field__label" for="qa-stop-command">Stop command</label>
+          <InfoTip label="How the stop command works">
+            <p>Runs when Stop is clicked. Empty = kills the process tree.</p>
+          </InfoTip>
+        </div>
+        <textarea
+          id="qa-stop-command"
+          class="field__cmd"
+          rows="2"
+          placeholder="e.g. docker compose stop"
+          autocomplete="off"
+          spellcheck="false"
+          value={stopCommand}
+          oninput={(e) => (stopCommand = (e.target as HTMLTextAreaElement).value)}
+        ></textarea>
+      </div>
+    {/if}
 
     <div class="test">
       <div class="test__row">
@@ -296,6 +343,26 @@
   .field__cmd::placeholder {
     color: var(--text-muted);
     opacity: 0.75;
+  }
+
+  .stoppable {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    cursor: pointer;
+  }
+
+  .stoppable__check {
+    margin: 0;
+    accent-color: var(--accent);
+    width: 14px;
+    height: 14px;
+  }
+
+  .stoppable__title {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--text);
   }
 
   .test {

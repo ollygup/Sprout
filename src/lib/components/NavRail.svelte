@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { onMount } from "svelte";
+  import { getVersion } from "@tauri-apps/api/app";
   import { page } from "$app/state";
   import SproutMark from "./SproutMark.svelte";
 
@@ -14,6 +16,14 @@
   ];
 
   const current = $derived(page.url.pathname);
+  // The app version, read from the single source of truth
+  // (src-tauri/tauri.conf.json) at runtime — never hardcoded here.
+  let version = $state("");
+  onMount(() => {
+    getVersion()
+      .then((v) => (version = v))
+      .catch(() => {});
+  });
 </script>
 
 <nav class="rail" aria-label="Sprout sections">
@@ -37,7 +47,7 @@
     {/each}
   </ul>
 
-  <p class="rail__foot">v0.1.0</p>
+  <p class="rail__foot">{version ? `v${version}` : ""}</p>
 </nav>
 
 <style>

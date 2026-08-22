@@ -9,8 +9,8 @@ The tray menu is a cramped, read-only surface: every Launch entry and desktop gr
 ## Decisions
 
 - **The Quick Launch window is the resident quick-access surface** (tray left-click opens/raises it). Its Quick Launch tab is a single Start button that starts the whole Quick Launch list; its Quick Actions tab lists each action as NAME + Run button. The window is read-only — no configuration surface.
-- **Docking is a Win32 AppBar** (taskbar-like), not a custom edge-attach or a floating always-on-top overlay. The user explicitly asked for "OS docking like a taskbar". An AppBar reserves its screen edge, which is the intended trade-off; this supersedes the earlier "must not affect other applications" constraint — a docked bar takes space from maximized windows by design. It never *overlays* content; it reserves it.
-- **Two dock visibility modes, configured in the app**: auto-hide (slides to a sliver when not hovered; space reclaimed) as default, and fixed (always visible, strip permanently reserved, like a pinned taskbar).
+- **Docking is a Win32 AppBar** (taskbar-like), not a custom edge-attach or a floating always-on-top overlay. The user explicitly asked for "OS docking like a taskbar". An AppBar coordinates with the shell; in `fixed` mode it reserves its screen edge — a docked bar takes space from maximized windows by design. *(Amended 2026-08-21, ticket 63: `auto-hide` mode does overlay content and reserves nothing — see below; the "never overlays" clause now applies to `fixed` only.)*
+- **Two dock visibility modes, configured in the app**: auto-hide as default, and fixed (always visible, strip permanently reserved, like a pinned taskbar).
 - **Live dock controls live in the window**: a dock/undock toggle and left↔right edge-switch arrows — no main-app round trip for the everyday gesture. Persistent behavior (mode, default edge) is set in the main app's Settings.
 - **Quick Action is a separate machine-local concept**, not a kind of Launch entry: name + PowerShell command + optional working directory, run fire-and-forget hidden as the current user with no elevation and no status UI. Launch entries keep their app-launch + desktop-group semantics; the two lists are independent.
 - **Per-monitor dock state**: edge and visibility mode persist per monitor; the floating window remembers its size and position. The AppBar is unregistered (`ABM_REMOVE`) on app quit so the edge is never left occupied.
@@ -19,5 +19,19 @@ The tray menu is a cramped, read-only surface: every Launch entry and desktop gr
 ## Consequences
 
 - The tray is no longer the only resident surface; the dock can be the visible resident form.
-- Maximized windows on the docked edge shrink by the strip width while the dock is fixed; auto-hide reclaims it otherwise.
+- Maximized windows on the docked edge shrink by the strip width while the dock is fixed; in auto-hide they never resize — the strip overlays them.
+
+## Amendment — 2026-08-21 (ticket 63)
+
+Research (`docs/research/0003-appbar-autohide-os-contract.md`) established that
+no OS mechanism ever moves or hides an appbar — motion is always the app's
+own — and the user redefined auto-hide's contract: *"the main application
+should stay as full width … on hover it would overlay on top of the app so
+the main application doesn't need to shrink/resize"*. Auto-hide therefore
+registers with the shell for coordination only (exclusivity, notifications,
+z-order courtesy) and never calls `ABM_SETPOS`: hidden or revealed, other
+windows keep their full size while Sprout's driver slides the strip over them
+(~180 ms ease-out, 2 px sliver). `fixed` mode keeps the original reserving
+dock unchanged. The two modes remain independent of the taskbar's own
+auto-hide setting ("not tied to each other, never").
 - Two triggers (window Start button, page Start button) now converge on the same runner (`launch_entries`), keeping one pipeline for launch semantics.

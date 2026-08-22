@@ -2,14 +2,21 @@
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
-  import type { LaunchEntry, LaunchReport, QuickAction } from "$lib/types";
+  import type {
+    LaunchEntry,
+    LaunchReport,
+    QuickAction,
+    QuickActionRunState,
+  } from "$lib/types";
   import {
     getQuickLaunchDockState,
     getSettings,
     listLaunchEntries,
     listQuickActions,
+    listRunningQuickActions,
     runQuickAction,
     startQuickLaunch,
+    stopQuickAction,
     switchQuickLaunchDockEdge,
     toggleQuickLaunchDock,
   } from "$lib/api";
@@ -33,17 +40,24 @@
 
   let entries = $state<LaunchEntry[]>([]);
   let actions = $state<QuickAction[]>([]);
+  // Ticket 62: the ids of the actions whose tracked process is alive —
+  // seeded once from the registry on load, then kept current by the
+  // `quick-action-run-state-changed` events. No polling.
+  let runningActions = $state<Set<number>>(new Set());
   let loading = $state(true);
   let launching = $state(false);
   let error = $state("");
   let tab = $state("launch");
   // Ticket 59: the dock state is never null — while the window floats it
   // carries the target edge/mode the toggle would dock to (`docked: false`),
-  // so the toggle's icon tells the truth before the first dock.
+  // so the toggle's icon tells the truth before the first dock. Ticket 63:
+  // `blocked` carries the shell's auto-hide refusal while docked — transient,
+  // only ever set by the backend.
   let dock = $state<QuickLaunchDockState>({
     edge: "left",
     mode: "auto-hide",
     docked: false,
+    blocked: null,
   });
 
   onMount(() => {
@@ -66,6 +80,17 @@
       load();
       refreshDock();
       applyPersistedTheme();
+    }).then((fn) => unlisteners.push(fn));
+    // Ticket 62: the backend emits one event per tracked action on start and
+    // again when its process exits — this is what flips Run ↔ Stop.
+    listen<QuickActionRunState>("quick-action-run-state-changed", (e) => {
+      const next = new Set(runningActions);
+      if (e.payload.running) {
+        next.add(e.payload.id);
+      } else {
+        next.delete(e.payload.id);
+      }
+      runningActions = next;
     }).then((fn) => unlisteners.push(fn));
     // Ticket 61: a background dock failure — a shell-initiated re-assert
     // (ABN_POSCHANGED) or the drift watchdog — surfaces in the window's error
@@ -111,7 +136,9 @@
     error = "";
     try {
       await switchQuickLaunchDockEdge(edge);
-      dock = { ...dock, edge };
+      // The backend settles the blocked state during the switch (ticket 63) —
+      // re-read instead of merging locally.
+      await refreshDock();
     } catch (e) {
       console.error(e);
       error = String(e);
@@ -121,12 +148,14 @@
   async function load() {
     loading = true;
     try {
-      const [entriesResult, actionsResult] = await Promise.all([
+      const [entriesResult, actionsResult, running] = await Promise.all([
         listLaunchEntries(),
         listQuickActions(),
+        listRunningQuickActions(),
       ]);
       entries = entriesResult;
       actions = actionsResult;
+      runningActions = new Set(running);
       error = "";
     } catch (e) {
       console.error(e);
@@ -152,6 +181,18 @@
     error = "";
     try {
       await runQuickAction(action.id);
+    } catch (e) {
+      console.error(e);
+      error = String(e);
+    }
+  }
+
+  /** Stop (ticket 62): runs the action's stop command, or kills the process
+   *  tree; the exit event flips the button back to Run. */
+  async function stop(action: QuickAction) {
+    error = "";
+    try {
+      await stopQuickAction(action.id);
     } catch (e) {
       console.error(e);
       error = String(e);
@@ -215,6 +256,26 @@
     <IconButton icon="x" label="Close window" onclick={close} />
   </header>
 
+  {#if dock.docked && dock.blocked}
+    <!-- Ticket 63: auto-hide was refused by the shell — say why and offer the
+         free edge instead of silently pinning the strip forever. -->
+    <div class="qlw__blocked" role="status">
+      <span class="qlw__blocked-icon" aria-hidden="true">
+        <Icon name="warn" size={15} />
+      </span>
+      <p class="qlw__blocked-text">
+        {dock.blocked}. The strip stays pinned until that edge frees up —
+        hiding resumes on its own.
+      </p>
+      <Button
+        variant="ghost"
+        onclick={() => switchEdge(dock.edge === "left" ? "right" : "left")}
+      >
+        Move to the {dock.edge === "left" ? "right" : "left"} edge
+      </Button>
+    </div>
+  {/if}
+
   <div class="qlw__tabs">
     <Tabs
       tabs={[
@@ -273,10 +334,25 @@
                   <span class="qlw__action-name" title={action.command}>
                     {action.name}
                   </span>
-                  <Button variant="secondary" onclick={() => run(action)}>
-                    <Icon name="play" size={13} />
-                    Run
-                  </Button>
+                  {#if action.stoppable && runningActions.has(action.id)}
+                    <Button
+                      variant="secondary"
+                      onclick={() => stop(action)}
+                      aria-label={`Stop ${action.name}`}
+                    >
+                      <Icon name="stop" size={13} />
+                      Stop
+                    </Button>
+                  {:else}
+                    <Button
+                      variant="secondary"
+                      onclick={() => run(action)}
+                      aria-label={`Run ${action.name}`}
+                    >
+                      <Icon name="play" size={13} />
+                      Run
+                    </Button>
+                  {/if}
                 </li>
               {/each}
             </ul>
@@ -441,6 +517,36 @@
     padding: 0 var(--space-4) var(--space-4);
     font-size: var(--text-sm);
     color: var(--danger-text);
+    overflow-wrap: anywhere;
+  }
+
+  /* Ticket 63: the blocked-auto-hide banner — the shell refused the edge, so
+     the strip stays pinned and this says why. Shared warn tokens; `status`
+     (not `alert`) because nothing is broken — hiding simply waits for the
+     edge to free up. */
+  .qlw__blocked {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin: 0 var(--space-4) var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: var(--warn-tint);
+    border: 1px solid var(--warn-tint-border);
+    border-radius: var(--radius);
+  }
+
+  .qlw__blocked-icon {
+    display: inline-flex;
+    flex-shrink: 0;
+    color: var(--warn-text);
+  }
+
+  .qlw__blocked-text {
+    flex: 1;
+    min-width: 0;
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--warn-text);
     overflow-wrap: anywhere;
   }
 

@@ -102,13 +102,28 @@ pub struct RunSummary {
     pub outcome: RunOutcome,
 }
 
-/// A fresh, collision-resistant Run id (`run-<epoch millis>`).
+/// A fresh, collision-resistant Run id: `run-<YYYYMMDD>-<HHMMSS>` in LOCAL
+/// time (ticket 65), so History rows and their log folders read as dates.
+/// A same-second repeat gets `-2`, `-3`, … until it does not collide with
+/// an existing run folder — the folder is created moments later from this
+/// id, so its absence is the uniqueness check.
 pub fn new_run_id() -> String {
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    format!("run-{millis}")
+    new_run_id_in(&crate::db::logs_dir().join("runs"))
+}
+
+/// The same as [`new_run_id`], against an explicit runs directory (tests).
+pub(crate) fn new_run_id_in(runs_dir: &Path) -> String {
+    let stamp = crate::quick_actions::log_stamp();
+    // log_stamp is "[YYYY-MM-DD HH:MM:SS]"; compact it to YYYYMMDD-HHMMSS.
+    let digits: String = stamp.chars().filter(|c| c.is_ascii_digit()).collect();
+    let base = format!("run-{}-{}", &digits[0..8], &digits[8..14]);
+    let mut candidate = base.clone();
+    let mut bump: u32 = 1;
+    while runs_dir.join(&candidate).exists() {
+        bump += 1;
+        candidate = format!("{base}-{bump}");
+    }
+    candidate
 }
 
 /// Synthesizes the default Requirement for a Product (ticket 17, quick
@@ -544,6 +559,22 @@ mod tests {
     use super::*;
     use crate::domain::{EnvAction, EnvWiring, Product, Step, VerifyCommand, VersionPolicy};
     use crate::engine::VerifyOutcome;
+
+    #[test]
+    fn new_run_ids_are_readable_and_unique() {
+        let runs_dir = tempfile::tempdir().unwrap().into_path();
+        let id = new_run_id_in(&runs_dir);
+        // run-<8-digit date>-<6-digit time>.
+        let digits: String = id.chars().filter(|c| c.is_ascii_digit()).collect();
+        assert!(id.starts_with("run-"), "{id}");
+        assert_eq!(digits.len(), 14, "{id}");
+        assert_eq!(id.matches('-').count(), 2, "{id}");
+        // An existing folder forces a distinguishing suffix.
+        std::fs::create_dir_all(runs_dir.join(&id)).unwrap();
+        let next = new_run_id_in(&runs_dir);
+        assert_ne!(next, id, "{next}");
+        assert!(next.starts_with(&format!("{id}-")), "{next}");
+    }
 
     struct FakeEngine {
         detections: Mutex<HashMap<String, Detection>>,

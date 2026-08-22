@@ -347,20 +347,33 @@ export interface VirtualDesktop {
 }
 
 /** The editable shape of a Quick Action (ticket 50): a named PowerShell
- * command with an optional working directory, run fire-and-forget from the
- * Quick Launch window's Quick Actions tab. Machine-local — never part of
- * Presets, Plan, Run, or exports. */
+ *  command with an optional working directory, run from the Quick Launch
+ *  window's Quick Actions tab. Machine-local — never part of Presets, Plan,
+ *  Run, or exports. */
 export interface QuickActionInput {
   name: string;
   /** The PowerShell script, multi-line allowed. */
   command: string;
   /** Working directory the command starts in; null = the app's own. */
   cwd: string | null;
+  /** Whether the window shows a Stop button while the action runs
+   *  (ticket 62); false keeps the fire-and-forget behavior. */
+  stoppable: boolean;
+  /** Runs when Stop is clicked; null/empty = kills the process tree. */
+  stop_command: string | null;
 }
 
 /** A Quick Action as stored: the input plus its library id. */
 export interface QuickAction extends QuickActionInput {
   id: number;
+}
+
+/** One run-state change for a tracked Quick Action (ticket 62): emitted on
+ *  start and again when the process exits, so the window flips Run ↔ Stop
+ *  with no polling. */
+export interface QuickActionRunState {
+  id: number;
+  running: boolean;
 }
 
 /** The assignment surface's gate + list (ticket 44): `supported` is false
@@ -397,14 +410,20 @@ export interface LogLocations {
   db_size_bytes: number;
   total_logs_bytes: number;
   runs: LogEntry[];
+  /** One entry per Quick Action run folder, newest first (ticket 64). */
+  quick_action_runs: LogEntry[];
 }
 
 /** The Quick Launch dock's live state (tickets 53 & 59): the edge and
  * visibility mode the window is docked with — or, while it floats, the edge
  * and mode the toggle would dock to — plus whether the window is currently
- * docked. The header renders its dock chrome from this. */
+ * docked. `blocked` (ticket 63) carries the shell's refusal reason when
+ * auto-hide could not engage ("another auto-hide bar already owns this
+ * edge"): transient, only ever set while docked, cleared as soon as the edge
+ * frees up. The header renders it as the warning banner. */
 export interface QuickLaunchDockState {
   edge: "left" | "right";
   mode: "auto-hide" | "fixed";
   docked: boolean;
+  blocked: string | null;
 }

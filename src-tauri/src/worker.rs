@@ -396,11 +396,11 @@ fn list_run_folders(runs_dir: &Path) -> Vec<PathBuf> {
     }
 }
 
-/// The millis a run id embeds (`run-<epoch millis>`), for ordering.
+/// The seconds a run id embeds, for ordering — the shared name-age parser
+/// (ticket 65) understands both the legacy `run-<epoch millis>` ids and the
+/// readable `run-<YYYYMMDD>-<HHMMSS>` ones; an unparseable id orders as 0.
 fn run_millis(name: &str) -> i64 {
-    name.strip_prefix("run-")
-        .and_then(|m| m.parse::<i64>().ok())
-        .unwrap_or(0)
+    crate::logs::embedded_age_secs(name).unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -613,6 +613,15 @@ mod tests {
         write_request(dir.path(), 60);
         assert!(run_is_live(dir.path(), started + Duration::from_secs(1200)));
         assert!(!run_is_live(dir.path(), started + Duration::from_secs(60 * 60 + 181)));
+    }
+
+    #[test]
+    fn readable_run_ids_order_by_their_embedded_date() {
+        // Ticket 65: the new `run-<date>-<time>` ids order chronologically,
+        // and legacy millis ids still parse.
+        assert!(run_millis("run-20260820-141210") > run_millis("run-20260819-141210"));
+        assert!(run_millis("run-1787252173294") > 0);
+        assert_eq!(run_millis("not-a-run"), 0);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 {
   "name": "sprout",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Preset-driven Windows software-installation desktop app",
   "type": "module",
   "scripts": {

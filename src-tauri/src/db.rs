@@ -109,17 +109,20 @@ fn migrate(conn: &Connection) -> Result<()> {
              desktop_id  TEXT,
              position    INTEGER NOT NULL DEFAULT 0
          );
-         CREATE TABLE IF NOT EXISTS quick_actions (
-             id       INTEGER PRIMARY KEY AUTOINCREMENT,
-             name     TEXT NOT NULL,
-             command  TEXT NOT NULL,
-             cwd      TEXT,
-             position INTEGER NOT NULL DEFAULT 0
-         );",
+        CREATE TABLE IF NOT EXISTS quick_actions (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            name         TEXT NOT NULL,
+            command      TEXT NOT NULL,
+            cwd          TEXT,
+            stoppable    INTEGER NOT NULL DEFAULT 0,
+            stop_command TEXT,
+            position     INTEGER NOT NULL DEFAULT 0
+        );",
     )?;
     ensure_preset_imported_column(conn)?;
     ensure_product_timestamps(conn)?;
-    ensure_product_install_dir(conn)
+    ensure_product_install_dir(conn)?;
+    ensure_quick_action_stoppable(conn)
 }
 
 /// Upgrades databases created before the `imported` flag existed (dev
@@ -171,6 +174,25 @@ fn ensure_product_install_dir(conn: &Connection) -> Result<()> {
     )?;
     if !exists {
         conn.execute_batch("ALTER TABLE products ADD COLUMN install_dir TEXT")?;
+    }
+    Ok(())
+}
+
+/// Upgrades databases created before the Quick Action run tracking existed
+/// (any database from tickets 01-61): adds the `stoppable` flag and the
+/// nullable `stop_command` to `quick_actions`. Fresh databases already have
+/// both. Idempotent — re-runs change nothing.
+fn ensure_quick_action_stoppable(conn: &Connection) -> Result<()> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('quick_actions') WHERE name = 'stoppable')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        conn.execute_batch(
+            "ALTER TABLE quick_actions ADD COLUMN stoppable INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE quick_actions ADD COLUMN stop_command TEXT",
+        )?;
     }
     Ok(())
 }
@@ -1763,9 +1785,78 @@ mod tests {
             name: "docker-start".into(),
             command: "docker compose up -d".into(),
             cwd: None,
+            stoppable: false,
+            stop_command: None,
         };
         crate::quick_actions::create_quick_action(&conn, &action).unwrap();
         assert_eq!(crate::quick_actions::list_quick_actions(&conn).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn migrates_quick_actions_created_before_run_tracking() {
+        let dir = test_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        // Simulate a pre-62 database: the quick_actions table exists but has
+        // neither `stoppable` nor `stop_command`, with one existing row.
+        {
+            let conn = Connection::open(dir.join("sprout.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE meta (
+                     key   TEXT PRIMARY KEY,
+                     value TEXT NOT NULL
+                 );
+                 CREATE TABLE quick_actions (
+                     id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                     name     TEXT NOT NULL,
+                     command  TEXT NOT NULL,
+                     cwd      TEXT,
+                     position INTEGER NOT NULL DEFAULT 0
+                 );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO quick_actions (name, command, cwd, position)
+                 VALUES ('docker-start', 'docker compose up -d', NULL, 0)",
+                [],
+            )
+            .unwrap();
+        }
+        let conn = init_at(&dir).unwrap();
+        // Pre-existing data survives and reads back with the defaults: not
+        // stoppable, no stop command.
+        let list = crate::quick_actions::list_quick_actions(&conn).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].action.name, "docker-start");
+        assert!(!list[0].action.stoppable);
+        assert_eq!(list[0].action.stop_command, None);
+        // The migrated table is fully usable for the new fields.
+        let mut tracked = crate::quick_actions::QuickActionInput {
+            name: "dev-services".into(),
+            command: "docker compose up".into(),
+            cwd: None,
+            stoppable: true,
+            stop_command: Some("docker compose stop".into()),
+        };
+        crate::quick_actions::create_quick_action(&conn, &tracked).unwrap();
+        let list = crate::quick_actions::list_quick_actions(&conn).unwrap();
+        assert!(list[1].action.stoppable);
+        assert_eq!(
+            list[1].action.stop_command.as_deref(),
+            Some("docker compose stop")
+        );
+        // The migration is idempotent — re-running init changes nothing.
+        drop(conn);
+        let conn = init_at(&dir).unwrap();
+        tracked.name = "renamed".into();
+        crate::quick_actions::update_quick_action(
+            &conn,
+            &crate::quick_actions::QuickAction { id: list[1].id, action: tracked },
+        )
+        .unwrap();
+        assert_eq!(
+            crate::quick_actions::list_quick_actions(&conn).unwrap().len(),
+            2
+        );
     }
 
     #[test]

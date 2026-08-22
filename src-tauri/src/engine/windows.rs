@@ -787,8 +787,9 @@ pub fn run_timed_process_in(
 }
 
 /// Kills a process and its whole tree (`taskkill /T`), as the legacy runner
-/// did on timebox expiry.
-fn kill_tree(pid: u32) {
+/// did on timebox expiry. Shared with the Quick Action Stop (ticket 62),
+/// whose no-stop-command actions die the same way.
+pub(crate) fn kill_tree(pid: u32) {
     let _ = hidden(Command::new("taskkill"))
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .status();

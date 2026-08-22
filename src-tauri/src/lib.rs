@@ -21,6 +21,7 @@ mod worker;
 
 pub use worker::run_worker;
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -40,9 +41,9 @@ use worker::{ActiveRunInfo, DoneInfo};
 /// Managed app state: the Library connection (mutexed, rusqlite's Connection
 /// is not Sync), the platform engine behind the strategy seam, the launcher
 /// engine behind the Quick Launch seam (ticket 42), the single-flight guard
-/// that keeps two Quick Launch runs from stacking, and the `.sprout.json`
+/// that keeps two Quick Launch runs from stacking, the `.sprout.json`
 /// path the app was launched with (double-click), consumed by the frontend
-/// on first load.
+/// on first load, and the Quick Action run registry (ticket 62).
 pub struct AppState {
     pub db: Mutex<Connection>,
     pub engine: Arc<dyn PlatformEngine>,
@@ -52,6 +53,10 @@ pub struct AppState {
     /// The Quick Launch window's live dock state (ticket 53): `Some` while the
     /// window is docked as a Win32 AppBar, cleared on undock/close/quit.
     pub dock: Mutex<Option<quick_window::DockState>>,
+    /// The Quick Action run registry (ticket 62): action id -> the tracked
+    /// run, for every action whose spawned process is still alive. Per-session
+    /// only — the entries die with the boot, so nothing persists.
+    pub running_actions: Mutex<HashMap<i64, quick_actions::RunningQuickAction>>,
 }
 
 fn lock<'a>(state: &'a State<'a, AppState>) -> Result<std::sync::MutexGuard<'a, Connection>, String> {
@@ -750,12 +755,16 @@ fn move_quick_action(
     Ok(())
 }
 
-/// Runs one stored Quick Action fire-and-forget (ticket 50): the action's
-/// PowerShell command, hidden (`CREATE_NO_WINDOW`), working directory honored
-/// when set, spawned on a background thread so the UI never blocks. Current
-/// user, no elevation, no status UI, no notification.
+/// Runs one stored Quick Action (tickets 50 & 62): the action's PowerShell
+/// command, hidden (`CREATE_NO_WINDOW`), working directory honored when set,
+/// current user, no elevation, no status UI, no notification. The spawned
+/// process is tracked in the per-session registry for its lifetime — a reaper
+/// thread waits on it and emits `quick-action-run-state-changed` on exit, so
+/// the Quick Launch window flips Run ↔ Stop with no polling. A stoppable
+/// action that is already running is rejected — stop it first (the window
+/// shows Stop, not Run, while tracked).
 #[tauri::command]
-fn run_quick_action(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+fn run_quick_action(app: AppHandle, state: State<'_, AppState>, id: i64) -> Result<(), String> {
     let conn = lock(&state)?;
     let action = quick_actions::get_quick_action(&conn, id)
         .map_err(|e| e.to_string())?
@@ -763,10 +772,137 @@ fn run_quick_action(state: State<'_, AppState>, id: i64) -> Result<(), String> {
             "This quick action is no longer in the list — refresh and try again".to_string()
         })?;
     drop(conn);
+    if action.action.stoppable
+        && state
+            .running_actions
+            .lock()
+            .map_err(|e| e.to_string())?
+            .contains_key(&id)
+    {
+        return Err(format!(
+            "'{}' is already running — stop it first.",
+            action.action.name
+        ));
+    }
+    let log_path = quick_actions::new_run_log_path(&crate::db::logs_dir(), &action.action.name);
+    let log_file = log_path.as_ref().and_then(|p| quick_actions::open_run_log(p));
+    let child = match quick_actions::spawn_quick_action(&action.action, log_file.as_ref()) {
+        Ok(child) => child,
+        Err(e) => {
+            // The failure is the run's only record — land it in the folder
+            // when there is one (ticket 64), then fail loudly.
+            if let Some(p) = &log_path {
+                quick_actions::append_log_line(
+                    p,
+                    &format!("{} start failed: {e}", quick_actions::log_stamp()),
+                );
+            }
+            return Err(e);
+        }
+    };
+    let pid = child.id();
+    if let Some(p) = &log_path {
+        quick_actions::write_run_log_header(p, &action.action, id, pid);
+    }
+    state
+        .running_actions
+        .lock()
+        .map_err(|e| e.to_string())?
+        .insert(
+            id,
+            quick_actions::RunningQuickAction {
+                pid,
+                log_path: log_path.clone(),
+            },
+        );
+    let _ = app.emit(
+        "quick-action-run-state-changed",
+        quick_actions::QuickActionRunState { id, running: true },
+    );
+    // The reaper owns the Child: it waits for the exit, records the exit
+    // code in the run's output.log (ticket 64), drops the registry entry
+    // (only if this run is still the tracked one — a Stop already removed
+    // it), and tells the window. PIDs die with the boot anyway, so the
+    // registry stays per-session.
     std::thread::spawn(move || {
-        let _ = quick_actions::spawn_quick_action(&action.action);
+        let mut child = child;
+        let status = child.wait().ok();
+        if let Some(p) = &log_path {
+            quick_actions::write_run_log_exit(p, status.and_then(|s| s.code()));
+        }
+        if let Some(state) = app.try_state::<AppState>() {
+            if let Ok(mut registry) = state.running_actions.lock() {
+                if registry.get(&id).map(|r| r.pid) == Some(pid) {
+                    registry.remove(&id);
+                }
+            }
+        }
+        let _ = app.emit(
+            "quick-action-run-state-changed",
+            quick_actions::QuickActionRunState { id, running: false },
+        );
     });
     Ok(())
+}
+
+/// Stops a running Quick Action (ticket 62): runs the action's own stop
+/// command when it has one (same hidden PowerShell spawn path, the action's
+/// working directory honored), otherwise kills the tracked process tree
+/// (`taskkill /T /F`). The registry entry is removed here; the reaper notices
+/// the death and emits the not-running event. Both the stop line and — when
+/// a stop command ran — its output land in the run's `output.log` (ticket
+/// 64). Stopping an action that is not running is a clear error, never a
+/// silent success.
+#[tauri::command]
+fn stop_quick_action(state: State<'_, AppState>, id: i64) -> Result<(), String> {
+    let tracked = state
+        .running_actions
+        .lock()
+        .map_err(|e| e.to_string())?
+        .remove(&id)
+        .ok_or_else(|| "This quick action is not running.".to_string())?;
+    let conn = lock(&state)?;
+    let action = quick_actions::get_quick_action(&conn, id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| {
+            "This quick action is no longer in the list — refresh and try again".to_string()
+        })?;
+    drop(conn);
+    match quick_actions::normalized_stop_command(&action.action) {
+        Some(stop_command) => {
+            if let Some(p) = &tracked.log_path {
+                quick_actions::write_run_log_stop(
+                    p,
+                    &format!("stop command: {stop_command}"),
+                );
+            }
+            let log_file = tracked
+                .log_path
+                .as_ref()
+                .and_then(|p| quick_actions::open_run_log(p));
+            quick_actions::spawn_stop_command(
+                &stop_command,
+                action.action.cwd.as_deref(),
+                log_file.as_ref(),
+            )
+        }
+        None => {
+            if let Some(p) = &tracked.log_path {
+                quick_actions::write_run_log_stop(p, "tree kill (taskkill /T /F)");
+            }
+            crate::engine::windows::kill_tree(tracked.pid);
+            Ok(())
+        }
+    }
+}
+
+/// The ids of every Quick Action whose tracked process is still alive
+/// (ticket 62) — the Quick Launch window's starting picture when it opens;
+/// from then on the run-state events keep it current.
+#[tauri::command]
+fn list_running_quick_actions(state: State<'_, AppState>) -> Result<Vec<i64>, String> {
+    let registry = state.running_actions.lock().map_err(|e| e.to_string())?;
+    Ok(registry.keys().copied().collect())
 }
 
 /// One Test click in the Quick Actions editor (ticket 50, prior art: the
@@ -796,13 +932,15 @@ fn close_quick_launch_window(app: AppHandle) -> Result<(), String> {
 /// The frontend's view of the live dock state (tickets 53 & 59): the edge and
 /// visibility mode — the values the window is docked with, or, while it
 /// floats, the target values the toggle would dock to — plus `docked`, which
-/// tells the two apart. The header's dock/undock toggle renders the target
-/// edge's icon from it, so the chrome always tells the truth.
+/// tells the two apart, and the transient blocked reason (ticket 63) when
+/// auto-hide is refused by the shell. The header's dock/undock toggle renders
+/// the target edge's icon from it, so the chrome always tells the truth.
 #[derive(serde::Serialize)]
 pub struct DockStateView {
     pub edge: String,
     pub mode: String,
     pub docked: bool,
+    pub blocked: Option<String>,
 }
 
 /// The dock/undock toggle (ticket 53): docks the window to its current
@@ -863,6 +1001,7 @@ fn get_quick_launch_dock_state(app: AppHandle) -> Result<DockStateView, String> 
             edge: d.edge,
             mode: d.mode,
             docked: true,
+            blocked: d.blocked,
         },
         None => {
             let (edge, mode) = quick_window::pending_dock(&app)?;
@@ -870,9 +1009,150 @@ fn get_quick_launch_dock_state(app: AppHandle) -> Result<DockStateView, String> 
                 edge,
                 mode,
                 docked: false,
+                // A block is a property of a live dock only — floating has
+                // nothing to be blocked (ticket 63).
+                blocked: None,
             }
         }
     })
+}
+
+/// [DEBUG-66] Temporary stress driver for ticket 66's repro loop: rapid
+/// fixed↔auto-hide mode switches against a live docked Quick Launch window —
+/// the exact user flow that aborts the process. Debug builds only, and only
+/// when `SPROUT_DOCK_STRESS=1`; writes a marker file (env
+/// `SPROUT_DOCK_STRESS_RESULT`, default `%TEMP%\sprout-stress-66.json`)
+/// containing "PASS iters=N" on clean completion, then exits. The harness in
+/// `tools/repro-dock-mode-stress.ps1` asserts on that marker plus the
+/// process exit code. Restores the captured settings/dock memory afterwards.
+#[cfg(debug_assertions)]
+fn debug66_dock_mode_stress(app: AppHandle) {
+    use std::time::Duration;
+
+    struct Snapshot {
+        settings: Settings,
+        monitor: Option<String>,
+        monitor_edge: Option<String>,
+        monitor_mode: Option<String>,
+    }
+
+    fn restore(app: &AppHandle, snap: &Snapshot) {
+        let state = app.state::<AppState>();
+        let Ok(conn) = state.db.lock() else {
+            return;
+        };
+        let _ = settings::save(&conn, &snap.settings);
+        if let Some(m) = &snap.monitor {
+            if let Some(e) = &snap.monitor_edge {
+                let _ = db::save_dock_edge(&conn, m, e);
+            }
+            if let Some(mo) = &snap.monitor_mode {
+                let _ = db::save_dock_mode(&conn, m, mo);
+            }
+        }
+    }
+
+    std::thread::spawn(move || {
+        let marker = std::env::var("SPROUT_DOCK_STRESS_RESULT").unwrap_or_else(|_| {
+            std::env::temp_dir()
+                .join("sprout-stress-66.json")
+                .display()
+                .to_string()
+        });
+        let iterations: u32 = std::env::var("SPROUT_DOCK_STRESS_ITERS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(60);
+        let interval_ms: u64 = std::env::var("SPROUT_DOCK_STRESS_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(80);
+        eprintln!("[stress-66] begin iters={iterations} interval_ms={interval_ms}");
+        // Deterministic start: wipe leftover dock state (a crashed earlier run
+        // persists mode=auto-hide / state=docked, which changes the next
+        // launch's open() behavior and poisons the scenario).
+        {
+            let state = app.state::<AppState>();
+            let Ok(conn) = state.db.lock() else {
+                eprintln!("[stress-66] could not lock db for the state reset");
+                return;
+            };
+            let _ = conn.execute(
+                "INSERT INTO meta (key, value) VALUES ('dock.state','floating')
+                 ON CONFLICT(key) DO UPDATE SET value='floating'",
+                [],
+            );
+            let _ = conn.execute(
+                "DELETE FROM meta WHERE key LIKE 'quicklaunch.dock.%'",
+                [],
+            );
+        }
+        let fail = |marker: &str, reason: String| {
+            eprintln!("[stress-66] FAIL {reason}");
+            let _ = std::fs::write(marker, format!("FAIL {reason}"));
+        };
+        // Snapshot for restore while the window is still floating.
+        let snapshot = {
+            let state = app.state::<AppState>();
+            let conn = match state.db.lock() {
+                Ok(conn) => conn,
+                Err(e) => {
+                    fail(&marker, format!("snapshot {e}"));
+                    app.exit(3);
+                    return;
+                }
+            };
+            let s = settings::load(&conn);
+            let monitor = app
+                .get_webview_window(quick_window::QUICK_LAUNCH_WINDOW)
+                .and_then(|w| w.hwnd().ok())
+                .and_then(|h| appbar::monitor_key(h.0));
+            let (edge, mode) = match &monitor {
+                Some(m) => (db::load_dock_edge(&conn, m), db::load_dock_mode(&conn, m)),
+                None => (None, None),
+            };
+            Snapshot {
+                settings: s,
+                monitor,
+                monitor_edge: edge,
+                monitor_mode: mode,
+            }
+        };
+        if let Err(e) = quick_window::open(&app) {
+            restore(&app, &snapshot);
+            fail(&marker, format!("open {e}"));
+            app.exit(3);
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(800));
+        if let Err(e) = quick_window::dock(&app, None) {
+            let _ = quick_window::undock(&app);
+            restore(&app, &snapshot);
+            fail(&marker, format!("dock {e}"));
+            app.exit(3);
+            return;
+        }
+        // Normalize to fixed so iteration 0's flip is always fixed→auto-hide.
+        if let Err(e) = quick_window::set_dock_mode(&app, "fixed") {
+            eprintln!("[stress-66] normalize to fixed failed: {e}");
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        for i in 0..iterations {
+            let mode = if i % 2 == 0 { "auto-hide" } else { "fixed" };
+            eprintln!("[stress-66] iter={i} -> {mode}");
+            if let Err(e) = quick_window::set_dock_mode(&app, mode) {
+                eprintln!("[stress-66] iter={i} set_dock_mode({mode}) errored: {e}");
+            }
+            std::thread::sleep(Duration::from_millis(interval_ms));
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        let _ = quick_window::undock(&app);
+        let _ = quick_window::close(&app);
+        restore(&app, &snapshot);
+        eprintln!("[stress-66] PASS iters={iterations}");
+        let _ = std::fs::write(&marker, format!("PASS iters={iterations}"));
+        app.exit(0);
+    });
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -915,7 +1195,8 @@ pub fn run() {
             //
             // Ticket 56: the Quick Launch window is a persistent palette —
             // blur does nothing (the floating window stays open until closed,
-            // and the OS owns the docked bar's visibility), and its × button /
+            // and the docked bar's visibility is Sprout's own driver,
+            // ticket 63), and its × button /
             // Alt+F4 destroy it. The tray's left-click reopens it at its
             // fixed centered size (it never remembers geometry).
             if window.label() == quick_window::QUICK_LAUNCH_WINDOW {
@@ -941,6 +1222,15 @@ pub fn run() {
             // The dock drift watchdog (ticket 61): one background thread that
             // re-docks the bar when its window drifts from its edge.
             quick_window::start_drift_guard(app.handle().clone());
+            // The auto-hide motion driver (ticket 63): ~16 ms cursor polling
+            // that slides the docked strip to its sliver and back — Sprout
+            // owns the motion; the OS never moves an appbar.
+            quick_window::start_autohide_driver(app.handle().clone());
+            // [DEBUG-66] ticket 66 repro loop (debug builds + opt-in env only).
+            #[cfg(debug_assertions)]
+            if std::env::var("SPROUT_DOCK_STRESS").as_deref() == Ok("1") {
+                debug66_dock_mode_stress(app.handle().clone());
+            }
             Ok(())
         })
         .manage(AppState {
@@ -950,6 +1240,7 @@ pub fn run() {
             launch_in_progress: Arc::new(AtomicBool::new(false)),
             pending_import: Mutex::new(pending_import),
             dock: Mutex::new(None),
+            running_actions: Mutex::new(HashMap::new()),
         })
         .invoke_handler(tauri::generate_handler![
             list_products,
@@ -997,6 +1288,8 @@ pub fn run() {
             delete_quick_action,
             move_quick_action,
             run_quick_action,
+            stop_quick_action,
+            list_running_quick_actions,
             test_quick_action,
             close_quick_launch_window,
             toggle_quick_launch_dock,

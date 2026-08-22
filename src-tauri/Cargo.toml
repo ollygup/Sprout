@@ -1,6 +1,8 @@
 [package]
 name = "sprout"
-version = "0.2.0"
+# App version. Single source of truth: `src-tauri/tauri.conf.json` — keep
+# this line in sync (the exe metadata reads it from here).
+version = "0.3.0"
 description = "Preset-driven Windows software-installation desktop app"
 authors = ["Sprout contributors"]
 edition = "2021"
@@ -23,8 +25,13 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 dirs = "6"
 winreg = "0.56.0"
 # ShellExecuteW "runas" — the single UAC prompt behind the worker relaunch;
-# Win32_Storage_FileSystem gates SHGetFileInfoW (ticket 40's icon extraction).
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Environment", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+# Win32_Storage_FileSystem gates SHGetFileInfoW (ticket 40's icon extraction);
+# Win32_System_SystemInformation gates GetLocalTime (ticket 64's run-log
+# stamps — local wall clock without a chrono dependency, per the size budget).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Environment", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", # Win32_Media gates timeBeginPeriod (ticket 63): 1 ms timer
+# resolution while an auto-hide slide animates, or Sleep quantizes to ~15.6 ms
+# and the motion stutters.
+"Win32_Media"] }
 winvd = "0.0.49"
 # Aligned with the version winvd pulls; Win32_Storage_FileSystem gates
 # IShellLinkW::GetPath, the lnk resolution behind the installed-app search.

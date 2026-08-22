@@ -73,11 +73,11 @@ _Avoid_: Quick start, launcher
 **Quick Launch window**:
 The miniature window opened from the tray icon with two tabs — Quick Launch (a single Start button that starts the whole Quick Launch list) and Quick Actions — for read-only, fast access. It floats as a persistent window (stays open until closed with × / Alt+F4 — blur never hides it — and is freely draggable) or docks as a Win32 AppBar (the Quick Launch dock) on the left/right screen edge. It has no configuration surface; all configuration happens in the main app.
 _Avoid_: Miniature window, palette, tray menu
-
 **Quick Launch dock**:
-The Quick Launch window's docked form — a Win32 AppBar reserving a slim strip on a screen edge, either auto-hiding (slides to a sliver when not hovered, like the taskbar) or fixed (always visible). Never part of Presets or exports.
+
+The Quick Launch window's docked form — a Win32 AppBar on the left/right screen edge, in one of two modes. **Fixed** reserves a slim strip (maximized windows shrink by it). **Auto-hide** is Sprout-driven and overlays: the strip slides out (~180 ms ease-out) when the cursor touches the docked screen edge and slides away to a 2 px sliver when the cursor leaves — other windows keep their full size either way, independent of the taskbar's own auto-hide setting, working even where the shell refuses the auto-hide registration. Never part of Presets or exports.
 _Avoid_: Sidebar, tray bar, launcher bar
 
 **Quick Action**:
-A machine-local, user-authored named command (PowerShell, optional working directory) run fire-and-forget from the Quick Launch window's Quick Actions tab (e.g. "docker start" → `docker compose up -d`); runs hidden as the current user with no elevation and no status UI. Configured in the main app's Quick Actions page; never part of Presets, Plan, Run, or exports.
+A machine-local, user-authored named command (PowerShell, optional working directory) run from the Quick Launch window's Quick Actions tab (e.g. "docker start" → `docker compose up -d`); runs hidden as the current user with no elevation and no status UI. Optionally **stoppable**: while its process runs, the Run button becomes Stop, which either runs the action's own stop command (e.g. `docker compose stop`) or kills the process tree; tracking covers foreground commands only — detached commands (e.g. `-d`) report as not running because the process exits while the service continues. Configured in the main app's Quick Actions page; never part of Presets, Plan, Run, or exports.
 _Avoid_: Action (a Plan term), command entry, script

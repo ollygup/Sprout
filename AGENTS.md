@@ -98,3 +98,24 @@ here is deleted from the repo or the share.
 - `src/` — Svelte 5 frontend (`lib/styles/tokens.css` = design tokens; `lib/components/` = accessible component foundation; `routes/+page.svelte` = Library view).
 - `src-tauri/src/` — Rust backend (`domain.rs` = domain model, `db.rs` = lazy SQLite (empty on first run — ADR-0008), `engine/` = PlatformEngine strategy seam, `lib.rs` = Tauri commands).
 - `docs/` — CONTEXT.md (glossary), specs/, adr/, research/, release/ (parity gate record + archived legacy log). `tools/` — parity compare, parity preset, sync.ps1 (guarded share sync). `.scratch/sprout-app/issues/` — ticket tracker (mark ACs done as you go).
+
+## Module design
+When extracting, refactoring interfaces, or deciding module boundaries,
+use codebase-design skill vocabulary (module/interface/seam/adapter/depth)
+and apply its deletion test before extracting to shared/.
+
+## Conventions (Rust + Tauri + Svelte)
+- Constants: domain-split under constants/ (theme, window, app) — not one file.
+- App version: Cargo.toml only, tauri.conf.json omits it (auto-inherits).
+  Svelte reads via getVersion(), never a duplicated constant.
+- Window sizing: tauri.conf.json is the default-size source; runtime/docked
+  dimensions Svelte needs come from a Tauri command, not a JS constant.
+- shared/: only for modules that hide real complexity or have a genuine
+  second adapter. Thin pass-throughs get inlined.
+
+## Comments
+- No WHAT comments — if the code needs one to be understood, fix the naming/interface instead.
+- WHY comments only, self-contained (readable without opening a tracker).
+- Point to an ADR by name for durable rationale, never a ticket number (tickets close/renumber; ADRs don't).
+- External constraints (upstream bugs, library quirks) may cite the issue link directly.
+- No history trails in comments (ticket 1 → 5 → 10) — that's git log/blame's job, not the code's.
