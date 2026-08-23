@@ -59,31 +59,19 @@ cargo test               # backend tests (CRUD, presets, runs, validation)
 cargo check              # fast compile check
 ```
 
-## Release build (exe + setup.exe)
+## Releases
 
-Run from `C:\Sprout`. Outputs land in `src-tauri\target\release\`, then get
-copied to the distribution folder `dist\` (both locations).
-
-1. Pre-flight: `npm.cmd run check` (svelte-check, 0 errors) and `cargo test`
-   in `src-tauri\`.
-2. `npm.cmd run tauri build` — vite build → cargo release → NSIS installer
-   (vendored `src-tauri/nsis/installer.nsi`). Allow a long timeout; the first
-   release compile of the day takes several minutes.
-3. Verify artifacts:
-   - `src-tauri\target\release\sprout.exe`
-   - `src-tauri\target\release\bundle\nsis\Sprout_<version>_x64-setup.exe`
-4. Copy (overwrite) both into `C:\Sprout\dist\` — the distribution folder.
-5. Cleanup: run the "Cleanup (device storage)" step below — AFTER step 4, so
-   the fresh exe is safe in `dist\`.
-6. Sync to the share with `tools\sync.ps1 -Up` (the script's exclusions keep
-   `node_modules target build .svelte-kit .vscode .codegraph` off the share,
-   NOT `dist`, so the new installers reach it). Verify with a second `-Up` —
-   expect `0 copied`.
+Releases are GitHub Releases built by CI — never hand-built installers on
+this device. The whole flow (pre-flight gates, version bump in Cargo.toml,
+sync, tag push, passive self-update) lives in
+`docs/release/release-process.md`; follow it instead of building locally.
+`npm.cmd run tauri build` stays available for the rare local artifact, with
+the same pre-flight gates.
 
 ## Cleanup (device storage)
 
-Run whenever told to do a cleanup, and automatically as the last step of
-every release build. Device-only — the share never holds these dirs; nothing
+Run whenever told to do a cleanup, and automatically after any local
+`tauri build`. Device-only — the share never holds these dirs; nothing
 here is deleted from the repo or the share.
 
 - `Remove-Item -Recurse -Force C:\Sprout\src-tauri\target` — the big one

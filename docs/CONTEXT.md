@@ -73,8 +73,8 @@ _Avoid_: Quick start, launcher
 **Quick Launch window**:
 The miniature window opened from the tray icon with two tabs — Quick Launch (a single Start button that starts the whole Quick Launch list) and Quick Actions — for read-only, fast access. A third tab, **Quick Clips**, joins them once any Clip exists; until then the window stays a two-tab palette. It floats as a persistent window (stays open until closed with × / Alt+F4 — blur never hides it — and is freely draggable) or docks as a Win32 AppBar (the Quick Launch dock) on the left/right screen edge. It has no configuration surface; all configuration happens in the main app.
 _Avoid_: Miniature window, palette, tray menu
-**Quick Launch dock**:
 
+**Quick Launch dock**:
 The Quick Launch window's docked form — a Win32 AppBar on the left/right screen edge, in one of two modes. **Fixed** reserves a slim strip (maximized windows shrink by it). **Auto-hide** is Sprout-driven and overlays: the strip slides out (~180 ms ease-out) when the cursor touches the docked screen edge and slides away to a 2 px sliver when the cursor leaves — other windows keep their full size either way, independent of the taskbar's own auto-hide setting, working even where the shell refuses the auto-hide registration. Its docked-versus-floating state is remembered per monitor and restored whenever Sprout starts — including Windows auto-start (ADR-0013). Never part of Presets or exports.
 _Avoid_: Sidebar, tray bar, launcher bar
 
