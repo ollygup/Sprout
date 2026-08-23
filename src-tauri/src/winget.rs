@@ -170,9 +170,10 @@ impl Columns {
     }
 }
 
-/// Finds a whole word's byte position in a line (whitespace-bounded), the
-/// same way the `winget list` parser locates its columns.
-fn find_word(line: &str, word: &str) -> Option<usize> {
+/// Finds a whole word's byte position in a line (whitespace-bounded) — the
+/// one column locator for winget's aligned-column tables, shared by this
+/// module's search parser and the engine adapter's `winget list` parser.
+pub(crate) fn find_word(line: &str, word: &str) -> Option<usize> {
     let bytes = line.as_bytes();
     let needle = word.as_bytes();
     let mut i = 0;

@@ -40,7 +40,7 @@ $local = "C:\Sprout"
 $stateFile = Join-Path $local ".sync-state.json"
 # Same list as the AGENTS.md robocopy /XD (minus .git) - checked against
 # EVERY path segment, so nested build dirs like src-tauri\target are caught.
-$excludeSegments = @("node_modules", "target", "build", ".svelte-kit", ".vscode", ".git")
+$excludeSegments = @("node_modules", "target", "build", ".svelte-kit", ".vscode", ".codegraph", ".git")
 $excludeFiles = @(".sync-state.json")
 # Sanity ceiling: a legit session touches a handful of files; anything near
 # this is a runaway copy (e.g. build output) - abort before writing.

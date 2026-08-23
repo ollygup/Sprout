@@ -94,9 +94,10 @@ pub fn appbar_rect(work: RECT, edge: u32, width: i32) -> RECT {
     }
 }
 
-/// The monitor's work area (the screen area minus the taskbar) for the
-/// monitor the window currently sits on.
-pub fn work_area(hwnd: HWND) -> Option<RECT> {
+/// The full info for the monitor `hwnd` currently sits on — the one
+/// `MonitorFromWindow`→`GetMonitorInfoW` probe; the accessors below return
+/// different fields of it.
+fn monitor_info(hwnd: HWND) -> Option<MONITORINFOEXW> {
     unsafe {
         let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
         if monitor.is_null() {
@@ -107,48 +108,32 @@ pub fn work_area(hwnd: HWND) -> Option<RECT> {
         if GetMonitorInfoW(monitor, &mut info.monitorInfo as *mut _) == 0 {
             return None;
         }
-        Some(info.monitorInfo.rcWork)
+        Some(info)
     }
+}
+
+/// The monitor's work area (the screen area minus the taskbar) for the
+/// monitor the window currently sits on.
+pub fn work_area(hwnd: HWND) -> Option<RECT> {
+    monitor_info(hwnd).map(|info| info.monitorInfo.rcWork)
 }
 
 /// The monitor's full rectangle (`rcMonitor` — reservations and taskbar
 /// included): the geometry base for the auto-hide overlay strip (ticket 63),
 /// which spans the screen edge whether or not anything is reserved there.
 pub fn monitor_rect(hwnd: HWND) -> Option<RECT> {
-    unsafe {
-        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-        if monitor.is_null() {
-            return None;
-        }
-        let mut info: MONITORINFOEXW = std::mem::zeroed();
-        info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
-        if GetMonitorInfoW(monitor, &mut info.monitorInfo as *mut _) == 0 {
-            return None;
-        }
-        Some(info.monitorInfo.rcMonitor)
-    }
+    monitor_info(hwnd).map(|info| info.monitorInfo.rcMonitor)
 }
 
 /// A stable per-monitor key for the dock's memory: the monitor's device name
 /// (e.g. `\\.\DISPLAY1`), which survives display rearrangements and reboots.
 pub fn monitor_key(hwnd: HWND) -> Option<String> {
-    unsafe {
-        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-        if monitor.is_null() {
-            return None;
-        }
-        let mut info: MONITORINFOEXW = std::mem::zeroed();
-        info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
-        if GetMonitorInfoW(monitor, &mut info.monitorInfo as *mut _) == 0 {
-            return None;
-        }
-        let name = String::from_utf16_lossy(&info.szDevice);
-        let name = name.trim_end_matches('\0').to_string();
-        if name.is_empty() {
-            None
-        } else {
-            Some(name)
-        }
+    let name = String::from_utf16_lossy(&monitor_info(hwnd)?.szDevice);
+    let name = name.trim_end_matches('\0').to_string();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
     }
 }
 
@@ -473,7 +458,7 @@ fn appbar_data(hwnd: HWND, edge: u32, rc: RECT) -> APPBARDATA {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::window_constants::{DOCK_WIDTH, WINDOW_WIDTH};
+    use crate::constants::window::{DOCK_WIDTH, WINDOW_WIDTH};
 
     #[test]
     fn left_edge_strips_the_work_area() {

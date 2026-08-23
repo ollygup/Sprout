@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { PresetRecord } from "$lib/types";
-  import Icon from "./Icon.svelte";
+  import PacketCard from "./PacketCard.svelte";
   import type { MenuRequest } from "./ContextMenu.svelte";
 
   let {
@@ -24,196 +24,48 @@
     requirements.slice(0, 3).map((r) => r.product.name || r.product.id)
   );
   const extraProducts = $derived(requirements.length - visibleProducts.length);
-  let card: HTMLElement | undefined = $state();
-  let dots: HTMLButtonElement | undefined = $state();
-
-  function openAtCursor(e: MouseEvent) {
-    e.preventDefault();
-    // A keyboard-triggered contextmenu (Shift+F10 / Menu key) has detail 0
-    // and no meaningful cursor position — anchor to the card instead.
-    if (e.detail === 0) {
-      onmenu({ kind: "anchor", anchor: card ?? null, focusFirst: true, returnTo: card ?? null });
-    } else {
-      onmenu({ kind: "cursor", x: e.clientX, y: e.clientY, returnTo: card ?? null });
-    }
-  }
-
-  function openFromCard() {
-    onmenu({ kind: "anchor", anchor: card ?? null, focusFirst: true, returnTo: card ?? null });
-  }
-
-  function onDotsClick(e: MouseEvent) {
-    onmenu({
-      kind: "anchor",
-      anchor: dots ?? null,
-      focusFirst: e.detail === 0,
-      returnTo: dots ?? null,
-    });
-  }
-
-  function onCardKeydown(e: KeyboardEvent) {
-    if (e.key === "Enter" || e.key === " ") {
-      e.preventDefault();
-      openFromCard();
-    }
-  }
 </script>
 
-<div
-  bind:this={card}
-  class="packet"
-  class:animate
-  tabindex="0"
-  role="button"
-  aria-haspopup="menu"
-  aria-expanded={expanded}
-  aria-label={`Actions for ${record.name}`}
-  style={animate ? `animation-delay: ${Math.min(index * 28, 420)}ms` : undefined}
-  onkeydown={onCardKeydown}
-  oncontextmenu={openAtCursor}
+<PacketCard
+  name={record.name}
+  cardLabel={`Actions for ${record.name}`}
+  badge={{ text: `v${record.version}`, title: "Preset version" }}
+  {index}
+  {animate}
+  {expanded}
+  {onmenu}
 >
-  <div class="packet__band">
-    <div class="packet__band-row">
-      <h3 class="packet__name">{record.name}</h3>
-      <span class="packet__version" title="Preset version">v{record.version}</span>
-    </div>
-  </div>
+  <p class="packet__desc">{record.description}</p>
 
-  <div class="packet__body">
-    <p class="packet__desc">{record.description}</p>
-
-    <div class="packet__tags">
-      <span class="tag">
-        {requirements.length} requirement{requirements.length === 1 ? "" : "s"}
+  <div class="packet__tags">
+    <span class="tag">
+      {requirements.length} requirement{requirements.length === 1 ? "" : "s"}
+    </span>
+    {#each visibleProducts as product (product)}
+      <span class="tag tag--product">{product}</span>
+    {/each}
+    {#if extraProducts > 0}
+      <span class="tag tag--more">+{extraProducts} more</span>
+    {/if}
+    {#if record.imported}
+      <span class="tag tag--imported" title="Imported from a .sprout.json — stored as authored, fork to edit">
+        imported
       </span>
-      {#each visibleProducts as product (product)}
-        <span class="tag tag--product">{product}</span>
-      {/each}
-      {#if extraProducts > 0}
-        <span class="tag tag--more">+{extraProducts} more</span>
-      {/if}
-      {#if record.imported}
-        <span class="tag tag--imported" title="Imported from a .sprout.json — stored as authored, fork to edit">
-          imported
-        </span>
-      {/if}
-      {#if envCount > 0}
-        <span class="tag tag--env" title="Env wiring entries">env: {envCount}</span>
-      {/if}
-      {#if verifyCount > 0}
-        <span class="tag tag--env" title="Verify commands">verify: {verifyCount}</span>
-      {/if}
-    </div>
-
-    {#if record.author}
-      <p class="packet__author">by {record.author}</p>
+    {/if}
+    {#if envCount > 0}
+      <span class="tag tag--env" title="Env wiring entries">env: {envCount}</span>
+    {/if}
+    {#if verifyCount > 0}
+      <span class="tag tag--env" title="Verify commands">verify: {verifyCount}</span>
     {/if}
   </div>
 
-  <div class="packet__tear" aria-hidden="true"></div>
-
-  <footer class="packet__foot">
-    <button
-      bind:this={dots}
-      type="button"
-      class="packet__dots"
-      data-ctx-trigger
-      aria-haspopup="menu"
-      aria-expanded={expanded}
-      aria-label={`More actions for ${record.name}`}
-      title="More actions"
-      onclick={onDotsClick}
-    >
-      <Icon name="dots" size={15} />
-    </button>
-  </footer>
-</div>
+  {#if record.author}
+    <p class="packet__author">by {record.author}</p>
+  {/if}
+</PacketCard>
 
 <style>
-  .packet {
-    position: relative;
-    display: flex;
-    flex-direction: column;
-    min-height: 156px;
-    overflow: hidden;
-    background: var(--bg-surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    box-shadow: var(--shadow-card);
-    cursor: pointer;
-    transition: transform var(--dur) var(--ease-out),
-      border-color var(--dur) var(--ease-out);
-  }
-
-  .packet:hover {
-    transform: translateY(-2px);
-    border-color: var(--border-strong);
-  }
-
-  .packet.animate {
-    opacity: 0;
-    animation: rise 360ms var(--ease-out) forwards;
-  }
-
-  @keyframes rise {
-    from {
-      opacity: 0;
-      transform: translateY(10px);
-    }
-    to {
-      opacity: 1;
-      transform: translateY(0);
-    }
-  }
-
-  /* the two-tone seed-packet band: accent folds into warm at its foot */
-  .packet__band {
-    padding: var(--space-3) var(--space-4) var(--space-2);
-    background: linear-gradient(
-      180deg,
-      var(--accent-tint) 0%,
-      var(--accent-tint) 55%,
-      var(--warm-tint) 100%
-    );
-    border-bottom: 1px solid var(--border);
-  }
-
-  .packet__band-row {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: var(--space-2);
-  }
-
-  .packet__name {
-    font-family: var(--font-display);
-    font-size: var(--text-lg);
-    font-weight: 600;
-    line-height: 1.22;
-    color: var(--text);
-    overflow-wrap: anywhere;
-  }
-
-  .packet__version {
-    flex-shrink: 0;
-    font-family: var(--font-mono);
-    font-size: var(--text-2xs);
-    font-weight: 500;
-    letter-spacing: var(--tracking-mono);
-    padding: 2px 8px;
-    border: 1px solid var(--accent-tint-border);
-    border-radius: var(--radius-pill);
-    color: var(--accent);
-    background: var(--bg-surface);
-  }
-
-  .packet__body {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-    padding: var(--space-3) var(--space-4) 0;
-  }
-
   .packet__desc {
     margin: 0;
     font-size: var(--text-sm);
@@ -274,73 +126,5 @@
     font-size: var(--text-2xs);
     letter-spacing: var(--tracking-mono);
     color: var(--text-muted);
-  }
-
-  /* the signature: a seed-packet tear line */
-  .packet__tear {
-    margin-top: auto;
-    border-top: 2px dashed var(--warm);
-    margin-bottom: 0;
-  }
-
-  .packet__tear::after {
-    content: "";
-    display: block;
-    height: 4px;
-    background: linear-gradient(
-      90deg,
-      var(--bg-sunken) 0 8px,
-      var(--bg-surface) 8px 12px,
-      var(--bg-sunken) 12px 20px,
-      var(--bg-surface) 20px 24px,
-      var(--bg-sunken) 24px 32px,
-      var(--bg-surface) 32px 36px,
-      var(--bg-sunken) 36px 44px,
-      var(--bg-surface) 44px 48px,
-      var(--bg-sunken) 48px 56px,
-      var(--bg-surface) 56px 100%
-    );
-  }
-
-  .packet__foot {
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    padding: 3px var(--space-3) 4px;
-  }
-
-  .packet__dots {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 28px;
-    height: 28px;
-    border: 1px solid transparent;
-    border-radius: var(--radius-sm);
-    background: transparent;
-    color: var(--text-muted);
-    cursor: pointer;
-    opacity: 0;
-    transition: opacity var(--dur-fast) var(--ease-out),
-      background var(--dur-fast) var(--ease-out),
-      color var(--dur-fast) var(--ease-out);
-  }
-
-  .packet:hover .packet__dots,
-  .packet:focus-within .packet__dots,
-  .packet:focus .packet__dots {
-    opacity: 1;
-  }
-
-  .packet__dots:hover,
-  .packet__dots:focus-visible {
-    background: var(--bg-hover);
-    color: var(--text);
-  }
-
-  @media (hover: none) {
-    .packet__dots {
-      opacity: 1;
-    }
   }
 </style>

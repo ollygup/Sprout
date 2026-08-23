@@ -2,13 +2,19 @@
 
 Read this first. These rules exist so every session (including fresh ones) builds without surprises and never damages the source of truth.
 
-## Default query
-- Use grep-based queries to explore the codebase.
+## CodeGraph
+
+In repositories indexed by CodeGraph (a `.codegraph/` directory exists at the repo root), reach for it BEFORE grep/find or reading files when you need to understand or locate code:
+
+- **MCP tool** (when available): `codegraph_explore` answers most code questions in one call — the relevant symbols' verbatim source plus the call paths between them, including dynamic-dispatch hops grep can't follow. Name a file or symbol in the query to read its current line-numbered source. If it's listed but deferred, load it by name via tool search.
+- **Shell** (always works): `codegraph explore "<symbol names or question>"` prints the same output.
+
+If there is no `.codegraph/` directory, skip CodeGraph entirely — indexing is the user's decision.
 
 ## Design rules
 
 - Every UI change must follow the `web-design-guidelines` and `frontend-design` skills and reuse the existing design system: tokens from `src/lib/styles/tokens.css` and components from `src/lib/components/`. No ad-hoc colors, type sizes, radii, or one-off component patterns; if a shared pattern genuinely doesn't fit, capture the deviation in the ticket and get it reviewed before shipping.
-- Reusable UI geometry constants live in `src-tauri/src/window_constants.rs` — never re-declared in another module. Scan that file first before any UI-dimension change.
+- Reusable UI geometry constants live in `src-tauri/src/constants/window.rs` — never re-declared in another module. Scan that file first before any UI-dimension change.
 
 ## Working copy rule (important)
 
@@ -30,7 +36,7 @@ tools\sync.ps1 -Up
 - The snapshot lives in `C:\Sprout\.sync-state.json` (excluded from the sync itself). If you must fall back to raw robocopy, add `/XF .sync-state.json` to the command below — and know that it silently clobbers newer share content:
 
 ```powershell
-robocopy "C:\Sprout" "\\vmware-host\Shared Folders\Projects\Sprout" /E /R:1 /W:1 /NFL /NDL /NJH /NP /XD node_modules target build .svelte-kit .vscode /XF .sync-state.json
+robocopy "C:\Sprout" "\\vmware-host\Shared Folders\Projects\Sprout" /E /R:1 /W:1 /NFL /NDL /NJH /NP /XD node_modules target build .svelte-kit .vscode .codegraph /XF .sync-state.json
 ```
 
 ## Toolchain (already installed on this machine)
@@ -70,9 +76,9 @@ copied to the distribution folder `dist\` (both locations).
 5. Cleanup: run the "Cleanup (device storage)" step below — AFTER step 4, so
    the fresh exe is safe in `dist\`.
 6. Sync to the share with `tools\sync.ps1 -Up` (the script's exclusions keep
-   `node_modules target build .svelte-kit .vscode` off the share, NOT `dist`,
-   so the new installers reach it). Verify with a second `-Up` — expect
-   `0 copied`.
+   `node_modules target build .svelte-kit .vscode .codegraph` off the share,
+   NOT `dist`, so the new installers reach it). Verify with a second `-Up` —
+   expect `0 copied`.
 
 ## Cleanup (device storage)
 

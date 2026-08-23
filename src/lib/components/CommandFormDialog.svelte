@@ -1,12 +1,12 @@
 <script lang="ts">
-  import type { LaunchCommandTest, LaunchShell } from "$lib/types";
+  import type { LaunchShell } from "$lib/types";
   import { launchShellLabel } from "$lib/types";
   import { createLaunchEntry, testLaunchCommand } from "$lib/api";
   import Dialog from "./Dialog.svelte";
   import Button from "./Button.svelte";
   import TextInput from "./TextInput.svelte";
-  import Icon from "./Icon.svelte";
   import Select from "./Select.svelte";
+  import TestResult from "./TestResult.svelte";
 
   let {
     open,
@@ -24,9 +24,7 @@
   let showWindow = $state(false);
   let saving = $state(false);
   let error = $state("");
-  let test: LaunchCommandTest | null = $state(null);
   let testing = $state(false);
-  let tested = $state(false);
 
   // The name follows the command until the user edits it by hand.
   let nameAuto = $state(true);
@@ -39,9 +37,6 @@
       showWindow = false;
       saving = false;
       error = "";
-      test = null;
-      testing = false;
-      tested = false;
       nameAuto = true;
     }
   });
@@ -70,25 +65,6 @@
   function onNameInput(value: string) {
     name = value;
     nameAuto = false;
-  }
-
-  async function runTest() {
-    if (!command.trim()) {
-      error = "Type a command first.";
-      return;
-    }
-    error = "";
-    tested = true;
-    testing = true;
-    test = null;
-    try {
-      test = await testLaunchCommand(shell, command.trim());
-    } catch (e) {
-      console.error(e);
-      error = String(e);
-    } finally {
-      testing = false;
-    }
   }
 
   async function submit() {
@@ -196,42 +172,13 @@
       hint="Suggestions come from the command; edit freely."
     />
 
-    <div class="test">
-      <div class="test__row">
-        <Button variant="secondary" disabled={testing || !command.trim()} onclick={runTest}>
-          <Icon name="play" size={13} />
-          {testing ? "Testing…" : "Test"}
-        </Button>
-        <p class="test__note">
-          Runs the command timeboxed (20 s) and reports the exit code and output —
-          a command that outlives the box is interactive, not headless-verifiable.
-        </p>
-      </div>
-      {#if tested && !testing}
-        {#if test?.timed_out}
-          <div class="test__result test__result--timeout" role="status">
-            <p class="test__verdict">
-              Timed out — not headless-verifiable. The command is interactive
-              (or hangs); it was killed after 20 s.
-            </p>
-          </div>
-        {:else}
-          <div class="test__result" role="status">
-            <p class="test__verdict">
-              Exit code: <strong class="mono">{test?.exit_code ?? "—"}</strong>
-              {test?.exit_code === 0
-                ? " — started cleanly."
-                : test?.exit_code === null
-                  ? " — could not start."
-                  : " — the command reported a failure."}
-            </p>
-            {#if test?.output.trim()}
-              <pre class="test__output">{test?.output}</pre>
-            {/if}
-          </div>
-        {/if}
-      {/if}
-    </div>
+    <TestResult
+      {open}
+      {command}
+      bind:testing
+      probe={() => testLaunchCommand(shell, command.trim())}
+      onerror={(message) => (error = message)}
+    />
 
     {#if error}
       <p class="form__error" role="alert">{error}</p>
@@ -336,60 +283,6 @@
     color: var(--text-muted);
   }
 
-  .test {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-    border: 1px dashed var(--border-strong);
-    border-radius: var(--radius);
-    padding: var(--space-3);
-  }
-
-  .test__row {
-    display: flex;
-    align-items: flex-start;
-    gap: var(--space-3);
-  }
-
-  .test__note {
-    margin: 0;
-    font-size: var(--text-xs);
-    color: var(--text-muted);
-  }
-
-  .test__result {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    background: var(--bg-page);
-    padding: var(--space-2) var(--space-3);
-  }
-
-  .test__result--timeout {
-    border-color: var(--danger-tint-border);
-    background: var(--danger-tint);
-  }
-
-  .test__verdict {
-    margin: 0;
-    font-size: var(--text-sm);
-    color: var(--text);
-  }
-
-  .test__output {
-    margin: 0;
-    max-height: 160px;
-    overflow: auto;
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    line-height: var(--leading-normal);
-    color: var(--text-muted);
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-  }
-
   .form__error {
     margin: 0;
     font-size: var(--text-sm);
@@ -402,9 +295,5 @@
     justify-content: flex-end;
     gap: var(--space-2);
     margin-top: var(--space-2);
-  }
-
-  .mono {
-    font-family: var(--font-mono);
   }
 </style>

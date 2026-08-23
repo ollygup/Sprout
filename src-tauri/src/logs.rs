@@ -107,11 +107,7 @@ pub fn prune_run_logs(conn: &Connection) -> Result<usize, String> {
 /// The same as [`prune_run_logs`], against an explicit logs directory.
 pub fn prune_run_logs_at(conn: &Connection, logs_dir: &Path) -> Result<usize, String> {
     let retention_days = settings::load(conn).log_retention_days;
-    let cutoff_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-        .saturating_sub(i64::from(retention_days) * 86_400);
+    let cutoff_secs = crate::db::now_ts().saturating_sub(i64::from(retention_days) * 86_400);
 
     let mut pruned = prune_expired_dirs(&logs_dir.join("runs"), cutoff_secs);
     pruned += prune_expired_dirs(&logs_dir.join(crate::quick_actions::QA_LOGS_DIR_NAME), cutoff_secs);

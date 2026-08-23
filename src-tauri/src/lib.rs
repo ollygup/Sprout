@@ -1,21 +1,22 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 
 mod appbar;
+mod constants;
 mod db;
 mod domain;
 mod engine;
 mod icons;
 mod import_export;
-mod launch;
-mod logs;
-mod plan;
+ mod launch;
+ mod logs;
+ mod ordered_list;
+ mod plan;
 mod quick_actions;
 mod quick_window;
 mod run;
 mod settings;
 mod tray;
 mod walker;
-mod window_constants;
 mod winget;
 mod worker;
 
@@ -607,7 +608,7 @@ fn notify_launch_summary(app: &AppHandle, report: &launch::LaunchReport) -> Resu
 /// Opens the main window: focuses the existing one, or recreates it when it
 /// was destroyed by closing it (ticket 43). Shared by the tray's Open Sprout
 /// and the single-instance focus hook. The recreated window keeps the
-/// configured size and minimums (`window_constants`, mirroring
+/// configured size and minimums (`constants::window`, mirroring
 /// tauri.conf.json).
 pub(crate) fn open_main_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
     use tauri::Manager;
@@ -618,12 +619,12 @@ pub(crate) fn open_main_window(app: &AppHandle) -> tauri::Result<tauri::WebviewW
         tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
             .title("Sprout")
             .inner_size(
-                window_constants::MAIN_WINDOW_WIDTH,
-                window_constants::MAIN_WINDOW_HEIGHT,
+                constants::window::MAIN_WINDOW_WIDTH,
+                constants::window::MAIN_WINDOW_HEIGHT,
             )
             .min_inner_size(
-                window_constants::MAIN_WINDOW_MIN_WIDTH,
-                window_constants::MAIN_WINDOW_MIN_HEIGHT,
+                constants::window::MAIN_WINDOW_MIN_WIDTH,
+                constants::window::MAIN_WINDOW_MIN_HEIGHT,
             )
             .build()
     }
@@ -1077,11 +1078,7 @@ fn debug66_dock_mode_stress(app: AppHandle) {
                 eprintln!("[stress-66] could not lock db for the state reset");
                 return;
             };
-            let _ = conn.execute(
-                "INSERT INTO meta (key, value) VALUES ('dock.state','floating')
-                 ON CONFLICT(key) DO UPDATE SET value='floating'",
-                [],
-            );
+            let _ = crate::db::upsert_meta(&conn, "dock.state", "floating");
             let _ = conn.execute(
                 "DELETE FROM meta WHERE key LIKE 'quicklaunch.dock.%'",
                 [],

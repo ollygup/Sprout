@@ -59,9 +59,10 @@ pub trait LnkResolver {
     fn resolve(&self, lnk_path: &Path) -> Option<String>;
 }
 
-/// Registry hives the walker scans, in priority order (the same three the
-/// engine's uninstall scan uses): 64-bit HKLM, 32-bit HKLM (WOW6432Node), and
-/// HKCU. Walked first wins on name collisions.
+/// Uninstall-registry hives the app scans, in priority order (the legacy
+/// runner's): 64-bit HKLM, 32-bit HKLM (WOW6432Node), HKCU. Walked first
+/// wins on name collisions. The one copy — shared with the engine's
+/// uninstall scan, walked only through [`uninstall_subkeys`].
 type HKEY = windows_sys::Win32::System::Registry::HKEY;
 const UNINSTALL_HIVES: [(HKEY, &str); 3] = [
     (
@@ -78,24 +79,32 @@ const UNINSTALL_HIVES: [(HKEY, &str); 3] = [
     ),
 ];
 
+/// Every uninstall subkey under [`UNINSTALL_HIVES`], in priority order —
+/// the one enumeration behind both the app-list snapshot and the engine's
+/// uninstall heuristics. Hives and subkeys that cannot be opened are
+/// skipped; each consumer extracts what it needs (full entry, display name,
+/// or install location).
+pub(crate) fn uninstall_subkeys() -> Vec<RegKey> {
+    let mut subs = Vec::new();
+    for (root, path) in UNINSTALL_HIVES {
+        let Ok(uninstall) = RegKey::predef(root).open_subkey_with_flags(path, KEY_READ) else {
+            continue;
+        };
+        for name in uninstall.enum_keys().flatten() {
+            if let Ok(sub) = uninstall.open_subkey_with_flags(&name, KEY_READ) {
+                subs.push(sub);
+            }
+        }
+    }
+    subs
+}
+
 /// Reads the three uninstall hives for real.
 pub struct RegistryReader;
 
 impl UninstallRegistry for RegistryReader {
     fn entries(&self) -> Vec<RegistryEntry> {
-        let mut out = Vec::new();
-        for (root, path) in UNINSTALL_HIVES {
-            let Ok(uninstall) = RegKey::predef(root).open_subkey_with_flags(path, KEY_READ) else {
-                continue;
-            };
-            for name in uninstall.enum_keys().flatten() {
-                let Ok(sub) = uninstall.open_subkey_with_flags(&name, KEY_READ) else {
-                    continue;
-                };
-                out.push(read_entry(&sub));
-            }
-        }
-        out
+        uninstall_subkeys().iter().map(read_entry).collect()
     }
 }
 

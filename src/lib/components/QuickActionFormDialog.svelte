@@ -1,11 +1,11 @@
 <script lang="ts">
-  import type { LaunchCommandTest, QuickAction } from "$lib/types";
+  import type { QuickAction } from "$lib/types";
   import { createQuickAction, testQuickAction, updateQuickAction } from "$lib/api";
   import Dialog from "./Dialog.svelte";
   import Button from "./Button.svelte";
   import TextInput from "./TextInput.svelte";
   import InfoTip from "./InfoTip.svelte";
-  import Icon from "./Icon.svelte";
+  import TestResult from "./TestResult.svelte";
 
   let {
     open,
@@ -27,9 +27,7 @@
   let stopCommand = $state("");
   let saving = $state(false);
   let error = $state("");
-  let test: LaunchCommandTest | null = $state(null);
   let testing = $state(false);
-  let tested = $state(false);
 
   const editing = $derived(action !== null);
 
@@ -42,9 +40,6 @@
       stopCommand = action?.stop_command ?? "";
       saving = false;
       error = "";
-      test = null;
-      testing = false;
-      tested = false;
     }
   });
 
@@ -58,30 +53,6 @@
       return `'${trimmed}' is not an absolute path — the working directory must be a full path like D:\Work`;
     }
     return null;
-  }
-
-  async function runTest() {
-    if (!command.trim()) {
-      error = "Type a command first.";
-      return;
-    }
-    const badCwd = cwdError(cwd);
-    if (badCwd) {
-      error = badCwd;
-      return;
-    }
-    error = "";
-    tested = true;
-    testing = true;
-    test = null;
-    try {
-      test = await testQuickAction(command.trim(), cwd.trim() || null);
-    } catch (e) {
-      console.error(e);
-      error = String(e);
-    } finally {
-      testing = false;
-    }
   }
 
   async function submit() {
@@ -229,42 +200,14 @@
       </div>
     {/if}
 
-    <div class="test">
-      <div class="test__row">
-        <Button variant="secondary" disabled={testing || !command.trim()} onclick={runTest}>
-          <Icon name="play" size={13} />
-          {testing ? "Testing…" : "Test"}
-        </Button>
-        <p class="test__note">
-          Runs the command timeboxed (20 s) and reports the exit code and output —
-          a command that outlives the box is interactive, not headless-verifiable.
-        </p>
-      </div>
-      {#if tested && !testing}
-        {#if test?.timed_out}
-          <div class="test__result test__result--timeout" role="status">
-            <p class="test__verdict">
-              Timed out — not headless-verifiable. The command is interactive
-              (or hangs); it was killed after 20 s.
-            </p>
-          </div>
-        {:else}
-          <div class="test__result" role="status">
-            <p class="test__verdict">
-              Exit code: <strong class="mono">{test?.exit_code ?? "—"}</strong>
-              {test?.exit_code === 0
-                ? " — started cleanly."
-                : test?.exit_code === null
-                  ? " — could not start."
-                  : " — the command reported a failure."}
-            </p>
-            {#if test?.output.trim()}
-              <pre class="test__output">{test?.output}</pre>
-            {/if}
-          </div>
-        {/if}
-      {/if}
-    </div>
+    <TestResult
+      {open}
+      {command}
+      bind:testing
+      validate={() => cwdError(cwd)}
+      probe={() => testQuickAction(command.trim(), cwd.trim() || null)}
+      onerror={(message) => (error = message)}
+    />
 
     {#if error}
       <p class="form__error" role="alert">{error}</p>
@@ -363,60 +306,6 @@
     font-size: var(--text-sm);
     font-weight: 600;
     color: var(--text);
-  }
-
-  .test {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-    border: 1px dashed var(--border-strong);
-    border-radius: var(--radius);
-    padding: var(--space-3);
-  }
-
-  .test__row {
-    display: flex;
-    align-items: flex-start;
-    gap: var(--space-3);
-  }
-
-  .test__note {
-    margin: 0;
-    font-size: var(--text-xs);
-    color: var(--text-muted);
-  }
-
-  .test__result {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    background: var(--bg-page);
-    padding: var(--space-2) var(--space-3);
-  }
-
-  .test__result--timeout {
-    border-color: var(--danger-tint-border);
-    background: var(--danger-tint);
-  }
-
-  .test__verdict {
-    margin: 0;
-    font-size: var(--text-sm);
-    color: var(--text);
-  }
-
-  .test__output {
-    margin: 0;
-    max-height: 160px;
-    overflow: auto;
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    line-height: var(--leading-normal);
-    color: var(--text-muted);
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
   }
 
   .form__error {

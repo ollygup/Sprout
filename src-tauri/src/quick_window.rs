@@ -73,7 +73,7 @@ use windows_sys::Win32::Media::{timeBeginPeriod, timeEndPeriod};
 
 use crate::{
     appbar, db, settings,
-    window_constants::{
+    constants::window::{
         AUTOHIDE_ANIM_POLL_MS, AUTOHIDE_POLL_MS, AUTOHIDE_SLIDE_MS, AUTOHIDE_SLIVER_PX,
         DOCK_WIDTH, EDGE_TRIGGER_PX, WINDOW_HEIGHT, WINDOW_WIDTH,
     },

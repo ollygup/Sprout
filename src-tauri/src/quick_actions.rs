@@ -19,14 +19,8 @@ use std::time::Duration;
 use rusqlite::{params, Connection, OptionalExtension, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::engine::windows::{hidden, run_timed_process_in};
-use crate::launch::TestResult;
-
-/// The Test-click timebox (ticket 50, prior art: the Launch entry Test
-/// button, ticket 41): long enough for a normal command, short enough that an
-/// interactive command is reported honestly as not headless-verifiable
-/// instead of wedging the dialog.
-pub const TEST_TIMEOUT: Duration = Duration::from_secs(20);
+use crate::engine::windows::{hidden, powershell_argv};
+use crate::launch::{TestResult, TEST_TIMEOUT, timed_test_result};
 
 /// The editable shape of a Quick Action, as the frontend sends it. The stored
 /// record ([`QuickAction`]) adds the id.
@@ -168,26 +162,18 @@ pub fn get_quick_action(conn: &Connection, id: i64) -> Result<Option<QuickAction
 
 /// Appends an action at the end of the list (the next free position).
 pub fn create_quick_action(conn: &Connection, action: &QuickActionInput) -> Result<QuickAction> {
-    let tx = conn.unchecked_transaction()?;
-    let position: i64 = tx.query_row(
-        "SELECT COALESCE(MAX(position), -1) + 1 FROM quick_actions",
-        [],
-        |row| row.get(0),
-    )?;
-    tx.execute(
+    let id = crate::ordered_list::OrderedList::QUICK_ACTIONS.create_at_end(
+        conn,
         "INSERT INTO quick_actions (name, command, cwd, stoppable, stop_command, position)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![
-            action.name.trim(),
-            action.command.trim(),
-            normalized_cwd(action),
-            action.stoppable,
-            normalized_stop_command(action),
-            position,
+        &[
+            &action.name.trim(),
+            &action.command.trim(),
+            &normalized_cwd(action),
+            &action.stoppable,
+            &normalized_stop_command(action),
         ],
     )?;
-    let id = tx.last_insert_rowid();
-    tx.commit()?;
     Ok(get_quick_action(conn, id)?.expect("just inserted"))
 }
 
@@ -212,61 +198,14 @@ pub fn update_quick_action(conn: &Connection, action: &QuickAction) -> Result<()
 
 /// Removes an action and compacts the positions so the list stays gapless.
 pub fn delete_quick_action(conn: &Connection, id: i64) -> Result<()> {
-    let tx = conn.unchecked_transaction()?;
-    let position: Option<i64> = tx
-        .query_row("SELECT position FROM quick_actions WHERE id = ?1", params![id], |row| {
-            row.get(0)
-        })
-        .optional()?;
-    if let Some(position) = position {
-        tx.execute("DELETE FROM quick_actions WHERE id = ?1", params![id])?;
-        tx.execute(
-            "UPDATE quick_actions SET position = position - 1 WHERE position > ?1",
-            params![position],
-        )?;
-    }
-    tx.commit()
+    crate::ordered_list::OrderedList::QUICK_ACTIONS.delete(conn, id)
 }
 
 /// Moves an action to `to_position` (clamped to the list), renumbering the
 /// rest. The list is small (user config), so the same read-all-renumber-write
 /// approach as the Launch list (ticket 38) is the obviously-correct one.
 pub fn move_quick_action(conn: &Connection, id: i64, to_position: i64) -> Result<()> {
-    let tx = conn.unchecked_transaction()?;
-    let mut ids: Vec<i64> = {
-        let mut stmt = tx.prepare("SELECT id FROM quick_actions ORDER BY position, id")?;
-        let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
-        rows.collect::<Result<Vec<_>>>()?
-    };
-    let from = match ids.iter().position(|&candidate| candidate == id) {
-        Some(index) => index,
-        None => return Ok(()), // nothing to move
-    };
-    ids.remove(from);
-    let clamped = to_position.clamp(0, ids.len() as i64) as usize;
-    ids.insert(clamped, id);
-    for (index, action_id) in ids.iter().enumerate() {
-        tx.execute(
-            "UPDATE quick_actions SET position = ?1 WHERE id = ?2",
-            params![index as i64, action_id],
-        )?;
-    }
-    tx.commit()
-}
-
-/// Builds the argv every Quick Action runs under: PowerShell's non-interactive
-/// one-liner convention — the same shape the launch pipeline uses for its
-/// PowerShell command entries (ticket 42).
-pub fn powershell_argv(command: &str) -> (String, Vec<String>) {
-    (
-        "powershell".into(),
-        vec![
-            "-NoProfile".into(),
-            "-NonInteractive".into(),
-            "-Command".into(),
-            command.into(),
-        ],
-    )
+    crate::ordered_list::OrderedList::QUICK_ACTIONS.move_to(conn, id, to_position)
 }
 
 /// Spawns the action's command hidden (`CREATE_NO_WINDOW`), the working
@@ -542,12 +481,7 @@ pub(crate) fn test_quick_action_with_timeout(
     timeout: Duration,
 ) -> TestResult {
     let (exe, args) = powershell_argv(command);
-    let run = run_timed_process_in(cwd, &exe, &args, timeout);
-    TestResult {
-        timed_out: run.timed_out,
-        exit_code: run.exit_code,
-        output: run.output,
-    }
+    timed_test_result(cwd, &exe, &args, timeout)
 }
 
 #[cfg(test)]

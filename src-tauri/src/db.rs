@@ -197,8 +197,9 @@ fn ensure_quick_action_stoppable(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Unix seconds now — the timestamp source for product create/update.
-fn now_ts() -> i64 {
+/// Unix seconds now — the one timestamp source for product create/update,
+/// run start/finish, and log pruning.
+pub(crate) fn now_ts() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -838,7 +839,9 @@ fn read_meta(conn: &Connection, key: &str) -> Option<String> {
     .ok()
 }
 
-fn upsert_meta(conn: &Connection, key: &str, value: &str) -> Result<()> {
+/// The one key-value upsert into `meta` (settings, dock memory): insert or
+/// overwrite in place.
+pub(crate) fn upsert_meta(conn: &Connection, key: &str, value: &str) -> Result<()> {
     conn.execute(
         "INSERT INTO meta (key, value) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",

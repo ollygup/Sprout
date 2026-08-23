@@ -29,7 +29,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -217,7 +216,7 @@ pub fn execute_run_observed(
     on_progress: &mut dyn FnMut(ProgressEvent),
     should_cancel: &mut dyn FnMut() -> bool,
 ) -> Result<RunRecord, String> {
-    let started_at = now_epoch();
+    let started_at = crate::db::now_ts();
     std::fs::create_dir_all(logs_dir)
         .map_err(|e| format!("cannot create the run log directory: {e}"))?;
 
@@ -277,7 +276,7 @@ pub fn execute_run_observed(
     Ok(RunRecord {
         id: run_id.to_string(),
         started_at,
-        finished_at: now_epoch(),
+        finished_at: crate::db::now_ts(),
         preset_names: preset_names.to_vec(),
         outcome,
         results,
@@ -545,13 +544,6 @@ fn same_directory(a: &str, b: &str) -> bool {
         }
     }
     normalize(a).eq_ignore_ascii_case(&normalize(b))
-}
-
-fn now_epoch() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 #[cfg(test)]

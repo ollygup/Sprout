@@ -19,12 +19,13 @@ use rusqlite::{params, Connection, OptionalExtension, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::engine::{LauncherEngine, Spawned};
-use crate::engine::windows::run_timed_process;
+use crate::engine::windows::{powershell_argv, run_timed_process_in};
 
 /// The Test-click timebox (ticket 41): long enough for a normal startup,
 /// short enough that an interactive command is reported honestly as not
-/// headless-verifiable instead of wedging the dialog.
-const TEST_TIMEOUT: Duration = Duration::from_secs(20);
+/// headless-verifiable instead of wedging the dialog. Shared with the Quick
+/// Actions Test (ticket 50), whose box is deliberately the same.
+pub const TEST_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// What a Launch entry starts: a picked app (shortcut or exe, launched as-is
 /// via ShellExecuteExW) or a command the user wrote.
@@ -143,8 +144,9 @@ pub fn validate_launch_entry(entry: &LaunchEntryInput) -> std::result::Result<()
 }
 
 /// A loose GUID shape check (8-4-4-4-12 hex digits) — enough to reject
-/// typos before they reach the launch pipeline.
-fn looks_like_guid(value: &str) -> bool {
+/// typos before they reach the launch pipeline. The one copy of the
+/// predicate: the engine's desktop-move parser builds its GUID on top of it.
+pub(crate) fn looks_like_guid(value: &str) -> bool {
     let parts: Vec<&str> = value.split('-').collect();
     if parts.len() != 5 {
         return false;
@@ -211,27 +213,19 @@ fn get_entry(conn: &Connection, id: i64) -> Result<Option<LaunchEntry>> {
 
 /// Appends an entry at the end of the list (the next free position).
 pub fn create_launch_entry(conn: &Connection, entry: &LaunchEntryInput) -> Result<LaunchEntry> {
-    let tx = conn.unchecked_transaction()?;
-    let position: i64 = tx.query_row(
-        "SELECT COALESCE(MAX(position), -1) + 1 FROM launch_entries",
-        [],
-        |row| row.get(0),
-    )?;
-    tx.execute(
+    let id = crate::ordered_list::OrderedList::LAUNCH_ENTRIES.create_at_end(
+        conn,
         "INSERT INTO launch_entries (name, kind, target, shell, show_window, desktop_id, position)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![
-            entry.name.trim(),
-            kind_to_str(entry.kind),
-            entry.target.trim(),
-            entry.shell.map(shell_to_str),
-            entry.show_window,
-            entry.desktop_id,
-            position,
+        &[
+            &entry.name.trim(),
+            &kind_to_str(entry.kind),
+            &entry.target.trim(),
+            &entry.shell.map(shell_to_str),
+            &entry.show_window,
+            &entry.desktop_id,
         ],
     )?;
-    let id = tx.last_insert_rowid();
-    tx.commit()?;
     Ok(get_entry(conn, id)?.expect("just inserted"))
 }
 
@@ -257,46 +251,14 @@ pub fn update_launch_entry(conn: &Connection, entry: &LaunchEntry) -> Result<()>
 
 /// Removes an entry and compacts the positions so the list stays gapless.
 pub fn delete_launch_entry(conn: &Connection, id: i64) -> Result<()> {
-    let tx = conn.unchecked_transaction()?;
-    let position: Option<i64> = tx
-        .query_row("SELECT position FROM launch_entries WHERE id = ?1", params![id], |row| {
-            row.get(0)
-        })
-        .optional()?;
-    if let Some(position) = position {
-        tx.execute("DELETE FROM launch_entries WHERE id = ?1", params![id])?;
-        tx.execute(
-            "UPDATE launch_entries SET position = position - 1 WHERE position > ?1",
-            params![position],
-        )?;
-    }
-    tx.commit()
+    crate::ordered_list::OrderedList::LAUNCH_ENTRIES.delete(conn, id)
 }
 
 /// Moves an entry to `to_position` (clamped to the list), renumbering the
 /// rest. The list is small (user config), so a read-all-renumber-write in one
 /// transaction is the obviously-correct approach.
 pub fn move_launch_entry(conn: &Connection, id: i64, to_position: i64) -> Result<()> {
-    let tx = conn.unchecked_transaction()?;
-    let mut ids: Vec<i64> = {
-        let mut stmt = tx.prepare("SELECT id FROM launch_entries ORDER BY position, id")?;
-        let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
-        rows.collect::<Result<Vec<_>>>()?
-    };
-    let from = match ids.iter().position(|&candidate| candidate == id) {
-        Some(index) => index,
-        None => return Ok(()), // nothing to move
-    };
-    ids.remove(from);
-    let clamped = to_position.clamp(0, ids.len() as i64) as usize;
-    ids.insert(clamped, id);
-    for (index, entry_id) in ids.iter().enumerate() {
-        tx.execute(
-            "UPDATE launch_entries SET position = ?1 WHERE id = ?2",
-            params![index as i64, entry_id],
-        )?;
-    }
-    tx.commit()
+    crate::ordered_list::OrderedList::LAUNCH_ENTRIES.move_to(conn, id, to_position)
 }
 
 /// The result of one Test click in the add-command dialog (ticket 41): the
@@ -316,15 +278,7 @@ pub struct TestResult {
 /// as-is.
 pub fn command_argv(shell: LaunchShell, target: &str) -> (String, Vec<String>) {
     match shell {
-        LaunchShell::Powershell => (
-            "powershell".into(),
-            vec![
-                "-NoProfile".into(),
-                "-NonInteractive".into(),
-                "-Command".into(),
-                target.into(),
-            ],
-        ),
+        LaunchShell::Powershell => powershell_argv(target),
         LaunchShell::Cmd => ("cmd".into(), vec!["/c".into(), target.into()]),
         LaunchShell::None => split_command_line(target),
     }
@@ -373,7 +327,20 @@ pub(crate) fn run_command_with_timeout(
     timeout: Duration,
 ) -> TestResult {
     let (exe, args) = command_argv(shell, target);
-    let run = run_timed_process(&exe, &args, timeout);
+    timed_test_result(None, &exe, &args, timeout)
+}
+
+/// The one timed run behind both Test buttons (tickets 41 & 50): runs
+/// `exe args` headlessly under `timeout` — cwd-aware, which is how the
+/// Quick Action variant honors its configured directory — and maps the
+/// engine's raw run to [`TestResult`].
+pub(crate) fn timed_test_result(
+    cwd: Option<&str>,
+    exe: &str,
+    args: &[String],
+    timeout: Duration,
+) -> TestResult {
+    let run = run_timed_process_in(cwd, exe, args, timeout);
     TestResult {
         timed_out: run.timed_out,
         exit_code: run.exit_code,

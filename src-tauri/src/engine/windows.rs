@@ -31,6 +31,7 @@ use winreg::RegKey;
 
 use crate::domain::{EnvAction, EnvWiring, Product, Requirement, Step, VerifyCommand};
 use crate::engine::{Detection, PlatformEngine, StepOutcome, VerifyOutcome};
+use crate::winget::find_word;
 
 /// How long a verify command may run before it is killed like a hung
 /// installer: verifies must be quick (e.g. `java -version`), and a hung one
@@ -72,6 +73,22 @@ pub(crate) fn hidden(mut command: Command) -> Command {
     command
 }
 
+/// Builds the argv for PowerShell's non-interactive one-liner convention —
+/// the shape every scripted command in the app runs under: launch pipeline
+/// command entries (ticket 42), Quick Actions and their Test button (tickets
+/// 50 & 62), and the engine's own PowerShell calls (bootstrap, verify).
+pub(crate) fn powershell_argv(command: &str) -> (String, Vec<String>) {
+    (
+        "powershell".into(),
+        vec![
+            "-NoProfile".into(),
+            "-NonInteractive".into(),
+            "-Command".into(),
+            command.into(),
+        ],
+    )
+}
+
 /// The placeholder prefix for the installed product's location. The full
 /// forms are `<InstallLocation>` (bare) and `<InstallLocation:hint>` (inline
 /// hint) — the closing `>` follows the hint in the inline form, so matching
@@ -81,20 +98,6 @@ const INSTALL_LOCATION_PREFIX: &str = "<InstallLocation";
 /// Registry hives the uninstall scan reads, in the legacy runner's order.
 /// The `HKEY` type is windows-sys's; winreg re-exports the predef constants.
 type HKEY = windows_sys::Win32::System::Registry::HKEY;
-const UNINSTALL_HIVES: [(HKEY, &str); 3] = [
-    (
-        HKEY_LOCAL_MACHINE,
-        r"Software\Microsoft\Windows\CurrentVersion\Uninstall",
-    ),
-    (
-        HKEY_LOCAL_MACHINE,
-        r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
-    ),
-    (
-        HKEY_CURRENT_USER,
-        r"Software\Microsoft\Windows\CurrentVersion\Uninstall",
-    ),
-];
 
 pub struct WindowsWingetEngine;
 
@@ -133,19 +136,11 @@ impl WindowsWingetEngine {
 
         let url = Self::fetch_msixbundle_url()?;
         let bundle = Self::download_msixbundle(&url)?;
-        let install = run_timed_process(
-            "powershell",
-            &[
-                "-NoProfile".to_string(),
-                "-NonInteractive".to_string(),
-                "-Command".to_string(),
-                format!(
-                    "Add-AppxPackage -Path '{}' -ForceApplicationShutdown",
-                    bundle.display()
-                ),
-            ],
-            BOOTSTRAP_TIMEOUT,
-        );
+        let (exe, args) = powershell_argv(&format!(
+            "Add-AppxPackage -Path '{}' -ForceApplicationShutdown",
+            bundle.display()
+        ));
+        let install = run_timed_process(&exe, &args, BOOTSTRAP_TIMEOUT);
         let _ = std::fs::remove_file(&bundle);
         if install.timed_out || install.exit_code != Some(0) {
             return Err(format!(
@@ -251,21 +246,10 @@ impl WindowsWingetEngine {
     /// Every DisplayName found under the three uninstall-registry hives the
     /// legacy runner scanned (HKLM, WOW6432Node, HKCU).
     fn registry_display_names() -> Vec<String> {
-        let mut names = Vec::new();
-        for (root, path) in UNINSTALL_HIVES {
-            let Ok(uninstall) = RegKey::predef(root).open_subkey(path) else {
-                continue;
-            };
-            for name in uninstall.enum_keys().flatten() {
-                let Ok(sub) = uninstall.open_subkey(&name) else {
-                    continue;
-                };
-                if let Ok(display) = sub.get_value::<String, _>("DisplayName") {
-                    names.push(display);
-                }
-            }
-        }
-        names
+        crate::walker::uninstall_subkeys()
+            .iter()
+            .filter_map(|sub| sub.get_value::<String, _>("DisplayName").ok())
+            .collect()
     }
 
     /// The installed location of a product whose uninstall key's DisplayName
@@ -273,27 +257,19 @@ impl WindowsWingetEngine {
     /// hives and same rules (first key that matches and carries a non-blank
     /// InstallLocation; trailing backslash trimmed).
     fn resolve_install_location(hint: &str) -> Option<String> {
-        for (root, path) in UNINSTALL_HIVES {
-            let Ok(uninstall) = RegKey::predef(root).open_subkey_with_flags(path, KEY_READ) else {
+        for sub in crate::walker::uninstall_subkeys() {
+            let Ok(display) = sub.get_value::<String, _>("DisplayName") else {
                 continue;
             };
-            for name in uninstall.enum_keys().flatten() {
-                let Ok(sub) = uninstall.open_subkey_with_flags(&name, KEY_READ) else {
-                    continue;
-                };
-                let Ok(display) = sub.get_value::<String, _>("DisplayName") else {
-                    continue;
-                };
-                if !display.to_lowercase().contains(&hint.to_lowercase()) {
-                    continue;
-                }
-                let Ok(location) = sub.get_value::<String, _>("InstallLocation") else {
-                    continue;
-                };
-                let trimmed = location.trim().trim_end_matches('\\');
-                if !trimmed.is_empty() {
-                    return Some(trimmed.to_string());
-                }
+            if !display.to_lowercase().contains(&hint.to_lowercase()) {
+                continue;
+            }
+            let Ok(location) = sub.get_value::<String, _>("InstallLocation") else {
+                continue;
+            };
+            let trimmed = location.trim().trim_end_matches('\\');
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
             }
         }
         None
@@ -605,16 +581,8 @@ fn pick_msixbundle(assets: &[GitHubAsset]) -> Option<String> {
 /// Runs one PowerShell one-liner under a timebox and returns its stdout.
 /// Non-zero exits fail loudly with the raw output attached.
 fn powershell_output(script: &str, timeout: Duration) -> Result<String, String> {
-    let run = run_timed_process(
-        "powershell",
-        &[
-            "-NoProfile".to_string(),
-            "-NonInteractive".to_string(),
-            "-Command".to_string(),
-            script.to_string(),
-        ],
-        timeout,
-    );
+    let (exe, args) = powershell_argv(script);
+    let run = run_timed_process(&exe, &args, timeout);
     if run.timed_out {
         return Err("PowerShell did not finish in time — its processes were killed".to_string());
     }
@@ -1483,20 +1451,13 @@ fn guid_to_id(guid: &windows::core::GUID) -> String {
 }
 
 /// Parses a stored desktop id back into the GUID winvd expects. The windows
-/// crate's `GUID::from` panics on a malformed string, so the loose shape
-/// check runs first — ids come from the database, which validates on write,
-/// but a stale hand-edited value must be an error, never a panic.
+/// crate's `GUID::from` panics on a malformed string, so the shared loose
+/// shape check (`launch::looks_like_guid` — the same predicate
+/// `validate_launch_entry` gates ids with) runs first: ids come from the
+/// database, which validates on write, but a stale hand-edited value must be
+/// an error, never a panic.
 fn parse_guid_id(id: &str) -> Option<windows::core::GUID> {
-    let parts: Vec<&str> = id.split('-').collect();
-    if parts.len() != 5 {
-        return None;
-    }
-    let lengths = [8usize, 4, 4, 4, 12];
-    if !parts
-        .iter()
-        .zip(lengths)
-        .all(|(part, len)| part.len() == len && part.chars().all(|c| c.is_ascii_hexdigit()))
-    {
+    if !crate::launch::looks_like_guid(id) {
         return None;
     }
     Some(windows::core::GUID::from(id))
@@ -1824,24 +1785,6 @@ fn parse_winget_list(text: &str) -> HashMap<String, (String, Option<String>)> {
         id_start: usize,
         version_start: usize,
         available_start: Option<usize>,
-    }
-
-    fn find_word(line: &str, word: &str) -> Option<usize> {
-        let bytes = line.as_bytes();
-        let needle = word.as_bytes();
-        let mut i = 0;
-        while i + needle.len() <= bytes.len() {
-            if &bytes[i..i + needle.len()] == needle {
-                let before_ok = i == 0 || bytes[i - 1] == b' ';
-                let after_ok =
-                    i + needle.len() == bytes.len() || bytes[i + needle.len()] == b' ';
-                if before_ok && after_ok {
-                    return Some(i);
-                }
-            }
-            i += 1;
-        }
-        None
     }
 
     let mut map = HashMap::new();

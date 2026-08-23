@@ -27,9 +27,11 @@
 //!   "floating" (default) or "docked", persisted so the window reopens in the
 //!   state it was left in, and written back by the in-window dock controls.
 
-use rusqlite::{params, Connection, Result};
+use rusqlite::{params, Connection};
 
 use serde::{Deserialize, Serialize};
+
+use crate::db::upsert_meta;
 
 /// The timeout new Requirements are pre-filled with, in minutes.
 pub const DEFAULT_TIMEOUT_MINUTES: u32 = 10;
@@ -174,73 +176,44 @@ impl Settings {
 }
 
 /// Reads the settings, falling back to the defaults for keys that were never
-/// written (fresh installs, pre-09 databases).
+/// written (fresh installs, pre-09 databases). Every knob follows the same
+/// query → validate → default shape: a missing, unparseable, or broken value
+/// (a leftover from an older build) reads back as the default.
 pub fn load(conn: &Connection) -> Settings {
-    let get = |key: &str| -> Option<u32> {
+    fn raw(conn: &Connection, key: &str) -> Option<String> {
         conn.query_row(
             "SELECT value FROM meta WHERE key = ?1",
             params![key],
             |row| row.get::<_, String>(0),
         )
         .ok()
-        .and_then(|v| v.parse().ok())
-    };
-    let theme = conn
-        .query_row(
-            "SELECT value FROM meta WHERE key = ?1",
-            params![KEY_THEME],
-            |row| row.get::<_, String>(0),
-        )
-        .ok()
-        .filter(|v| validate_theme(v).is_ok());
-    let install_dir = conn
-        .query_row(
-            "SELECT value FROM meta WHERE key = ?1",
-            params![KEY_INSTALL_DIR],
-            |row| row.get::<_, String>(0),
-        )
-        .ok()
-        .filter(|v| validate_install_dir(v).is_ok())
-        .unwrap_or_default();
-    let launch_concurrency = get(KEY_LAUNCH_CONCURRENCY)
-        .filter(|value| (1..=50).contains(value))
-        .unwrap_or(DEFAULT_LAUNCH_CONCURRENCY);
-    let dock_mode = conn
-        .query_row(
-            "SELECT value FROM meta WHERE key = ?1",
-            params![KEY_DOCK_MODE],
-            |row| row.get::<_, String>(0),
-        )
-        .ok()
-        .filter(|v| validate_dock_mode(v).is_ok())
-        .unwrap_or_else(|| DEFAULT_DOCK_MODE.to_string());
-    let dock_edge = conn
-        .query_row(
-            "SELECT value FROM meta WHERE key = ?1",
-            params![KEY_DOCK_EDGE],
-            |row| row.get::<_, String>(0),
-        )
-        .ok()
-        .filter(|v| validate_dock_edge(v).is_ok())
-        .unwrap_or_else(|| DEFAULT_DOCK_EDGE.to_string());
-    let dock_state = conn
-        .query_row(
-            "SELECT value FROM meta WHERE key = ?1",
-            params![KEY_DOCK_STATE],
-            |row| row.get::<_, String>(0),
-        )
-        .ok()
-        .filter(|v| validate_dock_state(v).is_ok())
-        .unwrap_or_else(|| DEFAULT_DOCK_STATE.to_string());
+    }
+    fn number(conn: &Connection, key: &str) -> Option<u32> {
+        raw(conn, key).and_then(|value| value.parse().ok())
+    }
+    fn validated(
+        conn: &Connection,
+        key: &str,
+        check: fn(&str) -> std::result::Result<(), String>,
+    ) -> Option<String> {
+        raw(conn, key).filter(|value| check(value).is_ok())
+    }
+
     Settings {
-        default_timeout_minutes: get(KEY_TIMEOUT).unwrap_or(DEFAULT_TIMEOUT_MINUTES),
-        log_retention_days: get(KEY_RETENTION).unwrap_or(DEFAULT_RETENTION_DAYS),
-        theme: theme.unwrap_or_else(|| DEFAULT_THEME.to_string()),
-        install_dir,
-        launch_concurrency,
-        dock_mode,
-        dock_edge,
-        dock_state,
+        default_timeout_minutes: number(conn, KEY_TIMEOUT).unwrap_or(DEFAULT_TIMEOUT_MINUTES),
+        log_retention_days: number(conn, KEY_RETENTION).unwrap_or(DEFAULT_RETENTION_DAYS),
+        theme: validated(conn, KEY_THEME, validate_theme)
+            .unwrap_or_else(|| DEFAULT_THEME.to_string()),
+        install_dir: validated(conn, KEY_INSTALL_DIR, validate_install_dir).unwrap_or_default(),
+        launch_concurrency: number(conn, KEY_LAUNCH_CONCURRENCY)
+            .filter(|value| (1..=50).contains(value))
+            .unwrap_or(DEFAULT_LAUNCH_CONCURRENCY),
+        dock_mode: validated(conn, KEY_DOCK_MODE, validate_dock_mode)
+            .unwrap_or_else(|| DEFAULT_DOCK_MODE.to_string()),
+        dock_edge: validated(conn, KEY_DOCK_EDGE, validate_dock_edge)
+            .unwrap_or_else(|| DEFAULT_DOCK_EDGE.to_string()),
+        dock_state: validated(conn, KEY_DOCK_STATE, validate_dock_state)
+            .unwrap_or_else(|| DEFAULT_DOCK_STATE.to_string()),
     }
 }
 
@@ -251,15 +224,15 @@ pub fn save(conn: &Connection, settings: &Settings) -> std::result::Result<(), S
     let tx = conn
         .unchecked_transaction()
         .map_err(|e| e.to_string())?;
-    upsert(&tx, KEY_TIMEOUT, &settings.default_timeout_minutes.to_string()).map_err(|e| e.to_string())?;
-    upsert(&tx, KEY_RETENTION, &settings.log_retention_days.to_string()).map_err(|e| e.to_string())?;
-    upsert(&tx, KEY_THEME, &settings.theme).map_err(|e| e.to_string())?;
-    upsert(&tx, KEY_INSTALL_DIR, &settings.install_dir).map_err(|e| e.to_string())?;
-    upsert(&tx, KEY_LAUNCH_CONCURRENCY, &settings.launch_concurrency.to_string())
+    upsert_meta(&tx, KEY_TIMEOUT, &settings.default_timeout_minutes.to_string()).map_err(|e| e.to_string())?;
+    upsert_meta(&tx, KEY_RETENTION, &settings.log_retention_days.to_string()).map_err(|e| e.to_string())?;
+    upsert_meta(&tx, KEY_THEME, &settings.theme).map_err(|e| e.to_string())?;
+    upsert_meta(&tx, KEY_INSTALL_DIR, &settings.install_dir).map_err(|e| e.to_string())?;
+    upsert_meta(&tx, KEY_LAUNCH_CONCURRENCY, &settings.launch_concurrency.to_string())
         .map_err(|e| e.to_string())?;
-    upsert(&tx, KEY_DOCK_MODE, &settings.dock_mode).map_err(|e| e.to_string())?;
-    upsert(&tx, KEY_DOCK_EDGE, &settings.dock_edge).map_err(|e| e.to_string())?;
-    upsert(&tx, KEY_DOCK_STATE, &settings.dock_state).map_err(|e| e.to_string())?;
+    upsert_meta(&tx, KEY_DOCK_MODE, &settings.dock_mode).map_err(|e| e.to_string())?;
+    upsert_meta(&tx, KEY_DOCK_EDGE, &settings.dock_edge).map_err(|e| e.to_string())?;
+    upsert_meta(&tx, KEY_DOCK_STATE, &settings.dock_state).map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())
 }
 
@@ -267,7 +240,7 @@ pub fn save(conn: &Connection, settings: &Settings) -> std::result::Result<(), S
 /// selected, without touching the other knobs (ticket 31).
 pub fn save_theme(conn: &Connection, theme: &str) -> std::result::Result<(), String> {
     validate_theme(theme)?;
-    upsert(conn, KEY_THEME, theme).map_err(|e| e.to_string())
+    upsert_meta(conn, KEY_THEME, theme).map_err(|e| e.to_string())
 }
 
 /// Persists only the dock state (ticket 57) — the in-window dock/undock
@@ -275,7 +248,7 @@ pub fn save_theme(conn: &Connection, theme: &str) -> std::result::Result<(), Str
 /// so the Settings screen and the window never diverge.
 pub fn save_dock_state(conn: &Connection, state: &str) -> std::result::Result<(), String> {
     validate_dock_state(state)?;
-    upsert(conn, KEY_DOCK_STATE, state).map_err(|e| e.to_string())
+    upsert_meta(conn, KEY_DOCK_STATE, state).map_err(|e| e.to_string())
 }
 
 /// Persists only the dock edge (ticket 57) — the in-window edge-switch
@@ -283,16 +256,7 @@ pub fn save_dock_state(conn: &Connection, state: &str) -> std::result::Result<()
 /// Settings screen's default edge stays aligned with where the dock lives.
 pub fn save_dock_edge(conn: &Connection, edge: &str) -> std::result::Result<(), String> {
     validate_dock_edge(edge)?;
-    upsert(conn, KEY_DOCK_EDGE, edge).map_err(|e| e.to_string())
-}
-
-fn upsert(conn: &Connection, key: &str, value: &str) -> Result<()> {
-    conn.execute(
-        "INSERT INTO meta (key, value) VALUES (?1, ?2)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        params![key, value],
-    )?;
-    Ok(())
+    upsert_meta(conn, KEY_DOCK_EDGE, edge).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -399,9 +363,9 @@ mod tests {
         let conn = conn();
         // A broken value written by an older build must never reach the
         // launch pipeline — it reads back as the default.
-        upsert(&conn, KEY_LAUNCH_CONCURRENCY, "0").unwrap();
+        upsert_meta(&conn, KEY_LAUNCH_CONCURRENCY, "0").unwrap();
         assert_eq!(load(&conn).launch_concurrency, DEFAULT_LAUNCH_CONCURRENCY);
-        upsert(&conn, KEY_LAUNCH_CONCURRENCY, "99").unwrap();
+        upsert_meta(&conn, KEY_LAUNCH_CONCURRENCY, "99").unwrap();
         assert_eq!(load(&conn).launch_concurrency, DEFAULT_LAUNCH_CONCURRENCY);
     }
 
@@ -410,11 +374,11 @@ mod tests {
         let conn = conn();
         // Broken values written by an older build must never reach the dock —
         // they read back as the defaults.
-        upsert(&conn, KEY_DOCK_MODE, "overlay").unwrap();
+        upsert_meta(&conn, KEY_DOCK_MODE, "overlay").unwrap();
         assert_eq!(load(&conn).dock_mode, DEFAULT_DOCK_MODE);
-        upsert(&conn, KEY_DOCK_EDGE, "top").unwrap();
+        upsert_meta(&conn, KEY_DOCK_EDGE, "top").unwrap();
         assert_eq!(load(&conn).dock_edge, DEFAULT_DOCK_EDGE);
-        upsert(&conn, KEY_DOCK_STATE, "minimized").unwrap();
+        upsert_meta(&conn, KEY_DOCK_STATE, "minimized").unwrap();
         assert_eq!(load(&conn).dock_state, DEFAULT_DOCK_STATE);
     }
 
