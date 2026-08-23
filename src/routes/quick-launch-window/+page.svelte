@@ -22,6 +22,7 @@
   } from "$lib/api";
   import type { QuickLaunchDockState } from "$lib/types";
   import { restoreTheme, type ThemeMode } from "$lib/theme.svelte";
+  import { titleBarDragRegion } from "$lib/quickLaunchTitleBar";
   import Button from "$lib/components/Button.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import IconButton from "$lib/components/IconButton.svelte";
@@ -214,7 +215,10 @@
   class:qlw--docked-left={dock.docked && dock.edge === "left"}
   class:qlw--docked-right={dock.docked && dock.edge === "right"}
 >
-  <header class="qlw__bar" data-tauri-drag-region="deep">
+  <header
+    class="qlw__bar"
+    data-tauri-drag-region={titleBarDragRegion(dock.docked)}
+  >
     <span class="qlw__mark" aria-hidden="true"><SproutMark size={16} /></span>
     <h1 class="qlw__title">Quick Launch</h1>
     {#if dock.docked}
