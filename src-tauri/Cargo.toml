@@ -3,7 +3,7 @@ name = "sprout"
 # App version. Single source of truth: this file — tauri.conf.json omits
 # `version` and Tauri v2 auto-inherits it from here into the exe metadata,
 # the window, and the installer. Never restate it elsewhere.
-version = "0.4.3"
+version = "0.4.4"
 description = "Preset-driven Windows software-installation desktop app"
 authors = ["Sprout contributors"]
 edition = "2021"
@@ -20,6 +20,13 @@ tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-single-instance = "2"
+# Auto-start registration (ADR-0013, ticket 75): the standard autostart
+# plugin writing HKCU Run; initialized with the `--autostart` launcher arg
+# ticket 76 consumes to boot tray-only.
+tauri-plugin-autostart = "2"
+# Quick Clips' clipboard writes (ticket 78): Rust-side only — our `copy_clip`
+# command drives the plugin so no capability grants or npm package are needed.
+tauri-plugin-clipboard-manager = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }

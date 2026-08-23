@@ -1,11 +1,11 @@
-//! The ordered user-config lists (Launch entries, Quick Actions): one
+//! The ordered user-config lists (Launch entries, Quick Actions, Clips): one
 //! implementation of the position discipline they share.
 //!
-//! Both entities persist the same four shapes — create at MAX(position)+1,
+//! All entities persist the same four shapes — create at MAX(position)+1,
 //! update in place without touching the position, delete with position
 //! compaction, and move via read-all → remove/reinsert → renumber — differing
 //! only in table name and row columns. This module owns those mechanics once;
-//! `launch.rs` and `quick_actions.rs` are thin adapters over it.
+//! `launch.rs`, `quick_actions.rs`, and `clips.rs` are thin adapters over it.
 //!
 //! Positions stay gapless (0..n-1) through create/delete/move; the CRUD tests
 //! on both entities are the guard. Table names are interpolated into SQL only
@@ -23,6 +23,7 @@ impl OrderedList {
         table: "launch_entries",
     };
     pub(crate) const QUICK_ACTIONS: Self = Self { table: "quick_actions" };
+    pub(crate) const CLIPS: Self = Self { table: "clips" };
 
     /// Appends a row at MAX(position)+1 inside one transaction and returns its
     /// id. `insert_sql` is the entity's fixed INSERT with the position as the

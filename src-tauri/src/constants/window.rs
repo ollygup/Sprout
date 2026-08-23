@@ -39,10 +39,13 @@ pub const AUTOHIDE_ANIM_POLL_MS: u64 = 16;
 /// the motion (out or away) completes in about this long, eased.
 pub const AUTOHIDE_SLIDE_MS: u64 = 180;
 
-/// The main window's default inner size (mirrors `tauri.conf.json`).
+/// The main window's default inner size — the single size source: the
+/// programmatic build (`lib.rs`'s `open_main_window`) sizes from these
+/// constants since the conf file stopped declaring windows (ticket 76,
+/// ADR-0013).
 pub const MAIN_WINDOW_WIDTH: f64 = 1200.0;
 pub const MAIN_WINDOW_HEIGHT: f64 = 800.0;
 
-/// The main window's minimum inner size (mirrors `tauri.conf.json`).
+/// The main window's minimum inner size (single size source, ticket 76).
 pub const MAIN_WINDOW_MIN_WIDTH: f64 = 900.0;
 pub const MAIN_WINDOW_MIN_HEIGHT: f64 = 620.0;

@@ -1,11 +1,12 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import type { Settings } from "$lib/types";
-  import { getSettings, updateSettings } from "$lib/api";
+  import { getSettings, updateAutostart, updateSettings } from "$lib/api";
   import Button from "$lib/components/Button.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
   import Notice from "$lib/components/Notice.svelte";
+  import PageHeader from "$lib/components/PageHeader.svelte";
   import Select from "$lib/components/Select.svelte";
   import { open } from "@tauri-apps/plugin-dialog";
   import { theme, restoreTheme, selectTheme } from "$lib/theme.svelte";
@@ -37,6 +38,11 @@
     { value: "docked", label: "Docked" },
   ];
 
+  const autostartOptions: { value: string; label: string }[] = [
+    { value: "on", label: "On" },
+    { value: "off", label: "Off" },
+  ];
+
   let settings: Settings | null = $state(null);
   let timeout = $state(10);
   let retention = $state(30);
@@ -45,6 +51,7 @@
   let dockMode = $state("auto-hide");
   let dockEdge = $state("left");
   let dockState = $state("floating");
+  let autostart = $state("on");
   let loading = $state(true);
   let loadFailed = $state(false);
   let saving = $state(false);
@@ -76,6 +83,7 @@
       dockMode = loaded.dock_mode;
       dockEdge = loaded.dock_edge;
       dockState = loaded.dock_state;
+      autostart = loaded.autostart;
       const persisted = loaded.theme as ThemeMode;
       if (persisted === "system" || persisted === "light" || persisted === "dark") {
         if (persisted !== theme.mode) restoreTheme(persisted);
@@ -95,6 +103,22 @@
       await selectTheme(mode);
     } catch {
       error = "Couldn't save the theme — it applies for now, but won't survive a restart.";
+    }
+  }
+
+  async function pickAutostart(value: string) {
+    const previous = autostart;
+    autostart = value;
+    saved = "";
+    error = "";
+    try {
+      await updateAutostart(value === "on");
+    } catch {
+      // Neither the setting nor the registration changed — put the toggle
+      // back so it tells the truth.
+      autostart = previous;
+      error =
+        "Couldn't change the start-with-Windows registration — try again.";
     }
   }
 
@@ -127,6 +151,7 @@
         dock_mode: dockMode,
         dock_edge: dockEdge,
         dock_state: dockState,
+        autostart,
       });
       saved = "Saved — the next run honors these.";
       // Reflect any clamping back into the fields.
@@ -170,13 +195,12 @@
 </script>
 
 <section class="settings" aria-labelledby="settings-title">
-  <header class="settings__header">
-    <h1 id="settings-title" class="settings__title">Settings</h1>
-    <p class="settings__sub">
+  <PageHeader titleId="settings-title" title="Settings">
+    {#snippet subtitle()}
       Defaults for authoring and housekeeping, persisted in the Library database and honored by
       every run.
-    </p>
-  </header>
+    {/snippet}
+  </PageHeader>
 
   {#if error}
     <Notice tone="error">{error}</Notice>
@@ -391,6 +415,30 @@
 
       <article class="knob">
         <div class="knob__body">
+          <span class="knob__label">Start with Windows</span>
+          <p class="knob__hint">
+            Registers Sprout to start at login, resident in the tray — the main
+            window stays closed and a docked Quick Launch bar reappears on its
+            own. Turning it off removes the registration immediately; no restart
+            needed.
+          </p>
+        </div>
+        <div class="knob__input">
+          <Select
+            id="autostart"
+            variant="small"
+            value={autostart}
+            onchange={(v) => pickAutostart(v)}
+          >
+            {#each autostartOptions as option (option.value)}
+              <option value={option.value}>{option.label}</option>
+            {/each}
+          </Select>
+        </div>
+      </article>
+
+      <article class="knob">
+        <div class="knob__body">
           <span class="knob__label">Sprout updates</span>
           <p class="knob__hint">
             Checks GitHub releases for a newer build. An update also appears
@@ -461,24 +509,6 @@
   .settings {
     max-width: 680px;
     margin: 0 auto;
-  }
-
-  .settings__header {
-    margin-bottom: var(--space-5);
-  }
-
-  .settings__title {
-    font-family: var(--font-display);
-    font-size: var(--text-2xl);
-    line-height: 1.15;
-    color: var(--text);
-    text-wrap: balance;
-  }
-
-  .settings__sub {
-    margin: var(--space-2) 0 0;
-    font-size: var(--text-sm);
-    color: var(--text-muted);
   }
 
   .sifting {

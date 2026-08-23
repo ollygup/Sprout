@@ -11,6 +11,7 @@
     { id: "plan", label: "Plan", href: "/plan" },
     { id: "launch", label: "Quick Launch", href: "/launch" },
     { id: "quick-actions", label: "Quick Actions", href: "/quick-actions" },
+    { id: "clips", label: "Quick Clips", href: "/clips" },
     { id: "history", label: "History", href: "/history" },
     { id: "logs", label: "Logs", href: "/logs" },
     { id: "settings", label: "Settings", href: "/settings" },

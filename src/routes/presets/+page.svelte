@@ -7,6 +7,7 @@
   import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";
   import Button from "$lib/components/Button.svelte";
   import Icon from "$lib/components/Icon.svelte";
+  import PageHeader from "$lib/components/PageHeader.svelte";
   import PresetPacket from "$lib/components/PresetPacket.svelte";
   import PresetFormDialog from "$lib/components/PresetFormDialog.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
@@ -225,23 +226,21 @@
 </script>
 
 <section class="presets" aria-labelledby="presets-title">
-  <header class="presets__header">
-    <div class="presets__head-row">
-      <h1 id="presets-title" class="presets__title">Presets</h1>
-      <div class="presets__head-actions">
-        <Button variant="secondary" onclick={importViaDialog} disabled={importing}>
-          <Icon name="folder" size={15} /> Import
-        </Button>
-        <Button onclick={openAdd}>
-          <span aria-hidden="true">+</span> Compose preset
-        </Button>
-      </div>
-    </div>
-    <p class="presets__sub">
+  <PageHeader titleId="presets-title" title="Presets">
+    {#snippet actions()}
+      <Button variant="secondary" onclick={importViaDialog} disabled={importing}>
+        <Icon name="folder" size={15} /> Import
+      </Button>
+      <Button onclick={openAdd}>
+        <Icon name="plus" size={15} />
+        Compose preset
+      </Button>
+    {/snippet}
+    {#snippet subtitle()}
       {presets.length} preset{presets.length === 1 ? "" : "s"}.
       Right-click a card or open its ⋯ menu to edit, fork, export, or remove.
-    </p>
-  </header>
+    {/snippet}
+  </PageHeader>
 
   {#if notice}
     <Notice tone="ok">{notice}</Notice>
@@ -319,36 +318,6 @@
   .presets {
     max-width: 1080px;
     margin: 0 auto;
-  }
-
-  .presets__header {
-    margin-bottom: var(--space-5);
-  }
-
-  .presets__head-row {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: var(--space-4);
-  }
-
-  .presets__head-actions {
-    display: flex;
-    gap: var(--space-2);
-  }
-
-  .presets__title {
-    font-family: var(--font-display);
-    font-size: var(--text-2xl);
-    line-height: 1.15;
-    color: var(--text);
-    text-wrap: balance;
-  }
-
-  .presets__sub {
-    margin: var(--space-2) 0 0;
-    font-size: var(--text-sm);
-    color: var(--text-muted);
   }
 
   .sifting {

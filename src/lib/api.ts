@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   ActiveRunInfo,
+  Clip,
+  ClipInput,
   Composition,
   ImportResult,
   LaunchCandidate,
@@ -152,6 +154,12 @@ export function updateTheme(theme: string): Promise<void> {
   return invoke<void>("update_theme", { theme });
 }
 
+/** Persists the auto-start preference and reconciles the Windows Run-key
+ *  registration beside the save (ticket 75) — effective immediately. */
+export function updateAutostart(enabled: boolean): Promise<void> {
+  return invoke<void>("update_autostart", { enabled });
+}
+
 /** The Logs screen's picture of where logs live and how big they are. */
 export function listLogs(): Promise<LogLocations> {
   return invoke<LogLocations>("list_logs");
@@ -278,6 +286,33 @@ export function testQuickAction(
   cwd: string | null
 ): Promise<LaunchCommandTest> {
   return invoke<LaunchCommandTest>("test_quick_action", { command, cwd });
+}
+
+/** Lists every Clip in order (ticket 78). */
+export function listClips(): Promise<Clip[]> {
+  return invoke<Clip[]>("list_clips");
+}
+
+export function createClip(clip: ClipInput): Promise<Clip> {
+  return invoke<Clip>("create_clip", { clip });
+}
+
+export function updateClip(clip: Clip): Promise<void> {
+  return invoke<void>("update_clip", { clip });
+}
+
+export function deleteClip(id: number): Promise<void> {
+  return invoke<void>("delete_clip", { id });
+}
+
+export function moveClip(id: number, toPosition: number): Promise<void> {
+  return invoke<void>("move_clip", { id, toPosition });
+}
+
+/** Puts one stored Clip's content back on the clipboard (ticket 78). Resolves
+ *  only after the write landed, so a "Copied" flash never lies. */
+export function copyClip(id: number): Promise<void> {
+  return invoke<void>("copy_clip", { id });
 }
 
 /** The Quick Launch dock's toggle (ticket 53): docks the window to its

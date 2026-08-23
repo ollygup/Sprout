@@ -114,8 +114,10 @@ and apply its deletion test before extracting to shared/.
 - Constants: domain-split under constants/ (theme, window, app) — not one file.
 - App version: Cargo.toml only, tauri.conf.json omits it (auto-inherits).
   Svelte reads via getVersion(), never a duplicated constant.
-- Window sizing: tauri.conf.json is the default-size source; runtime/docked
-  dimensions Svelte needs come from a Tauri command, not a JS constant.
+- Window sizing: `src-tauri/src/constants/window.rs` is the single size
+  source — tauri.conf.json declares no windows (ADR-0013 boot-to-tray);
+  runtime/docked dimensions Svelte needs come from a Tauri command, not a JS
+  constant.
 - shared/: only for modules that hide real complexity or have a genuine
   second adapter. Thin pass-throughs get inlined.
 

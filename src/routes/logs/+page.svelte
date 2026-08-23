@@ -1,18 +1,40 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import type { LogLocations } from "$lib/types";
+  import type { LogEntry, LogLocations } from "$lib/types";
   import { formatBytes, formatTimestamp } from "$lib/format";
   import { listLogs, openFolder } from "$lib/api";
   import Button from "$lib/components/Button.svelte";
+  import Disclosure from "$lib/components/Disclosure.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import Notice from "$lib/components/Notice.svelte";
+  import PageHeader from "$lib/components/PageHeader.svelte";
+
+  /** Rows visible before "Show all" takes over (ticket 83): every family's
+   *  preview stays within a fraction of a viewport, so no header buries the
+   *  next one however many folders pile up. */
+  const PREVIEW_ROWS = 3;
+
+  type FamilyKey = "runs" | "actions" | "launch";
 
   let locations: LogLocations | null = $state(null);
   let loading = $state(true);
   let loadFailed = $state(false);
   let error = $state("");
   let opening = $state<string | null>(null);
+
+  // Session-only disclosure state (ticket 83): every family starts expanded
+  // at its preview cap; nothing persists across visits.
+  let expanded = $state<Record<FamilyKey, boolean>>({
+    runs: true,
+    actions: true,
+    launch: true,
+  });
+  let showAll = $state<Record<FamilyKey, boolean>>({
+    runs: false,
+    actions: false,
+    launch: false,
+  });
 
   onMount(() => {
     load();
@@ -44,21 +66,80 @@
       opening = null;
     }
   }
+
+  function totalBytes(entries: LogEntry[]) {
+    return entries.reduce((sum, entry) => sum + entry.size_bytes, 0);
+  }
 </script>
 
+{#snippet logSection(
+  key: FamilyKey,
+  label: string,
+  entries: LogEntry[],
+  emptyCopy: string,
+)}
+  {@const visible = showAll[key] ? entries : entries.slice(0, PREVIEW_ROWS)}
+  <section class="family" aria-labelledby={`family-${key}-title`}>
+    <header class="family__head">
+      <Disclosure
+        open={expanded[key]}
+        controls={`family-${key}`}
+        ariaLabel={`Toggle the ${label} list`}
+        onclick={() => (expanded[key] = !expanded[key])}
+      />
+      <h2 id={`family-${key}-title`} class="family__name">{label}</h2>
+      <span class="family__count">
+        {entries.length} folder{entries.length === 1 ? "" : "s"} · {formatBytes(totalBytes(entries))}
+      </span>
+    </header>
+    {#if expanded[key]}
+      <div id={`family-${key}`} class="family__body">
+        {#if entries.length === 0}
+          <p class="family__empty">{emptyCopy}</p>
+        {:else}
+          <ul class="family__list">
+            {#each visible as entry (entry.name)}
+              <li class="family__row">
+                <span class="family__folder">{entry.name}</span>
+                <span class="family__stats">
+                  {formatBytes(entry.size_bytes)}
+                  {#if entry.modified_at}
+                    <span class="family__date">{formatTimestamp(entry.modified_at)}</span>
+                  {/if}
+                </span>
+                <Button variant="secondary" onclick={() => open(entry.path)} disabled={opening !== null}>
+                  <Icon name="folder" size={13} /> Open
+                </Button>
+              </li>
+            {/each}
+          </ul>
+          {#if entries.length > PREVIEW_ROWS}
+            <button
+              type="button"
+              class="expander"
+              onclick={() => (showAll[key] = !showAll[key])}
+            >
+              {showAll[key] ? "Show fewer" : `Show all ${entries.length}`}
+            </button>
+          {/if}
+        {/if}
+      </div>
+    {/if}
+  </section>
+{/snippet}
+
 <section class="logs" aria-labelledby="logs-title">
-  <header class="logs__header">
-    <div class="logs__head-row">
-      <h1 id="logs-title" class="logs__title">Logs</h1>
+  <PageHeader titleId="logs-title" title="Logs">
+    {#snippet actions()}
       <Button variant="secondary" onclick={load} disabled={loading}>
         <Icon name="refresh" size={13} /> Refresh
       </Button>
-    </div>
-    <p class="logs__sub">
+    {/snippet}
+    {#snippet subtitle()}
       Log content is not rendered in the app; these are raw files for you and support staff.
       Every run keeps its own folder; expired folders are pruned per the retention setting.
-    </p>
-  </header>
+    {/snippet}
+  </PageHeader>
 
   {#if error}
     <Notice tone="error">{error}</Notice>
@@ -88,6 +169,7 @@
           <p class="root__meta">
             {loc.runs.length} run folder{loc.runs.length === 1 ? "" : "s"} ·{" "}
             {loc.quick_action_runs.length} Quick Action run{loc.quick_action_runs.length === 1 ? "" : "s"} ·{" "}
+            {loc.quick_launch_runs.length} Quick Launch run{loc.quick_launch_runs.length === 1 ? "" : "s"} ·{" "}
             {formatBytes(loc.total_logs_bytes)}
           </p>
         </div>
@@ -112,56 +194,24 @@
       </article>
     </div>
 
-    <div class="runs">
-      <p class="runs__label">Run folders</p>
-      {#if loc.runs.length === 0}
-        <p class="runs__none">No run folders yet. Each run's raw output lands in its own folder.</p>
-      {:else}
-        <ul class="runs__list">
-          {#each loc.runs as entry (entry.name)}
-            <li class="runs__row">
-              <span class="runs__name">{entry.name}</span>
-              <span class="runs__meta">
-                {formatBytes(entry.size_bytes)}
-                {#if entry.modified_at}
-                  <span class="runs__date">{formatTimestamp(entry.modified_at)}</span>
-                {/if}
-              </span>
-              <Button variant="secondary" onclick={() => open(entry.path)} disabled={opening !== null}>
-                <Icon name="folder" size={13} /> Open
-              </Button>
-            </li>
-          {/each}
-        </ul>
-      {/if}
-    </div>
-
-    <div class="runs">
-      <p class="runs__label">Quick Action runs</p>
-      {#if loc.quick_action_runs.length === 0}
-        <p class="runs__none">
-          No Quick Action runs yet. Each run's live output and its stop/exit
-          lines land in its own folder.
-        </p>
-      {:else}
-        <ul class="runs__list">
-          {#each loc.quick_action_runs as entry (entry.name)}
-            <li class="runs__row">
-              <span class="runs__name">{entry.name}</span>
-              <span class="runs__meta">
-                {formatBytes(entry.size_bytes)}
-                {#if entry.modified_at}
-                  <span class="runs__date">{formatTimestamp(entry.modified_at)}</span>
-                {/if}
-              </span>
-              <Button variant="secondary" onclick={() => open(entry.path)} disabled={opening !== null}>
-                <Icon name="folder" size={13} /> Open
-              </Button>
-            </li>
-          {/each}
-        </ul>
-      {/if}
-    </div>
+    {@render logSection(
+      "runs",
+      "Run folders",
+      loc.runs,
+      "No run folders yet. Each run's raw output lands in its own folder.",
+    )}
+    {@render logSection(
+      "actions",
+      "Quick Action runs",
+      loc.quick_action_runs,
+      "No Quick Action runs yet. Each run's live output and its stop/exit lines land in its own folder.",
+    )}
+    {@render logSection(
+      "launch",
+      "Quick Launch runs",
+      loc.quick_launch_runs,
+      "No Quick Launch runs yet. Each run's started, skipped, and failed entries land in its own folder.",
+    )}
   {/if}
 </section>
 
@@ -169,31 +219,6 @@
   .logs {
     max-width: 920px;
     margin: 0 auto;
-  }
-
-  .logs__header {
-    margin-bottom: var(--space-5);
-  }
-
-  .logs__head-row {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: var(--space-4);
-  }
-
-  .logs__title {
-    font-family: var(--font-display);
-    font-size: var(--text-2xl);
-    line-height: 1.15;
-    color: var(--text);
-    text-wrap: balance;
-  }
-
-  .logs__sub {
-    margin: var(--space-2) 0 0;
-    font-size: var(--text-sm);
-    color: var(--text-muted);
   }
 
   .sifting {
@@ -265,8 +290,23 @@
     flex-shrink: 0;
   }
 
-  .runs__label {
-    margin: 0 0 var(--space-3);
+  /* One rhythm per family (ticket 83): hairline + generous space above each
+     section, so a capped preview never bleeds into the next header. */
+  .family {
+    margin-top: var(--space-6);
+    padding-top: var(--space-5);
+    border-top: 1px solid var(--border);
+  }
+
+  .family__head {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-bottom: var(--space-3);
+  }
+
+  .family__name {
+    margin: 0;
     font-family: var(--font-mono);
     font-size: var(--text-xs);
     font-weight: 500;
@@ -275,14 +315,23 @@
     color: var(--accent);
   }
 
-  .runs__none {
+  .family__count {
+    margin-left: auto;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    letter-spacing: var(--tracking-mono);
+    color: var(--text-muted);
+    white-space: nowrap;
+  }
+
+  .family__empty {
     margin: 0;
     font-size: var(--text-xs);
     font-style: italic;
     color: var(--text-muted);
   }
 
-  .runs__list {
+  .family__list {
     list-style: none;
     margin: 0;
     padding: 0;
@@ -291,7 +340,7 @@
     gap: var(--space-2);
   }
 
-  .runs__row {
+  .family__row {
     display: flex;
     align-items: center;
     gap: var(--space-3);
@@ -301,7 +350,7 @@
     padding: var(--space-2) var(--space-3);
   }
 
-  .runs__name {
+  .family__folder {
     font-family: var(--font-mono);
     font-size: var(--text-xs);
     color: var(--text);
@@ -310,7 +359,7 @@
     min-width: 0;
   }
 
-  .runs__meta {
+  .family__stats {
     display: flex;
     align-items: center;
     gap: var(--space-3);
@@ -321,7 +370,28 @@
     flex-shrink: 0;
   }
 
-  .runs__date {
+  .family__date {
     color: var(--warm-text);
+  }
+
+  .expander {
+    display: inline-block;
+    margin-top: var(--space-2);
+    padding: var(--space-1) var(--space-2);
+    border: none;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    font-weight: 500;
+    letter-spacing: var(--tracking-mono);
+    text-transform: uppercase;
+    color: var(--text-muted);
+    cursor: pointer;
+  }
+
+  .expander:hover {
+    color: var(--accent);
+    background: var(--bg-hover);
   }
 </style>

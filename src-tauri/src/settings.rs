@@ -25,7 +25,11 @@
 //!   per monitor);
 //! - `dock_state` — the Quick Launch window's dock/undock state (ticket 57):
 //!   "floating" (default) or "docked", persisted so the window reopens in the
-//!   state it was left in, and written back by the in-window dock controls.
+//!   state it was left in, and written back by the in-window dock controls;
+//! - `autostart` — whether Sprout registers itself to start with Windows
+//!   (ADR-0013, ticket 75): "on" (default) or "off". The registration itself
+//!   is reconciled with this value by the autostart module at startup and on
+//!   every toggle.
 
 use rusqlite::{params, Connection};
 
@@ -49,6 +53,9 @@ pub const DEFAULT_DOCK_EDGE: &str = "left";
 /// The dock's default state: floating — the window only docks when the user
 /// docks it (or sets the state to "docked" in Settings).
 pub const DEFAULT_DOCK_STATE: &str = "floating";
+/// Auto-start is on by default in installed builds (ADR-0013): the user opts
+/// out with the Settings toggle, not in.
+pub const DEFAULT_AUTOSTART: &str = "on";
 
 const KEY_TIMEOUT: &str = "settings.timeout_minutes";
 const KEY_RETENTION: &str = "settings.log_retention_days";
@@ -58,6 +65,7 @@ const KEY_LAUNCH_CONCURRENCY: &str = "launch.concurrency";
 const KEY_DOCK_MODE: &str = "dock.mode";
 const KEY_DOCK_EDGE: &str = "dock.edge";
 const KEY_DOCK_STATE: &str = "dock.state";
+const KEY_AUTOSTART: &str = "settings.autostart";
 
 /// The persisted knobs. `u32` fields keep the frontend's number inputs safe;
 /// validation lives in [`Settings::validate`]. `install_dir` is empty when
@@ -83,6 +91,10 @@ pub struct Settings {
     /// "docked" — what the window reopens as, and what the in-window dock
     /// toggle writes back.
     pub dock_state: String,
+    /// Whether Sprout starts with Windows (ADR-0013, ticket 75): "on" or
+    /// "off". The Run-key registration is reconciled with this value by the
+    /// autostart module; the setting itself only records the preference.
+    pub autostart: String,
 }
 
 impl Default for Settings {
@@ -96,6 +108,7 @@ impl Default for Settings {
             dock_mode: DEFAULT_DOCK_MODE.to_string(),
             dock_edge: DEFAULT_DOCK_EDGE.to_string(),
             dock_state: DEFAULT_DOCK_STATE.to_string(),
+            autostart: DEFAULT_AUTOSTART.to_string(),
         }
     }
 }
@@ -150,12 +163,21 @@ pub fn validate_dock_state(state: &str) -> std::result::Result<(), String> {
     }
 }
 
+/// Accepts only the two auto-start states the Settings toggle writes
+/// (ADR-0013).
+pub fn validate_autostart(value: &str) -> std::result::Result<(), String> {
+    match value {
+        "on" | "off" => Ok(()),
+        _ => Err("Auto-start must be \"on\" or \"off\"".into()),
+    }
+}
+
 impl Settings {
     /// Rejects values that would break a run or empty the log archive.
     /// Timeouts must be at least 1 minute and at most a day; retention at
     /// least 1 day and at most 10 years; the install directory, when set,
-    /// must be an absolute path; the dock mode, edge, and state must be one
-    /// of the offered choices.
+    /// must be an absolute path; the dock mode, edge, state, and auto-start
+    /// must be one of the offered choices.
     pub fn validate(&self) -> std::result::Result<(), String> {
         if !(1..=1440).contains(&self.default_timeout_minutes) {
             return Err("Default timeout must be between 1 and 1440 minutes (24 h)".into());
@@ -171,6 +193,7 @@ impl Settings {
         validate_dock_mode(&self.dock_mode)?;
         validate_dock_edge(&self.dock_edge)?;
         validate_dock_state(&self.dock_state)?;
+        validate_autostart(&self.autostart)?;
         Ok(())
     }
 }
@@ -214,6 +237,8 @@ pub fn load(conn: &Connection) -> Settings {
             .unwrap_or_else(|| DEFAULT_DOCK_EDGE.to_string()),
         dock_state: validated(conn, KEY_DOCK_STATE, validate_dock_state)
             .unwrap_or_else(|| DEFAULT_DOCK_STATE.to_string()),
+        autostart: validated(conn, KEY_AUTOSTART, validate_autostart)
+            .unwrap_or_else(|| DEFAULT_AUTOSTART.to_string()),
     }
 }
 
@@ -233,6 +258,7 @@ pub fn save(conn: &Connection, settings: &Settings) -> std::result::Result<(), S
     upsert_meta(&tx, KEY_DOCK_MODE, &settings.dock_mode).map_err(|e| e.to_string())?;
     upsert_meta(&tx, KEY_DOCK_EDGE, &settings.dock_edge).map_err(|e| e.to_string())?;
     upsert_meta(&tx, KEY_DOCK_STATE, &settings.dock_state).map_err(|e| e.to_string())?;
+    upsert_meta(&tx, KEY_AUTOSTART, &settings.autostart).map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())
 }
 
@@ -257,6 +283,14 @@ pub fn save_dock_state(conn: &Connection, state: &str) -> std::result::Result<()
 pub fn save_dock_edge(conn: &Connection, edge: &str) -> std::result::Result<(), String> {
     validate_dock_edge(edge)?;
     upsert_meta(conn, KEY_DOCK_EDGE, edge).map_err(|e| e.to_string())
+}
+
+/// Persists only the auto-start preference (ADR-0013, ticket 75) — the
+/// Settings toggle writes it without touching the other knobs; the Run-key
+/// registration is reconciled beside the save by the caller.
+pub fn save_autostart(conn: &Connection, value: &str) -> std::result::Result<(), String> {
+    validate_autostart(value)?;
+    upsert_meta(conn, KEY_AUTOSTART, value).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -293,6 +327,7 @@ mod tests {
         assert_eq!(load(&conn).dock_mode, DEFAULT_DOCK_MODE);
         assert_eq!(load(&conn).dock_edge, DEFAULT_DOCK_EDGE);
         assert_eq!(load(&conn).dock_state, DEFAULT_DOCK_STATE);
+        assert_eq!(load(&conn).autostart, DEFAULT_AUTOSTART);
     }
 
     #[test]
@@ -307,6 +342,7 @@ mod tests {
             dock_mode: "fixed".to_string(),
             dock_edge: "right".to_string(),
             dock_state: "docked".to_string(),
+            autostart: "off".to_string(),
         };
         {
             let conn = crate::db::init_at(&dir).unwrap();
@@ -356,6 +392,12 @@ mod tests {
         assert!(s.validate().is_ok());
         s.dock_state = "docked".to_string();
         assert!(s.validate().is_ok());
+        s.autostart = "maybe".to_string();
+        assert!(s.validate().is_err());
+        s.autostart = DEFAULT_AUTOSTART.to_string();
+        assert!(s.validate().is_ok());
+        s.autostart = "off".to_string();
+        assert!(s.validate().is_ok());
     }
 
     #[test]
@@ -380,6 +422,15 @@ mod tests {
         assert_eq!(load(&conn).dock_edge, DEFAULT_DOCK_EDGE);
         upsert_meta(&conn, KEY_DOCK_STATE, "minimized").unwrap();
         assert_eq!(load(&conn).dock_state, DEFAULT_DOCK_STATE);
+    }
+
+    #[test]
+    fn invalid_stored_autostart_falls_back_to_default() {
+        let conn = conn();
+        // A broken value written by an older build must never decide the
+        // registration — it reads back as the default (on).
+        upsert_meta(&conn, KEY_AUTOSTART, "maybe").unwrap();
+        assert_eq!(load(&conn).autostart, DEFAULT_AUTOSTART);
     }
 
     #[test]
@@ -486,6 +537,30 @@ mod tests {
     }
 
     #[test]
+    fn autostart_roundtrips_on_its_own() {
+        let dir = clean_dir();
+        {
+            let conn = crate::db::init_at(&dir).unwrap();
+            save_autostart(&conn, "off").unwrap();
+            assert_eq!(load(&conn).autostart, "off");
+        }
+        // Re-open: the preference survives the connection.
+        let conn = crate::db::init_at(&dir).unwrap();
+        assert_eq!(load(&conn).autostart, "off");
+        // And toggling back on persists on its own too.
+        save_autostart(&conn, "on").unwrap();
+        assert_eq!(load(&conn).autostart, "on");
+    }
+
+    #[test]
+    fn save_autostart_rejects_unknown_values_and_keeps_the_old_one() {
+        let conn = conn();
+        assert!(save_autostart(&conn, "maybe").is_err());
+        // Nothing was persisted.
+        assert_eq!(load(&conn).autostart, DEFAULT_AUTOSTART);
+    }
+
+    #[test]
     fn save_rejects_invalid_values_and_keeps_the_old_ones() {
         let conn = conn();
         let bad = Settings {
@@ -497,6 +572,7 @@ mod tests {
             dock_mode: DEFAULT_DOCK_MODE.to_string(),
             dock_edge: DEFAULT_DOCK_EDGE.to_string(),
             dock_state: DEFAULT_DOCK_STATE.to_string(),
+            autostart: DEFAULT_AUTOSTART.to_string(),
         };
         assert!(save(&conn, &bad).is_err());
         // Nothing was persisted.

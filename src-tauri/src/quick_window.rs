@@ -413,6 +413,27 @@ pub fn open(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+/// The boot / Open-Sprout restore rule (ADR-0013, ticket 76): opens the
+/// Quick Launch window only when the persisted dock preference is
+/// "docked" — `open` then applies the per-monitor edge/mode memory and
+/// docks immediately (ticket 57 behavior). Floating boots, and fresh
+/// installs whose default preference floats, stay tray-only until an
+/// explicit click; every entry point converges on this one rule.
+pub fn open_if_docked(app: &AppHandle) -> tauri::Result<()> {
+    let docked = match app.try_state::<AppState>() {
+        Some(state) => state
+            .db
+            .lock()
+            .map(|conn| settings::load(&conn).dock_state == "docked")
+            .unwrap_or(false),
+        None => false,
+    };
+    if docked {
+        return open(app);
+    }
+    Ok(())
+}
+
 /// The frontend × button's backend half (tickets 52, 53 & 56): the window is
 /// destroyed — the only way the floating window closes, since blur no longer
 /// destroys it — so the tray reopens it fresh at its fixed centered size.

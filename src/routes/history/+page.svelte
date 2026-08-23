@@ -14,6 +14,7 @@
   import Button from "$lib/components/Button.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
   import Icon from "$lib/components/Icon.svelte";
+  import PageHeader from "$lib/components/PageHeader.svelte";
   import Badge from "$lib/components/Badge.svelte";
   import Notice from "$lib/components/Notice.svelte";
 
@@ -149,18 +150,17 @@
 </script>
 
 <section class="history" aria-labelledby="history-title">
-  <header class="history__header">
-    <div class="history__head-row">
-      <h1 id="history-title" class="history__title">History</h1>
+  <PageHeader titleId="history-title" title="History">
+    {#snippet actions()}
       <Button variant="secondary" onclick={load} disabled={loading}>
         <Icon name="refresh" size={13} /> Refresh
       </Button>
-    </div>
-    <p class="history__sub">
+    {/snippet}
+    {#snippet subtitle()}
       Run records are kept indefinitely; raw log files expire per the retention setting.
       Open a run to see its per-requirement results.
-    </p>
-  </header>
+    {/snippet}
+  </PageHeader>
 
   {#if error}
     <Notice tone="error">{error}</Notice>
@@ -297,31 +297,6 @@
   .history {
     max-width: 920px;
     margin: 0 auto;
-  }
-
-  .history__header {
-    margin-bottom: var(--space-5);
-  }
-
-  .history__head-row {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: var(--space-4);
-  }
-
-  .history__title {
-    font-family: var(--font-display);
-    font-size: var(--text-2xl);
-    line-height: 1.15;
-    color: var(--text);
-    text-wrap: balance;
-  }
-
-  .history__sub {
-    margin: var(--space-2) 0 0;
-    font-size: var(--text-sm);
-    color: var(--text-muted);
   }
 
   .sifting {

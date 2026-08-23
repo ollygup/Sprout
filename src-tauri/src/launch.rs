@@ -13,6 +13,7 @@
 //! Preset, Plan, Run, or export.
 
 use std::collections::{HashMap, VecDeque};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use rusqlite::{params, Connection, OptionalExtension, Result};
@@ -606,6 +607,72 @@ pub fn launch_summary_body(report: &LaunchReport) -> String {
         body.push_str(note);
     }
     body
+}
+
+// ---------------------------------------------------------------------------
+// The per-run log folders (ticket 77)
+// ---------------------------------------------------------------------------
+
+/// The Quick Launch run-log root under the logs dir (ticket 77): one folder
+/// per list-run, sibling of `logs\runs` and `logs\quick-actions`.
+pub const QL_LOGS_DIR_NAME: &str = "quick-launch";
+
+/// A Quick Launch run folder's name prefix; the epoch millis follow it
+/// (`ql-<millis>`, `-2`/`-3`… on a collision), the same age-embedding trick
+/// as `run-<millis>` — what listing and retention pruning read as the age.
+pub const QL_LOG_PREFIX: &str = "ql-";
+
+/// Creates this list-run's log folder (`logs\quick-launch\ql-<millis>`) and
+/// returns its `output.log` path (ticket 77), through the ticket-64
+/// folder-creation seam. Runs are single-flight, so collisions cannot
+/// happen; the suffix loop stays for robustness. `None` when the folder
+/// cannot be created — the run then proceeds unlogged.
+pub fn new_launch_run_log_path(logs_dir: &Path) -> Option<PathBuf> {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    crate::quick_actions::create_run_log_folder(
+        &logs_dir.join(QL_LOGS_DIR_NAME),
+        &format!("{QL_LOG_PREFIX}{millis}"),
+    )
+}
+
+/// Writes the run-log header line: when the run started and with how many
+/// entries at which concurrency cap (ticket 77). Written before the queue
+/// starts so even a wedged run leaves its start behind.
+pub fn write_launch_run_header(log_path: &Path, entry_count: usize, cap: usize) {
+    crate::quick_actions::append_log_line(
+        log_path,
+        &format!(
+            "{} quick launch run started — {entry_count} entries, cap {cap}",
+            crate::quick_actions::log_stamp()
+        ),
+    );
+}
+
+/// Writes the run's story after the queue drains (ticket 77): one line per
+/// started entry, skipped and failed entries with their reasons, the
+/// desktop-assignment notes — mirroring the notification summary — then the
+/// `--- sprout ---` verdict footer carrying that exact summary text, the
+/// install-run-log convention (ticket 16): the file always ends by naming
+/// its verdict. Best-effort throughout.
+pub fn write_launch_run_summary(log_path: &Path, report: &LaunchReport) {
+    for name in &report.started {
+        crate::quick_actions::append_log_line(log_path, &format!("  started: {name}"));
+    }
+    for line in &report.skipped {
+        crate::quick_actions::append_log_line(log_path, &format!("  skipped: {line}"));
+    }
+    for line in &report.failed {
+        crate::quick_actions::append_log_line(log_path, &format!("  failed: {line}"));
+    }
+    for note in &report.notes {
+        crate::quick_actions::append_log_line(log_path, &format!("  note: {note}"));
+    }
+    crate::quick_actions::append_log_line(log_path, "");
+    crate::quick_actions::append_log_line(log_path, "--- sprout ---");
+    crate::quick_actions::append_log_line(log_path, &launch_summary_body(report));
 }
 
 #[cfg(test)]
@@ -1916,5 +1983,121 @@ mod live_probe {
             }
             std::thread::sleep(Duration::from_millis(250));
         }
+    }
+
+    // ------------------- the per-run logs (ticket 77) ---------------------
+
+    #[test]
+    fn run_log_folder_is_created_under_the_quick_launch_root() {
+        let logs_dir = tempfile::tempdir().unwrap().into_path();
+        let log_path = new_launch_run_log_path(&logs_dir).expect("folder created");
+        assert_eq!(log_path.file_name().unwrap(), "output.log");
+        // Under the quick-launch root — the listing and pruning scan exactly
+        // that parent.
+        assert_eq!(
+            log_path.parent().unwrap().parent().unwrap(),
+            logs_dir.join(QL_LOGS_DIR_NAME)
+        );
+        // `ql-<millis>`: the embedded epoch millis are what retention reads
+        // as the age, so they must parse back to roughly now.
+        let folder = log_path
+            .parent()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let millis: i64 = folder
+            .strip_prefix(QL_LOG_PREFIX)
+            .expect("ql- prefix")
+            .parse()
+            .expect("bare epoch millis");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        assert!((now - millis).abs() < 60_000, "{folder}");
+        assert_eq!(
+            crate::logs::embedded_age_secs(&folder),
+            Some(millis / 1000),
+            "{folder}"
+        );
+    }
+
+    #[test]
+    fn run_log_carries_header_story_and_verdict_in_order() {
+        let logs_dir = tempfile::tempdir().unwrap().into_path();
+        let log_path = new_launch_run_log_path(&logs_dir).expect("folder created");
+        write_launch_run_header(&log_path, 4, 2);
+        let report = LaunchReport {
+            started: vec!["Browser".into(), "Editor".into()],
+            skipped: vec!["Terminal — already open on this desktop".into()],
+            failed: vec![
+                "Music — target no longer exists — update this entry".into(),
+            ],
+            notes: vec![
+                "Chat opened on the current desktop — could not move it: move refused".into(),
+            ],
+        };
+        write_launch_run_summary(&log_path, &report);
+        let contents = std::fs::read_to_string(&log_path).unwrap();
+        let lines: Vec<&str> = contents.lines().collect();
+        // Header first, then started / skipped / failed / notes in order,
+        // then the verdict footer with the notification's exact summary.
+        assert_eq!(lines.len(), 9, "{contents}");
+        assert!(lines[0].contains("quick launch run started — 4 entries, cap 2"), "{contents}");
+        assert!(lines[0].starts_with('['), "{contents}");
+        assert_eq!(lines[1], "  started: Browser", "{contents}");
+        assert_eq!(lines[2], "  started: Editor", "{contents}");
+        assert_eq!(
+            lines[3],
+            "  skipped: Terminal — already open on this desktop",
+            "{contents}"
+        );
+        assert_eq!(
+            lines[4],
+            "  failed: Music — target no longer exists — update this entry",
+            "{contents}"
+        );
+        assert_eq!(
+            lines[5],
+            "  note: Chat opened on the current desktop — could not move it: move refused",
+            "{contents}"
+        );
+        assert_eq!(lines[6], "", "{contents}");
+        assert_eq!(lines[7], "--- sprout ---", "{contents}");
+        assert_eq!(lines[8], launch_summary_body(&report), "{contents}");
+
+        // A second stage appends below — never truncates.
+        write_launch_run_summary(&log_path, &LaunchReport::default());
+        let contents = std::fs::read_to_string(&log_path).unwrap();
+        assert!(contents.contains("quick launch run started"), "{contents}");
+        assert!(contents.contains("started 0, skipped 0, failed 0"), "{contents}");
+    }
+
+    #[test]
+    fn a_clean_run_logs_only_its_started_lines_and_the_verdict() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("output.log");
+        write_launch_run_header(&log_path, 1, 8);
+        let report = LaunchReport {
+            started: vec!["Postman".into()],
+            ..LaunchReport::default()
+        };
+        write_launch_run_summary(&log_path, &report);
+        let contents = std::fs::read_to_string(&log_path).unwrap();
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(
+            lines,
+            vec![
+                lines[0], // the header stamp line, already asserted to start the file
+                "  started: Postman",
+                "",
+                "--- sprout ---",
+                "started 1, skipped 0, failed 0",
+            ],
+            "{contents}"
+        );
+        assert!(lines[0].starts_with('['), "{contents}");
     }
 }

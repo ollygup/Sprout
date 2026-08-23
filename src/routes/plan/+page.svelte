@@ -21,6 +21,7 @@
   import PresetFormDialog from "$lib/components/PresetFormDialog.svelte";
   import Badge from "$lib/components/Badge.svelte";
   import Notice from "$lib/components/Notice.svelte";
+  import PageHeader from "$lib/components/PageHeader.svelte";
 
   /** One live row of the run's check-then-act story (ticket 20): seeded from
    * the composed selection as "Checking…", then resolved by the worker's
@@ -871,9 +872,8 @@
 {/snippet}
 
 <section class="plan" aria-labelledby="plan-title">
-  <header class="plan__header">
-    <h1 id="plan-title" class="plan__title">Plan</h1>
-    <p class="plan__sub">
+  <PageHeader titleId="plan-title" title="Plan">
+    {#snippet subtitle()}
       {#if quickProductId}
         Quick install: {quickProductName ?? "this product"}. It is checked against this
         machine now. Detection is read-only; nothing is installed or changed until you run.
@@ -881,8 +881,8 @@
         Pick one or more presets. Each is checked against this machine when you select it.
         Detection is read-only; nothing is installed or changed from this screen.
       {/if}
-    </p>
-  </header>
+    {/snippet}
+  </PageHeader>
 
   <ol class="steps" aria-label="Plan stages">
     <li class="steps__item" class:active={stage === "pick"} aria-current={stage === "pick" ? "step" : undefined}>
@@ -1258,10 +1258,6 @@
     margin: 0 auto;
   }
 
-  .plan__header {
-    margin-bottom: var(--space-4);
-  }
-
   .eyebrow {
     margin: 0 0 var(--space-2);
     font-family: var(--font-mono);
@@ -1270,20 +1266,6 @@
     letter-spacing: var(--tracking-mono);
     text-transform: uppercase;
     color: var(--warm-text);
-  }
-
-  .plan__title {
-    font-family: var(--font-display);
-    font-size: var(--text-2xl);
-    line-height: 1.15;
-    color: var(--text);
-    text-wrap: balance;
-  }
-
-  .plan__sub {
-    margin: var(--space-2) 0 0;
-    font-size: var(--text-sm);
-    color: var(--text-muted);
   }
 
   .steps {

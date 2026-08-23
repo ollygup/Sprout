@@ -41,3 +41,15 @@ export function formatDuration(seconds: number): string {
   if (minutes > 0) return `${minutes}m ${secs}s`;
   return `${secs}s`;
 }
+
+/** A Clip's display title (ticket 78): the stored name when titled, else the
+ *  content's first non-blank line — untitled clips stay readable without
+ *  inventing names. Empty only for content that is blank overall. */
+export function clipTitle(name: string, content: string): string {
+  const titled = name.trim();
+  if (titled) return titled;
+  return (
+    content.split(/\r?\n/).map((line) => line.trim()).find((line) => line) ??
+    ""
+  );
+}

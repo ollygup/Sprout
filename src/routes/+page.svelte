@@ -3,6 +3,8 @@
   import { listProducts, createProduct, updateProduct, deleteProduct, productPresetImpact } from "$lib/api";
   import { goto } from "$app/navigation";
   import Button from "$lib/components/Button.svelte";
+  import Icon from "$lib/components/Icon.svelte";
+  import PageHeader from "$lib/components/PageHeader.svelte";
   import SearchInput from "$lib/components/SearchInput.svelte";
   import ProductPacket from "$lib/components/ProductPacket.svelte";
   import ProductFormDialog from "$lib/components/ProductFormDialog.svelte";
@@ -151,27 +153,26 @@
 </script>
 
 <section class="library" aria-labelledby="library-title">
-  <header class="library__header">
-    <div class="library__head-row">
-      <h1 id="library-title" class="library__title">Products</h1>
+  <PageHeader titleId="library-title" title="Products">
+    {#snippet actions()}
       <Button onclick={openAdd}>
-        <span aria-hidden="true">+</span> Add product
+        <Icon name="plus" size={15} />
+        Add product
       </Button>
-    </div>
-    <p class="library__sub">
+    {/snippet}
+    {#snippet subtitle()}
       {products.length} product{products.length === 1 ? "" : "s"}
       {query.trim() ? (products.length === 1 ? " matches your search." : " match your search.") : "."}
       Right-click a card or open its ⋯ menu for actions.
-    </p>
-  </header>
-
-  <div class="library__toolbar">
-    <SearchInput
-      value={query}
-      placeholder="Filter products…"
-      onchange={(v) => (query = v)}
-    />
-  </div>
+    {/snippet}
+    {#snippet toolbar()}
+      <SearchInput
+        value={query}
+        placeholder="Filter products…"
+        onchange={(v) => (query = v)}
+      />
+    {/snippet}
+  </PageHeader>
 
   {#if notice}
     <Notice tone="ok">{notice}</Notice>
@@ -197,7 +198,10 @@
       <p>Add the first product to start composing presets. Products come from the live winget
         registry search or a custom install step.</p>
       <div class="empty-cta">
-        <Button onclick={openAdd}><span aria-hidden="true">+</span> Add product</Button>
+        <Button onclick={openAdd}>
+          <Icon name="plus" size={15} />
+          Add product
+        </Button>
       </div>
     </EmptyState>
   {:else if products.length === 0}
@@ -262,36 +266,6 @@
   .library {
     max-width: 1080px;
     margin: 0 auto;
-  }
-
-  .library__header {
-    margin-bottom: var(--space-5);
-  }
-
-  .library__head-row {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: var(--space-4);
-  }
-
-  .library__title {
-    font-family: var(--font-display);
-    font-size: var(--text-2xl);
-    line-height: 1.15;
-    color: var(--text);
-    text-wrap: balance;
-  }
-
-  .library__sub {
-    margin: var(--space-2) 0 0;
-    font-size: var(--text-sm);
-    color: var(--text-muted);
-  }
-
-  .library__toolbar {
-    display: flex;
-    margin-bottom: var(--space-5);
   }
 
   .sifting {

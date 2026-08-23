@@ -394,13 +394,22 @@ pub fn append_log_line(log_path: &Path, line: &str) {
 /// be created — the run then proceeds unlogged.
 pub fn new_run_log_path(logs_dir: &Path, action_name: &str) -> Option<PathBuf> {
     let root = logs_dir.join(QA_LOGS_DIR_NAME);
-    std::fs::create_dir_all(&root).ok()?;
     let (date, time) = local_date_time_compact();
     let base = match sanitize_log_slug(action_name) {
         Some(slug) => format!("{QA_LOG_PREFIX}{date}-{time}-{slug}"),
         None => format!("{QA_LOG_PREFIX}{date}-{time}"),
     };
-    let mut candidate = base.clone();
+    create_run_log_folder(&root, &base)
+}
+
+/// The shared per-run log-folder core behind both families (the Quick
+/// Action runs' and, since ticket 77, the Quick Launch runs'): creates
+/// `<root>\<base>` exclusively — a repeat gets a `-2`, `-3`, … suffix — and
+/// returns the new folder's `output.log` path. `None` when the folder
+/// cannot be created; callers treat that as "proceeds unlogged".
+pub(crate) fn create_run_log_folder(root: &Path, base: &str) -> Option<PathBuf> {
+    std::fs::create_dir_all(root).ok()?;
+    let mut candidate = base.to_string();
     let mut bump: u32 = 1;
     loop {
         match std::fs::create_dir(root.join(&candidate)) {

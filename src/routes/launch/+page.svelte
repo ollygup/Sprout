@@ -24,6 +24,7 @@
   import Disclosure from "$lib/components/Disclosure.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import IconButton from "$lib/components/IconButton.svelte";
+  import PageHeader from "$lib/components/PageHeader.svelte";
   import SearchInput from "$lib/components/SearchInput.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import CommandFormDialog from "$lib/components/CommandFormDialog.svelte";
@@ -506,29 +507,26 @@
 </svelte:head>
 
 <section class="launch" aria-labelledby="launch-title">
-  <header class="launch__header">
-    <div class="launch__head-row">
-      <h1 id="launch-title" class="launch__title">Quick Launch</h1>
-      <div class="launch__head-actions">
-        <Button
-          onclick={start}
-          disabled={busy || launching || entries.length === 0}
-        >
-          <Icon name="play" size={15} />
-          {launching ? "Starting…" : "Start"}
-        </Button>
-        <Button
-          variant="secondary"
-          onclick={toggleAdd}
-          aria-expanded={addOpen}
-          disabled={busy}
-        >
-          <Icon name="plus" size={15} />
-          Add
-        </Button>
-      </div>
-    </div>
-    <p class="launch__sub">
+  <PageHeader titleId="launch-title" title="Quick Launch">
+    {#snippet actions()}
+      <Button
+        onclick={start}
+        disabled={busy || launching || entries.length === 0}
+      >
+        <Icon name="play" size={15} />
+        {launching ? "Starting…" : "Start"}
+      </Button>
+      <Button
+        variant="secondary"
+        onclick={toggleAdd}
+        aria-expanded={addOpen}
+        disabled={busy}
+      >
+        <Icon name="plus" size={15} />
+        Add
+      </Button>
+    {/snippet}
+    {#snippet subtitle()}
       {visible.length} {visible.length === 1 ? "entry" : "entries"}
       {filter.trim()
         ? visible.length === 1
@@ -536,8 +534,16 @@
           : " match your filter."
         : "."}
       The tray's left-click opens Quick Launch — one click starts them together.
-    </p>
-  </header>
+    {/snippet}
+    {#snippet toolbar()}
+      <SearchInput
+        value={filter}
+        placeholder="Filter Quick Launch…"
+        ariaLabel="Filter Quick Launch"
+        onchange={(v) => (filter = v)}
+      />
+    {/snippet}
+  </PageHeader>
 
   {#if error}
     <Notice tone="error">{error}</Notice>
@@ -545,15 +551,6 @@
   {#if notice}
     <Notice tone="ok">{notice}</Notice>
   {/if}
-
-  <div class="launch__toolbar">
-    <SearchInput
-      value={filter}
-      placeholder="Filter Quick Launch…"
-      ariaLabel="Filter Quick Launch"
-      onchange={(v) => (filter = v)}
-    />
-  </div>
 
   {#if addOpen}
     <section class="add-panel" aria-label="Add to Quick Launch">
@@ -797,41 +794,6 @@
   .launch {
     max-width: 1080px;
     margin: 0 auto;
-  }
-
-  .launch__header {
-    margin-bottom: var(--space-5);
-  }
-
-  .launch__head-row {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: var(--space-4);
-  }
-
-  .launch__head-actions {
-    display: flex;
-    gap: var(--space-2);
-  }
-
-  .launch__title {
-    font-family: var(--font-display);
-    font-size: var(--text-2xl);
-    line-height: 1.15;
-    color: var(--text);
-    text-wrap: balance;
-  }
-
-  .launch__sub {
-    margin: var(--space-2) 0 0;
-    font-size: var(--text-sm);
-    color: var(--text-muted);
-  }
-
-  .launch__toolbar {
-    display: flex;
-    margin-bottom: var(--space-5);
   }
 
   .sifting {

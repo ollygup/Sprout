@@ -276,9 +276,12 @@ export interface Settings {
    * 49/50): "left" or "right". */
   dock_edge: string;
   /** The Quick Launch window's dock state (ticket 57): "floating" or
-   * "docked" — what the window reopens as, and what the in-window dock
-   * toggle writes back. */
+   *  "docked" — what the window reopens as, and what the in-window dock
+   *  toggle writes back. */
   dock_state: string;
+  /** Whether Sprout starts with Windows (ticket 75): "on" or "off" — the
+   *  Run-key registration is reconciled beside every toggle. */
+  autostart: string;
 }
 
 /** What a Launch entry starts: a picked app (shortcut or exe) or a command
@@ -376,6 +379,22 @@ export interface QuickActionRunState {
   running: boolean;
 }
 
+/** A machine-local plain-text Clip (ticket 78), hand-authored for one-click
+ *  re-copying. Machine-local — never part of Presets, Plan, or Preset
+ *  exports; included in whole-app backups. */
+export interface ClipInput {
+  /** Display name; "" when untitled — surfaces fall back to the content's
+   *  first line so the list stays readable without invented names. */
+  name: string;
+  /** The text a copy puts back on the clipboard. Non-empty after trim. */
+  content: string;
+}
+
+/** A Clip as stored: the input plus its library id. */
+export interface Clip extends ClipInput {
+  id: number;
+}
+
 /** The assignment surface's gate + list (ticket 44): `supported` is false
  * below Windows 11 24H2 (or when winvd failed), which hides the whole
  * grouping surface — the page's labels and assignments. */
@@ -412,6 +431,8 @@ export interface LogLocations {
   runs: LogEntry[];
   /** One entry per Quick Action run folder, newest first (ticket 64). */
   quick_action_runs: LogEntry[];
+  /** One entry per Quick Launch run folder, newest first (ticket 77). */
+  quick_launch_runs: LogEntry[];
 }
 
 /** The Quick Launch dock's live state (tickets 53 & 59): the edge and

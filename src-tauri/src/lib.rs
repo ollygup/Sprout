@@ -1,7 +1,9 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 
 mod appbar;
-mod constants;
+ mod autostart;
+ mod clips;
+ mod constants;
 mod db;
 mod domain;
 mod engine;
@@ -444,6 +446,23 @@ fn update_theme(
     Ok(())
 }
 
+/// The auto-start toggle (ADR-0013, ticket 75): persists only the
+/// `autostart` preference, then reconciles the HKCU Run registration right
+/// beside the save — turning it on or off takes effect immediately, without
+/// a restart. Debug builds skip the registry write inside the sync (logged),
+/// so dev sessions never touch the boot path.
+#[tauri::command]
+fn update_autostart(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<(), String> {
+    let conn = lock(&state)?;
+    settings::save_autostart(&conn, if enabled { "on" } else { "off" })?;
+    drop(conn);
+    autostart::sync_registration(&app, enabled)
+}
+
 /// The Logs screen's picture of where logs live and how big they are — no
 /// content, ever.
 #[tauri::command]
@@ -596,10 +615,10 @@ fn start_quick_launch(state: State<'_, AppState>, app: AppHandle) -> Result<(), 
 
 /// The shared launch-run body behind the Quick Launch window's and the
 /// page's Start buttons (tickets 42 & 54): the single-flight guard, the
-/// background thread running the capped, queued pipeline, the
-/// `launch-run-done` event the page listens for, and the summary
-/// notification. A second trigger while a run is in flight is rejected —
-/// never stacked.
+/// background thread running the capped, queued pipeline, the per-run log
+/// folder (ticket 77), the `launch-run-done` event the page listens for,
+/// and the summary notification. A second trigger while a run is in flight
+/// is rejected — never stacked.
 fn launch_entries(
     app: &AppHandle,
     state: &AppState,
@@ -620,7 +639,18 @@ fn launch_entries(
     let running = Arc::clone(&state.launch_in_progress);
     let app = app.clone();
     std::thread::spawn(move || {
+        // The run's own log (ticket 77): folder + header before the queue so
+        // even a wedged run leaves its start behind, the report's story and
+        // verdict after. Best-effort on both ends — a logging failure never
+        // fails the run, its event, or its notification.
+        let log_path = launch::new_launch_run_log_path(&crate::db::logs_dir());
+        if let Some(path) = &log_path {
+            launch::write_launch_run_header(path, entries.len(), cap);
+        }
         let report = launch::run_launch_queue(engine.as_ref(), &entries, cap);
+        if let Some(path) = &log_path {
+            launch::write_launch_run_summary(path, &report);
+        }
         let _ = app.emit("launch-run-done", &report);
         let _ = notify_launch_summary(&app, &report);
         running.store(false, Ordering::SeqCst);
@@ -642,10 +672,11 @@ fn notify_launch_summary(app: &AppHandle, report: &launch::LaunchReport) -> Resu
 }
 
 /// Opens the main window: focuses the existing one, or recreates it when it
-/// was destroyed by closing it (ticket 43). Shared by the tray's Open Sprout
-/// and the single-instance focus hook. The recreated window keeps the
-/// configured size and minimums (`constants::window`, mirroring
-/// tauri.conf.json).
+/// was destroyed by closing it (ticket 43). Shared by the boot path, the
+/// tray's Open Sprout and the single-instance focus hook. The recreated
+/// window keeps the configured size and minimums from `constants::window` —
+/// the single size source since the conf file stopped declaring windows
+/// (ticket 76, ADR-0013).
 pub(crate) fn open_main_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
     use tauri::Manager;
     if let Some(window) = app.get_webview_window("main") {
@@ -790,6 +821,95 @@ fn move_quick_action(
     drop(conn);
     let _ = app.emit("quick-launch-changed", ());
     Ok(())
+}
+
+// ------------------- Quick Clips (ticket 78) ------------------------------
+
+/// Lists every Clip in list order (ticket 78).
+#[tauri::command]
+fn list_clips(state: State<'_, AppState>) -> Result<Vec<clips::Clip>, String> {
+    let conn = lock(&state)?;
+    clips::list_clips(&conn).map_err(|e| e.to_string())
+}
+
+/// Appends a Clip at the end of the list, validated first — blank text never
+/// reaches the list (ticket 78). The Quick Launch window is told via
+/// `quick-launch-changed` so its conditional Quick Clips tab appears (or
+/// updates) without reopening it.
+#[tauri::command]
+fn create_clip(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    clip: clips::ClipInput,
+) -> Result<clips::Clip, String> {
+    clips::validate_clip(&clip)?;
+    let conn = lock(&state)?;
+    let created = clips::create_clip(&conn, &clip).map_err(|e| e.to_string())?;
+    drop(conn);
+    let _ = app.emit("quick-launch-changed", ());
+    Ok(created)
+}
+
+/// Replaces a Clip's name and text in place, validated first; position is
+/// untouched — reorders go through `move_clip` (ticket 78).
+#[tauri::command]
+fn update_clip(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    clip: clips::Clip,
+) -> Result<(), String> {
+    clips::validate_clip(&clip.clip)?;
+    let conn = lock(&state)?;
+    clips::update_clip(&conn, &clip).map_err(|e| e.to_string())?;
+    drop(conn);
+    let _ = app.emit("quick-launch-changed", ());
+    Ok(())
+}
+
+/// Removes a Clip and compacts the list (ticket 78). Deleting the last clip
+/// removes the window's third tab again via `quick-launch-changed`.
+#[tauri::command]
+fn delete_clip(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<(), String> {
+    let conn = lock(&state)?;
+    clips::delete_clip(&conn, id).map_err(|e| e.to_string())?;
+    drop(conn);
+    let _ = app.emit("quick-launch-changed", ());
+    Ok(())
+}
+
+/// Moves a Clip to another position in the list, clamped (ticket 78).
+#[tauri::command]
+fn move_clip(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: i64,
+    to_position: i64,
+) -> Result<(), String> {
+    let conn = lock(&state)?;
+    clips::move_clip(&conn, id, to_position).map_err(|e| e.to_string())?;
+    drop(conn);
+    let _ = app.emit("quick-launch-changed", ());
+    Ok(())
+}
+
+/// Puts one stored Clip's content back on the clipboard (ticket 78), through
+/// the clipboard-manager plugin on the Rust side. Returns success only after
+/// the write landed, so surfaces can flash their "Copied" feedback honestly.
+#[tauri::command]
+fn copy_clip(app: AppHandle, state: State<'_, AppState>, id: i64) -> Result<(), String> {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+    let conn = lock(&state)?;
+    let clip = clips::get_clip(&conn, id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "This clip no longer exists — refresh and try again".to_string())?;
+    drop(conn);
+    app.clipboard()
+        .write_text(clip.clip.content)
+        .map_err(|e| format!("Could not reach the clipboard: {e}"))
 }
 
 /// Runs one stored Quick Action (tickets 50 & 62): the action's PowerShell
@@ -1197,6 +1317,11 @@ pub fn run() {
     // (ticket 09): expired run log folders are pruned on every launch.
     let _ = logs::prune_run_logs(&conn);
     let pending_import = parse_pending_import_arg();
+    // The auto-start login launches with the Run key's `--autostart`
+    // argument (ADR-0013): such a boot brings up backend + tray only.
+    let autostart_boot = autostart::is_autostart_launch(
+        &std::env::args().skip(1).collect::<Vec<_>>(),
+    );
 
     tauri::Builder::default()
         // Registered before any other plugin: a second launch (e.g. a
@@ -1220,6 +1345,18 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        // Quick Clips' clipboard writes (ticket 78): the plugin is driven
+        // from Rust commands only — no JS-side plugin surface, so no
+        // capability grants beyond the defaults are needed.
+        .plugin(tauri_plugin_clipboard_manager::init())
+        // Auto-start (ADR-0013, ticket 75): the HKCU Run entry carries the
+        // `--autostart` launcher argument, which ticket 76's boot path
+        // consumes to start tray-only. The registration itself is synced by
+        // `autostart::sync_registration`, never here.
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["--autostart"]),
+        ))
         .on_window_event(|window, event| {
             // Ticket 43: closing the main window (× or Alt+F4) destroys it —
             // the webview goes away and the lean Rust backend stays resident
@@ -1247,7 +1384,7 @@ pub fn run() {
                 let _ = window.destroy();
             }
         })
-        .setup(|app| {
+        .setup(move |app| {
             // The tray icon is the resident surface (ticket 43): created at
             // startup, left-click opens the Quick Launch window, right-click
             // menu is Open Sprout / Quit (ticket 54).
@@ -1259,10 +1396,49 @@ pub fn run() {
             // that slides the docked strip to its sliver and back — Sprout
             // owns the motion; the OS never moves an appbar.
             quick_window::start_autohide_driver(app.handle().clone());
+            // The boot path (ADR-0013, ticket 76): the conf file declares no
+            // windows — manual launches build the main window here through
+            // the same open/recreate seam the tray and single-instance hook
+            // use, while an `--autostart` login keeps the desktop clear. The
+            // Quick Launch window materializes under one rule either way:
+            // remembered "docked" → opened (its open path applies the
+            // edge/mode memory and docks immediately); floating or a fresh
+            // install → tray-only until the first click.
+            if let Err(e) = quick_window::open_if_docked(app.handle()) {
+                // A failed restore leaves the tray resident; the left-click
+                // or Open Sprout retries the same seam.
+                eprintln!("Quick Launch dock restore failed: {e}");
+            }
+            if !autostart_boot {
+                if let Err(e) = open_main_window(app.handle()) {
+                    eprintln!("Could not open the main window: {e}");
+                }
+            }
             // The once-per-launch self-update check (ADR-0012, ticket 73):
             // background thread, single `update-available` event on a newer
             // release, silent on every failure.
             update::start_background_check(app.handle().clone());
+            // The auto-start reconciliation (ADR-0013, ticket 75): one sync
+            // per launch on a background thread — the Run key ends up
+            // matching the persisted preference (default: registered).
+            {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    let desired_on = match handle.try_state::<AppState>() {
+                        Some(state) => {
+                            let Ok(conn) = state.db.lock() else {
+                                eprintln!("Auto-start: could not lock the db for the startup sync");
+                                return;
+                            };
+                            settings::load(&conn).autostart == "on"
+                        }
+                        None => return,
+                    };
+                    if let Err(e) = autostart::sync_registration(&handle, desired_on) {
+                        eprintln!("Auto-start: {e}");
+                    }
+                });
+            }
             // [DEBUG-66] ticket 66 repro loop (debug builds + opt-in env only).
             #[cfg(debug_assertions)]
             if std::env::var("SPROUT_DOCK_STRESS").as_deref() == Ok("1") {
@@ -1306,6 +1482,7 @@ pub fn run() {
             get_settings,
             update_settings,
             update_theme,
+            update_autostart,
             check_for_update,
             install_update,
             list_logs,
@@ -1330,6 +1507,12 @@ pub fn run() {
             stop_quick_action,
             list_running_quick_actions,
             test_quick_action,
+            list_clips,
+            create_clip,
+            update_clip,
+            delete_clip,
+            move_clip,
+            copy_clip,
             close_quick_launch_window,
             toggle_quick_launch_dock,
             switch_quick_launch_dock_edge,

@@ -17,13 +17,19 @@
   } from "$lib/components/ContextMenu.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
   import Notice from "$lib/components/Notice.svelte";
+  import PageHeader from "$lib/components/PageHeader.svelte";
+  import SearchInput from "$lib/components/SearchInput.svelte";
 
-  let actions = $state<QuickAction[]>([]);
+  let quickActions = $state<QuickAction[]>([]);
   let loading = $state(true);
   let loadFailed = $state(false);
   let busy = $state(false);
   let error = $state("");
   let notice = $state("");
+
+  // The shared search input narrows the rack client-side, over name and
+  // command (ticket 84) — the same filter pattern as every other list page.
+  let filter = $state("");
 
   // The compose dialog (ticket 51): `formAction` null = adding a new action,
   // set = editing that action.
@@ -39,7 +45,7 @@
   async function load() {
     loading = true;
     try {
-      actions = await listQuickActions();
+      quickActions = await listQuickActions();
       loadFailed = false;
     } catch (e) {
       console.error(e);
@@ -107,9 +113,9 @@
       menu = null;
       return;
     }
-    const index = actions.indexOf(action);
+    const index = quickActions.indexOf(action);
     const upDisabled = index <= 0;
-    const downDisabled = index >= actions.length - 1;
+    const downDisabled = index >= quickActions.length - 1;
     const items: ContextMenuItem[] = [
       {
         label: "Edit",
@@ -145,6 +151,17 @@
       items,
     };
   }
+
+  const filterQ = $derived(filter.trim().toLowerCase());
+  const visible = $derived(
+    filterQ
+      ? quickActions.filter(
+          (a) =>
+            a.name.toLowerCase().includes(filterQ) ||
+            a.command.toLowerCase().includes(filterQ)
+        )
+      : quickActions
+  );
 </script>
 
 <svelte:head>
@@ -152,22 +169,27 @@
 </svelte:head>
 
 <section class="qa" aria-labelledby="qa-title">
-  <header class="qa__header">
-    <div class="qa__head-row">
-      <h1 id="qa-title" class="qa__title">Quick Actions</h1>
-      <div class="qa__head-actions">
-        <Button onclick={openAdd} disabled={busy}>
-          <Icon name="plus" size={15} />
-          Add
-        </Button>
-      </div>
-    </div>
-    <p class="qa__sub">
-      {actions.length} {actions.length === 1 ? "action" : "actions"}.
+  <PageHeader titleId="qa-title" title="Quick Actions">
+    {#snippet actions()}
+      <Button onclick={openAdd} disabled={busy}>
+        <Icon name="plus" size={15} />
+        Add
+      </Button>
+    {/snippet}
+    {#snippet subtitle()}
+      {quickActions.length} {quickActions.length === 1 ? "action" : "actions"}.
       The Quick Launch window's Quick Actions tab runs each one hidden, as the
       current user.
-    </p>
-  </header>
+    {/snippet}
+    {#snippet toolbar()}
+      <SearchInput
+        value={filter}
+        placeholder="Search name or command…"
+        ariaLabel="Search quick actions"
+        onchange={(v) => (filter = v)}
+      />
+    {/snippet}
+  </PageHeader>
 
   {#if error}
     <Notice tone="error">{error}</Notice>
@@ -176,11 +198,11 @@
     <Notice tone="ok">{notice}</Notice>
   {/if}
 
-  {#if loading && actions.length === 0}
+  {#if loading && quickActions.length === 0}
     <p class="sifting" aria-live="polite">Loading…</p>
   {:else if loadFailed}
     <Notice tone="error">Could not load the Quick Actions list.</Notice>
-  {:else if actions.length === 0}
+  {:else if quickActions.length === 0}
     <EmptyState icon="terminal" title="No quick actions yet">
       <p>
         Press <strong>Add</strong> to write a named PowerShell command with an
@@ -188,9 +210,13 @@
         runs each action hidden, as the current user, with no status UI.
       </p>
     </EmptyState>
+  {:else if visible.length === 0}
+    <EmptyState icon="search" title={`Nothing matches “${filter.trim()}”`}>
+      <p>Search looks at action names and their commands.</p>
+    </EmptyState>
   {:else}
     <ul class="rack">
-      {#each actions as action (action.id)}
+      {#each visible as action (action.id)}
         <li class="rack__row">
           <span class="rack__badge" aria-hidden="true">
             <Icon name="terminal" size={14} />
@@ -251,36 +277,6 @@
   .qa {
     max-width: 1080px;
     margin: 0 auto;
-  }
-
-  .qa__header {
-    margin-bottom: var(--space-5);
-  }
-
-  .qa__head-row {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: var(--space-4);
-  }
-
-  .qa__head-actions {
-    display: flex;
-    gap: var(--space-2);
-  }
-
-  .qa__title {
-    font-family: var(--font-display);
-    font-size: var(--text-2xl);
-    line-height: 1.15;
-    color: var(--text);
-    text-wrap: balance;
-  }
-
-  .qa__sub {
-    margin: var(--space-2) 0 0;
-    font-size: var(--text-sm);
-    color: var(--text-muted);
   }
 
   .sifting {

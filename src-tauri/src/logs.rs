@@ -2,8 +2,9 @@
 //!
 //! Raw outputs live under %LOCALAPPDATA%\Sprout\logs (ADR-0006): one folder
 //! per run (`logs\runs\<run-id>`, see [`crate::worker::run_dir`]), one folder
-//! per Quick Action run (`logs\quick-actions\qa-<millis>-<id>`, ticket 64),
-//! plus the database itself in the data root. The Logs screen never renders
+//! per Quick Action run (`logs\quick-actions\qa-…`, ticket 64), one per
+//! Quick Launch list-run (`logs\quick-launch\ql-<millis>`, ticket 77), plus
+//! the database itself in the data root. The Logs screen never renders
 //! log content — it shows where the files live, how big they are, and opens
 //! the folder on request. `prune_run_logs` is the retention knob: expired
 //! folders are deleted per the settings' `log_retention_days` after every
@@ -28,21 +29,23 @@ pub struct LogEntry {
 }
 
 /// Everything the Logs screen shows: the data root and logs root with their
-/// sizes, the database file, one entry per run folder, and — since ticket 64
-/// — one entry per Quick Action run folder.
+/// sizes, the database file, one entry per run folder, and — since tickets
+/// 64 & 77 — one entry per Quick Action / Quick Launch run folder.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LogLocations {
     pub data_dir: String,
     pub logs_dir: String,
     pub db_path: String,
     pub db_size_bytes: u64,
-    /// Total bytes across every run and Quick Action folder; 0 when there
-    /// are none yet.
+    /// Total bytes across every run, Quick Action, and Quick Launch folder;
+    /// 0 when there are none yet.
     pub total_logs_bytes: u64,
     /// One entry per run folder, newest first.
     pub runs: Vec<LogEntry>,
     /// One entry per Quick Action run folder, newest first (ticket 64).
     pub quick_action_runs: Vec<LogEntry>,
+    /// One entry per Quick Launch run folder, newest first (ticket 77).
+    pub quick_launch_runs: Vec<LogEntry>,
 }
 
 /// Collects the on-disk log picture under the real app data directory. Never
@@ -64,9 +67,12 @@ pub fn list_log_locations_at(data_dir: &Path, logs_dir: &Path, db_path: &Path) -
     let mut quick_action_runs =
         list_run_dirs(&logs_dir.join(crate::quick_actions::QA_LOGS_DIR_NAME));
     quick_action_runs.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
+    let mut quick_launch_runs = list_run_dirs(&logs_dir.join(crate::launch::QL_LOGS_DIR_NAME));
+    quick_launch_runs.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
     let total_logs_bytes = runs
         .iter()
         .chain(&quick_action_runs)
+        .chain(&quick_launch_runs)
         .map(|e| e.size_bytes)
         .sum();
 
@@ -78,6 +84,7 @@ pub fn list_log_locations_at(data_dir: &Path, logs_dir: &Path, db_path: &Path) -
         total_logs_bytes,
         runs,
         quick_action_runs,
+        quick_launch_runs,
     }
 }
 
@@ -97,9 +104,10 @@ pub fn open_folder(path: &str) -> Result<(), String> {
 
 /// Deletes run log folders older than the settings' retention window under
 /// the real app data directory. Returns how many folders were removed.
-/// Covers both the preset-run folders (`logs\runs`) and the Quick Action
-/// run folders (`logs\quick-actions`, ticket 64). Runs honor this after
-/// every completed run (worker) and at app start (main process).
+/// Covers the preset-run folders (`logs\runs`), the Quick Action run
+/// folders (`logs\quick-actions`, ticket 64), and the Quick Launch run
+/// folders (`logs\quick-launch`, ticket 77). Runs honor this after every
+/// completed run (worker) and at app start (main process).
 pub fn prune_run_logs(conn: &Connection) -> Result<usize, String> {
     prune_run_logs_at(conn, &crate::db::logs_dir())
 }
@@ -111,6 +119,7 @@ pub fn prune_run_logs_at(conn: &Connection, logs_dir: &Path) -> Result<usize, St
 
     let mut pruned = prune_expired_dirs(&logs_dir.join("runs"), cutoff_secs);
     pruned += prune_expired_dirs(&logs_dir.join(crate::quick_actions::QA_LOGS_DIR_NAME), cutoff_secs);
+    pruned += prune_expired_dirs(&logs_dir.join(crate::launch::QL_LOGS_DIR_NAME), cutoff_secs);
     Ok(pruned)
 }
 
@@ -138,10 +147,11 @@ fn prune_expired_dirs(root: &Path, cutoff_secs: i64) -> usize {
     pruned
 }
 
-/// The per-run folders under `root` (`logs\runs` and, since ticket 64,
-/// `logs\quick-actions`), each with its size and last-mod time. Folder ids
-/// embed their creation (`run-<epoch millis>`, `qa-<millis>-<id>`), which is
-/// the most reliable age marker; the folder's mtime is the fallback.
+/// The per-run folders under `root` (`logs\runs` and, since tickets 64 & 77,
+/// `logs\quick-actions` and `logs\quick-launch`), each with its size and
+/// last-mod time. Folder ids embed their creation (`run-<epoch millis>`,
+/// `qa-<millis>-<id>`, `ql-<millis>`), which is the most reliable age
+/// marker; the folder's mtime is the fallback.
 fn list_run_dirs(runs_dir: &Path) -> Vec<LogEntry> {
     let entries = match std::fs::read_dir(runs_dir) {
         Ok(entries) => entries,
@@ -176,11 +186,11 @@ fn folder_age(path: &Path) -> Option<i64> {
 
 /// The epoch seconds a log/run folder name embeds, when it carries a
 /// recognizable timestamp (ticket 65). Two shapes are understood:
-/// the legacy `run-<millis>` / `qa-<millis>-<id>` names, and the readable
-/// `…-<YYYYMMDD>-<HHMMSS>[-more]` names whose LOCAL time converts through
-/// the current UTC offset. Pure — no disk access.
+/// the legacy `run-<millis>` / `qa-<millis>-<id>` / `ql-<millis>` names, and
+/// the readable `…-<YYYYMMDD>-<HHMMSS>[-more]` names whose LOCAL time
+/// converts through the current UTC offset. Pure — no disk access.
 pub(crate) fn embedded_age_secs(name: &str) -> Option<i64> {
-    for prefix in ["run-", crate::quick_actions::QA_LOG_PREFIX] {
+    for prefix in ["run-", crate::quick_actions::QA_LOG_PREFIX, crate::launch::QL_LOG_PREFIX] {
         let Some(rest) = name.strip_prefix(prefix) else {
             continue;
         };
@@ -206,7 +216,7 @@ pub(crate) fn embedded_age_secs(name: &str) -> Option<i64> {
                 days_from_civil(year, month, day) * 86_400 + hour * 3_600 + minute * 60 + second;
             return Some(as_if_utc - local_utc_offset_secs());
         }
-        // Legacy shape: bare epoch millis (`run-…`, or `qa-…-<id>`).
+        // Legacy shape: bare epoch millis (`run-…`, `qa-…-<id>`, `ql-…`).
         return segments[0].parse::<i64>().ok().map(|m| m / 1000);
     }
     None
@@ -354,6 +364,17 @@ mod tests {
         write_file(&run_dir.join("output.log"), b"[stamp] start \"x\" (id=1) pid=1\n");
     }
 
+    /// Creates a Quick Launch run folder named `ql-<millis>` with an
+    /// output.log, exactly like `launch::new_launch_run_log_path` leaves
+    /// behind (ticket 77).
+    fn seed_quick_launch_run(dir: &Path, millis: i64) {
+        let run_dir = dir
+            .join("logs")
+            .join(crate::launch::QL_LOGS_DIR_NAME)
+            .join(format!("{}{millis}", crate::launch::QL_LOG_PREFIX));
+        write_file(&run_dir.join("output.log"), b"[stamp] quick launch run started\n");
+    }
+
     #[test]
     fn locations_report_missing_paths_as_empty() {
         let dir = clean_dir();
@@ -412,6 +433,61 @@ mod tests {
             locations.runs.iter().chain(&locations.quick_action_runs)
                 .map(|e| e.size_bytes).sum::<u64>()
         );
+    }
+
+    #[test]
+    fn quick_launch_folders_are_listed_and_counted() {
+        let dir = clean_dir();
+        let conn = init_at(&dir).unwrap();
+        let now = now_millis();
+        seed_run(&dir, &conn, now);
+        seed_quick_launch_run(&dir, now - 2_000);
+        seed_quick_launch_run(&dir, now - 1_000);
+
+        let locations = list_log_locations_at(&dir, &dir.join("logs"), &dir.join("sprout.db"));
+        // The Quick Launch folders are their own newest-first list.
+        assert_eq!(locations.quick_launch_runs.len(), 2);
+        assert_eq!(
+            locations.quick_launch_runs[0].name,
+            format!("{}{}", crate::launch::QL_LOG_PREFIX, now - 1_000)
+        );
+        assert_eq!(
+            locations.quick_launch_runs[1].name,
+            format!("{}{}", crate::launch::QL_LOG_PREFIX, now - 2_000)
+        );
+        // Their bytes count toward the total alongside the other families.
+        assert_eq!(
+            locations.total_logs_bytes,
+            locations
+                .runs
+                .iter()
+                .chain(&locations.quick_action_runs)
+                .chain(&locations.quick_launch_runs)
+                .map(|e| e.size_bytes)
+                .sum::<u64>()
+        );
+    }
+
+    #[test]
+    fn pruning_removes_only_expired_quick_launch_folders() {
+        let dir = clean_dir();
+        let conn = init_at(&dir).unwrap();
+
+        let now = now_millis();
+        // 40 days ago — beyond the default 30-day retention; 5 days — inside.
+        seed_quick_launch_run(&dir, now - 40 * 86_400_000);
+        seed_quick_launch_run(&dir, now - 5 * 86_400_000);
+
+        assert_eq!(prune_run_logs_at(&conn, &dir.join("logs")).unwrap(), 1);
+        let ql_dir = dir.join("logs").join(crate::launch::QL_LOGS_DIR_NAME);
+        assert!(!ql_dir
+            .join(format!("{}{}", crate::launch::QL_LOG_PREFIX, now - 40 * 86_400_000))
+            .exists());
+        assert!(ql_dir
+            .join(format!("{}{}", crate::launch::QL_LOG_PREFIX, now - 5 * 86_400_000))
+            .exists());
+        // The second pass finds nothing left to remove.
+        assert_eq!(prune_run_logs_at(&conn, &dir.join("logs")).unwrap(), 0);
     }
 
     #[test]
@@ -548,6 +624,7 @@ mod tests {
                 dock_mode: settings::DEFAULT_DOCK_MODE.to_string(),
                 dock_edge: settings::DEFAULT_DOCK_EDGE.to_string(),
                 dock_state: settings::DEFAULT_DOCK_STATE.to_string(),
+                autostart: settings::DEFAULT_AUTOSTART.to_string(),
             },
         )
         .unwrap();

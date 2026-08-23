@@ -117,6 +117,12 @@ fn migrate(conn: &Connection) -> Result<()> {
             stoppable    INTEGER NOT NULL DEFAULT 0,
             stop_command TEXT,
             position     INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS clips (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            name     TEXT NOT NULL,
+            content  TEXT NOT NULL,
+            position INTEGER NOT NULL DEFAULT 0
         );",
     )?;
     ensure_preset_imported_column(conn)?;
