@@ -3,14 +3,17 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import type {
+    Clip,
     LaunchEntry,
     LaunchReport,
     QuickAction,
     QuickActionRunState,
   } from "$lib/types";
   import {
+    copyClip,
     getQuickLaunchDockState,
     getSettings,
+    listClips,
     listLaunchEntries,
     listQuickActions,
     listRunningQuickActions,
@@ -20,6 +23,7 @@
     switchQuickLaunchDockEdge,
     toggleQuickLaunchDock,
   } from "$lib/api";
+  import { clipTitle } from "$lib/format";
   import type { QuickLaunchDockState } from "$lib/types";
   import { restoreTheme, type ThemeMode } from "$lib/theme.svelte";
   import { titleBarDragRegion } from "$lib/quickLaunchTitleBar";
@@ -30,17 +34,21 @@
   import Tabs from "$lib/components/Tabs.svelte";
 
   // The Quick Launch window (ticket 52): the tray's left-click target — a
-  // miniature, frameless, read-only window with two tabs. The backend owns
-  // its life cycle (ticket 56: blur does nothing; the × button / Alt+F4
-  // destroy it and the tray reopens it at a fixed centered size — no
-  // geometry is remembered); this page only renders and fires the existing
-  // runners.
+  // miniature, frameless, read-only window. The backend owns its life cycle
+  // (ticket 56: blur does nothing; the × button / Alt+F4 destroy it and the
+  // tray reopens it at a fixed centered size — no geometry is remembered);
+  // this page only renders and fires the existing runners.
   // Docking (ticket 53) is controlled from this header: the toggle pins the
   // window to the current monitor's remembered (or Settings-default) edge as
   // a Win32 AppBar, and the arrows move it left↔right while docked.
+  // Quick Clips (ticket 79) joins as a third tab only while at least one
+  // clip exists — an empty feature must not occupy chrome (research 0004
+  // rule 2); the main app's /clips page is its discoverability home and its
+  // only editing surface.
 
   let entries = $state<LaunchEntry[]>([]);
   let actions = $state<QuickAction[]>([]);
+  let clips = $state<Clip[]>([]);
   // Ticket 62: the ids of the actions whose tracked process is alive —
   // seeded once from the registry on load, then kept current by the
   // `quick-action-run-state-changed` events. No polling.
@@ -60,6 +68,12 @@
     docked: false,
     blocked: null,
   });
+  // Ticket 79: one-click copy feedback — the copied row flashes "Copied"
+  // for ~1.2 s and a polite live region announces it; silence reads as
+  // breakage (research 0004 rule 5).
+  let copiedId = $state<number | null>(null);
+  let copiedAnnouncement = $state("");
+  let copiedTimer: ReturnType<typeof setTimeout> | undefined;
 
   onMount(() => {
     load();
@@ -69,10 +83,10 @@
     // the Start button.
     // Ticket 57: the backend emits `quick-launch-changed` after every command
     // that mutates what this window renders — Launch entry mutations, Quick
-    // Action mutations, `update_settings`, `update_theme`. The window listens
-    // once and re-runs its loads plus its dock-state refresh and theme
-    // re-apply, so entries/actions/settings added in the main app appear
-    // without reopening it.
+    // Action mutations, Clip mutations, `update_settings`, `update_theme`.
+    // The window listens once and re-runs its loads plus its dock-state
+    // refresh and theme re-apply, so entries/actions/clips/settings added in
+    // the main app appear without reopening it.
     const unlisteners: (() => void)[] = [];
     listen<LaunchReport>("launch-run-done", () => {
       launching = false;
@@ -99,7 +113,10 @@
     listen<string>("quick-launch-dock-error", (e) => {
       error = e.payload;
     }).then((fn) => unlisteners.push(fn));
-    return () => unlisteners.forEach((fn) => fn());
+    return () => {
+      unlisteners.forEach((fn) => fn());
+      clearTimeout(copiedTimer);
+    };
   });
 
   async function applyPersistedTheme() {
@@ -146,17 +163,48 @@
     }
   }
 
+  // The window's one hard promise to itself: never an eternal "Loading…".
+  // The ticket-79 freeze presented exactly that way — healthy commands,
+  // dead paint — so any startup load outliving this budget reads as failed
+  // and surfaces the error line with a Try again affordance.
+  const LOAD_TIMEOUT_MS = 10_000;
+
+  function withTimeout<T>(pending: Promise<T>, what: string): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error(`${what} did not answer in time`)),
+        LOAD_TIMEOUT_MS
+      );
+      pending.then(
+        (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        (e) => {
+          clearTimeout(timer);
+          reject(e);
+        }
+      );
+    });
+  }
+
   async function load() {
     loading = true;
     try {
-      const [entriesResult, actionsResult, running] = await Promise.all([
-        listLaunchEntries(),
-        listQuickActions(),
-        listRunningQuickActions(),
-      ]);
+      const [entriesResult, actionsResult, clipsResult, running] =
+        await Promise.all([
+          withTimeout(listLaunchEntries(), "The launch list"),
+          withTimeout(listQuickActions(), "The quick actions list"),
+          withTimeout(listClips(), "The clips list"),
+          withTimeout(listRunningQuickActions(), "The running-actions check"),
+        ]);
       entries = entriesResult;
       actions = actionsResult;
+      clips = clipsResult;
       runningActions = new Set(running);
+      // Deleting the last clip removes the third tab again (accepted) — if
+      // it was selected, land on Launch rather than a dead selection.
+      if (clips.length === 0 && tab === "clips") tab = "launch";
       error = "";
     } catch (e) {
       console.error(e);
@@ -165,6 +213,40 @@
       loading = false;
     }
   }
+
+  // Ticket 79: base two tabs, plus Quick Clips iff at least one clip
+  // exists. Short labels and icons feed the strip's measured degradation
+  // chain (research 0004 rule 4); `title` keeps every stage named for
+  // tooltips and assistive tech. Icon names verified against the existing
+  // set in Icon.svelte (rocket / terminal / copy).
+  const qlTabs = $derived.by(() => {
+    const tabs = [
+      {
+        id: "launch",
+        label: "Quick Launch",
+        shortLabel: "Launch",
+        icon: "rocket",
+        title: "Quick Launch",
+      },
+      {
+        id: "actions",
+        label: "Quick Actions",
+        shortLabel: "Actions",
+        icon: "terminal",
+        title: "Quick Actions",
+      },
+    ];
+    if (clips.length > 0) {
+      tabs.push({
+        id: "clips",
+        label: "Quick Clips",
+        shortLabel: "Clips",
+        icon: "copy",
+        title: "Quick Clips",
+      });
+    }
+    return tabs;
+  });
 
   async function start() {
     launching = true;
@@ -194,6 +276,22 @@
     error = "";
     try {
       await stopQuickAction(action.id);
+    } catch (e) {
+      console.error(e);
+      error = String(e);
+    }
+  }
+
+  /** Copies via the clipboard command and flashes the row only once the
+   *  write has honestly landed (ticket 78's command contract). */
+  async function copy(clip: Clip) {
+    error = "";
+    try {
+      await copyClip(clip.id);
+      copiedId = clip.id;
+      copiedAnnouncement = `${clipTitle(clip.name, clip.content)} copied.`;
+      clearTimeout(copiedTimer);
+      copiedTimer = setTimeout(() => (copiedId = null), 1200);
     } catch (e) {
       console.error(e);
       error = String(e);
@@ -282,10 +380,7 @@
 
   <div class="qlw__tabs">
     <Tabs
-      tabs={[
-        { id: "launch", label: "Quick Launch" },
-        { id: "actions", label: "Quick Actions" },
-      ]}
+      tabs={qlTabs}
       selected={tab}
       onselect={(id) => (tab = id)}
       ariaLabel="Quick Launch window sections"
@@ -317,7 +412,7 @@
               </Button>
             </div>
           {/if}
-        {:else}
+        {:else if id === "actions"}
           {#if loading && actions.length === 0}
             <p class="qlw__sifting" aria-live="polite">Loading…</p>
           {:else if actions.length === 0}
@@ -361,14 +456,50 @@
               {/each}
             </ul>
           {/if}
+        {:else}
+          <ul class="qlw__clips">
+            {#each clips as clip (clip.id)}
+              {@const title = clipTitle(clip.name, clip.content)}
+              <li>
+                <button
+                  type="button"
+                  class="qlw__clip"
+                  aria-label={`Copy ${title} to the clipboard`}
+                  onclick={() => copy(clip)}
+                >
+                  <span class="qlw__clip-badge" aria-hidden="true">
+                    <Icon
+                      name={copiedId === clip.id ? "check" : "copy"}
+                      size={14}
+                    />
+                  </span>
+                  <span class="qlw__clip-name">{title}</span>
+                  {#if copiedId === clip.id}
+                    <span class="qlw__clip-copied">Copied</span>
+                  {:else}
+                    <span class="qlw__clip-excerpt">{clip.content}</span>
+                  {/if}
+                </button>
+              </li>
+            {/each}
+          </ul>
         {/if}
       {/snippet}
     </Tabs>
   </div>
 
   {#if error}
-    <p class="qlw__error" role="alert">{error}</p>
+    <div class="qlw__error-row">
+      <p class="qlw__error" role="alert">{error}</p>
+      <Button variant="ghost" onclick={() => { load(); refreshDock(); }}>
+        Try again
+      </Button>
+    </div>
   {/if}
+
+  <div class="qlw__sr" role="status" aria-live="polite">
+    {copiedAnnouncement}
+  </div>
 </div>
 
 <style>
@@ -487,6 +618,93 @@
     color: var(--text);
   }
 
+  /* Ticket 79: the read-only Quick Clips rows — whole-row click-to-copy,
+   * same visual language as the actions list. No editing affordances here:
+   * all CRUD stays on the main app's /clips page (research 0004 rule 3). */
+  .qlw__clips {
+    list-style: none;
+    margin: 0;
+    padding: var(--space-3) var(--space-3) var(--space-4);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    overflow-y: auto;
+  }
+
+  .qlw__clip {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    width: 100%;
+    padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: border-color var(--dur-fast) var(--ease-out);
+  }
+
+  .qlw__clip:hover {
+    border-color: var(--accent-tint-border);
+  }
+
+  .qlw__clip:focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: -2px;
+  }
+
+  .qlw__clip-badge {
+    display: inline-flex;
+    flex-shrink: 0;
+    color: var(--accent);
+  }
+
+  .qlw__clip-name {
+    flex-shrink: 0;
+    max-width: 45%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--font-display);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  .qlw__clip-excerpt {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+  }
+
+  .qlw__clip-copied {
+    flex-shrink: 0;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    letter-spacing: var(--tracking-mono);
+    color: var(--accent);
+  }
+
+  .qlw__sr {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
   .qlw__empty {
     display: flex;
     flex-direction: column;
@@ -516,9 +734,17 @@
     color: var(--text-muted);
   }
 
-  .qlw__error {
-    margin: 0;
+  .qlw__error-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
     padding: 0 var(--space-4) var(--space-4);
+  }
+
+  .qlw__error {
+    flex: 1;
+    min-width: 0;
+    margin: 0;
     font-size: var(--text-sm);
     color: var(--danger-text);
     overflow-wrap: anywhere;
