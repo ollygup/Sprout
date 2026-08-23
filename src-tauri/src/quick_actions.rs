@@ -160,12 +160,16 @@ pub fn get_quick_action(conn: &Connection, id: i64) -> Result<Option<QuickAction
     .optional()
 }
 
+/// The one INSERT shape for a Quick Action, position as the trailing
+/// placeholder — shared by `create_quick_action` and `append_action`.
+const INSERT_ACTION_SQL: &str = "INSERT INTO quick_actions (name, command, cwd, stoppable, stop_command, position)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
+
 /// Appends an action at the end of the list (the next free position).
 pub fn create_quick_action(conn: &Connection, action: &QuickActionInput) -> Result<QuickAction> {
     let id = crate::ordered_list::OrderedList::QUICK_ACTIONS.create_at_end(
         conn,
-        "INSERT INTO quick_actions (name, command, cwd, stoppable, stop_command, position)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        INSERT_ACTION_SQL,
         &[
             &action.name.trim(),
             &action.command.trim(),
@@ -175,6 +179,24 @@ pub fn create_quick_action(conn: &Connection, action: &QuickActionInput) -> Resu
         ],
     )?;
     Ok(get_quick_action(conn, id)?.expect("just inserted"))
+}
+
+/// [`create_quick_action`]'s shape inside a caller-owned transaction — the
+/// whole-app backup's merge appends every action under ONE transaction.
+pub(crate) fn append_action(conn: &Connection, action: &QuickActionInput) -> Result<()> {
+    crate::ordered_list::OrderedList::QUICK_ACTIONS
+        .append_at_end(
+            conn,
+            INSERT_ACTION_SQL,
+            &[
+                &action.name.trim(),
+                &action.command.trim(),
+                &normalized_cwd(action),
+                &action.stoppable,
+                &normalized_stop_command(action),
+            ],
+        )
+        .map(|_| ())
 }
 
 /// Replaces an action's script and metadata in place (same id). Position is

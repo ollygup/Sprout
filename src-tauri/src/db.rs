@@ -223,7 +223,10 @@ fn normalized_install_dir(product: &Product) -> Option<String> {
         .map(str::to_string)
 }
 
-fn insert_product(conn: &Connection, product: &Product) -> Result<()> {
+/// Inserts a Product row + its env wiring, stamping fresh create/update
+/// times. No duplicate checks — callers own them (`create_product` for the
+/// Library paths, the whole-app backup's merge for its transaction).
+pub(crate) fn insert_product(conn: &Connection, product: &Product) -> Result<()> {
     let now = now_ts();
     conn.execute(
         "INSERT INTO products (id, name, winget_id, install_location_hint, install_dir,

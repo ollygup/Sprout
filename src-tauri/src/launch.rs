@@ -212,12 +212,16 @@ fn get_entry(conn: &Connection, id: i64) -> Result<Option<LaunchEntry>> {
     .optional()
 }
 
+/// The one INSERT shape for a Launch entry, position as the trailing
+/// placeholder — shared by `create_launch_entry` and `append_entry`.
+const INSERT_ENTRY_SQL: &str = "INSERT INTO launch_entries (name, kind, target, shell, show_window, desktop_id, position)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
+
 /// Appends an entry at the end of the list (the next free position).
 pub fn create_launch_entry(conn: &Connection, entry: &LaunchEntryInput) -> Result<LaunchEntry> {
     let id = crate::ordered_list::OrderedList::LAUNCH_ENTRIES.create_at_end(
         conn,
-        "INSERT INTO launch_entries (name, kind, target, shell, show_window, desktop_id, position)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        INSERT_ENTRY_SQL,
         &[
             &entry.name.trim(),
             &kind_to_str(entry.kind),
@@ -228,6 +232,25 @@ pub fn create_launch_entry(conn: &Connection, entry: &LaunchEntryInput) -> Resul
         ],
     )?;
     Ok(get_entry(conn, id)?.expect("just inserted"))
+}
+
+/// [`create_launch_entry`]'s shape inside a caller-owned transaction — the
+/// whole-app backup's merge appends every entry under ONE transaction.
+pub(crate) fn append_entry(conn: &Connection, entry: &LaunchEntryInput) -> Result<()> {
+    crate::ordered_list::OrderedList::LAUNCH_ENTRIES
+        .append_at_end(
+            conn,
+            INSERT_ENTRY_SQL,
+            &[
+                &entry.name.trim(),
+                &kind_to_str(entry.kind),
+                &entry.target.trim(),
+                &entry.shell.map(shell_to_str),
+                &entry.show_window,
+                &entry.desktop_id,
+            ],
+        )
+        .map(|_| ())
 }
 
 /// Replaces an entry's metadata in place (same id). Position is untouched —

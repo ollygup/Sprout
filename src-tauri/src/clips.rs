@@ -73,16 +73,28 @@ pub fn get_clip(conn: &Connection, id: i64) -> Result<Option<Clip>> {
     .optional()
 }
 
+/// The one INSERT shape for a Clip, position as the trailing placeholder —
+/// shared by `create_clip` and `append_clip`.
+const INSERT_CLIP_SQL: &str = "INSERT INTO clips (name, content, position)
+     VALUES (?1, ?2, ?3)";
+
 /// Appends a clip at the end of the list (the next free position). Name and
 /// content store trimmed; an untitled clip persists the empty string.
 pub fn create_clip(conn: &Connection, clip: &ClipInput) -> Result<Clip> {
     let id = crate::ordered_list::OrderedList::CLIPS.create_at_end(
         conn,
-        "INSERT INTO clips (name, content, position)
-         VALUES (?1, ?2, ?3)",
+        INSERT_CLIP_SQL,
         &[&clip.name.trim(), &clip.content.trim()],
     )?;
     Ok(get_clip(conn, id)?.expect("just inserted"))
+}
+
+/// [`create_clip`]'s shape inside a caller-owned transaction — the whole-app
+/// backup's merge appends every clip under ONE transaction.
+pub(crate) fn append_clip(conn: &Connection, clip: &ClipInput) -> Result<()> {
+    crate::ordered_list::OrderedList::CLIPS
+        .append_at_end(conn, INSERT_CLIP_SQL, &[&clip.name.trim(), &clip.content.trim()])
+        .map(|_| ())
 }
 
 /// Replaces a clip's text and name in place (same id). Position is untouched

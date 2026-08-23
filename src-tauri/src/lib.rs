@@ -1,7 +1,8 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 
-mod appbar;
+ mod appbar;
  mod autostart;
+ mod backup;
  mod clips;
  mod constants;
 mod db;
@@ -34,6 +35,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use domain::{Preset, PresetRecord, Product, ProductRecord, Requirement};
 use engine::{windows::WindowsWingetEngine, DesktopInfo, LauncherEngine, PlatformEngine};
+use backup::{BackupCounts, ImportSummary};
 use import_export::ImportResult;
 use logs::LogLocations;
 use plan::Composition;
@@ -196,6 +198,33 @@ fn export_preset(state: State<'_, AppState>, path: String, preset_id: String) ->
 fn import_preset(state: State<'_, AppState>, path: String) -> Result<ImportResult, String> {
     let conn = lock(&state)?;
     import_export::import_preset_file(&conn, &path)
+}
+
+/// Writes one whole-app backup (Settings → Backup) to `path`: every content
+/// collection — products, presets, launch entries, quick actions, clips — in
+/// one kind-tagged JSON document. Machine-scoped state (runs history, logs,
+/// settings knobs, dock memory) never travels. Returns the per-collection
+/// counts for the success notice.
+#[tauri::command]
+fn export_backup(state: State<'_, AppState>, path: String) -> Result<BackupCounts, String> {
+    let conn = lock(&state)?;
+    backup::export_backup(&conn, &path)
+}
+
+/// Reads a whole-app backup file and reports what a restore would write —
+/// the parsed counts behind the confirmation dialog. Nothing is written.
+#[tauri::command]
+fn inspect_backup(path: String) -> Result<BackupCounts, String> {
+    backup::inspect_backup(&path)
+}
+
+/// Restores a whole-app backup: parse → validate → transactional merge that
+/// skips identities which already exist (never overwrites). Returns
+/// {inserted, skipped} per collection for the summary notice.
+#[tauri::command]
+fn import_backup(state: State<'_, AppState>, path: String) -> Result<ImportSummary, String> {
+    let conn = lock(&state)?;
+    backup::import_backup(&conn, &path)
 }
 
 /// Returns the `.sprout.json` path the app was launched with, once; `None`
@@ -1469,6 +1498,9 @@ pub fn run() {
             delete_preset,
             export_preset,
             import_preset,
+            export_backup,
+            inspect_backup,
+            import_backup,
             take_pending_import,
             compute_plan,
             quick_install_plan,

@@ -465,3 +465,22 @@ export interface UpdateCheck {
   current_version: string;
   update: AvailableUpdate | null;
 }
+
+/** Per-collection item counts in a whole-app backup (ticket 80): what an
+ * export wrote, what a file contains, and (as a pair) what a restore
+ * inserted versus skipped. */
+export interface BackupCounts {
+  products: number;
+  presets: number;
+  launch_entries: number;
+  quick_actions: number;
+  clips: number;
+}
+
+/** A whole-app restore's outcome (ticket 80): how many items each collection
+ * gained and how many were skipped because their identity already exists
+ * locally. */
+export interface BackupImportSummary {
+  inserted: BackupCounts;
+  skipped: BackupCounts;
+}

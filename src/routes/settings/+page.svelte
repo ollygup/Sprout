@@ -1,14 +1,21 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import type { Settings } from "$lib/types";
-  import { getSettings, updateAutostart, updateSettings } from "$lib/api";
+  import type { BackupCounts, Settings } from "$lib/types";
+  import {
+    exportBackup,
+    getSettings,
+    importBackup,
+    inspectBackup,
+    updateAutostart,
+    updateSettings,
+  } from "$lib/api";
   import Button from "$lib/components/Button.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
   import Notice from "$lib/components/Notice.svelte";
   import PageHeader from "$lib/components/PageHeader.svelte";
   import Select from "$lib/components/Select.svelte";
-  import { open } from "@tauri-apps/plugin-dialog";
+  import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";
   import { theme, restoreTheme, selectTheme } from "$lib/theme.svelte";
   import type { ThemeMode } from "$lib/theme.svelte";
   import {
@@ -64,6 +71,14 @@
   let checkResult = $state<"idle" | "current" | "failed">("idle");
   let installConfirmOpen = $state(false);
   let installError = $state("");
+
+  // The whole-app backup (ticket 80): its own notices, separate from the
+  // form's save feedback.
+  let backupBusy = $state(false);
+  let backupStatus = $state("");
+  let backupError = $state("");
+  let restoreFile = $state("");
+  let restoreCounts: BackupCounts | null = $state(null);
 
   onMount(() => {
     load();
@@ -190,6 +205,96 @@
       // button stays available for a retry.
       installError = String(e);
       installConfirmOpen = true;
+    }
+  }
+
+  /** "3 products, 1 preset, 5 launch entries" — the count list behind both
+   *  backup notices and the restore confirmation. */
+  function describeCounts(counts: BackupCounts): string {
+    const parts = [
+      counts.products &&
+        `${counts.products} product${counts.products === 1 ? "" : "s"}`,
+      counts.presets && `${counts.presets} preset${counts.presets === 1 ? "" : "s"}`,
+      counts.launch_entries &&
+        `${counts.launch_entries} launch ${counts.launch_entries === 1 ? "entry" : "entries"}`,
+      counts.quick_actions &&
+        `${counts.quick_actions} quick action${counts.quick_actions === 1 ? "" : "s"}`,
+      counts.clips && `${counts.clips} clip${counts.clips === 1 ? "" : "s"}`,
+    ].filter(Boolean);
+    return parts.join(", ");
+  }
+
+  async function exportViaDialog() {
+    backupStatus = "";
+    backupError = "";
+    try {
+      const path = await saveDialog({
+        title: "Back up Sprout",
+        defaultPath: "sprout-backup.json",
+        filters: [{ name: "Sprout backup", extensions: ["json"] }],
+      });
+      if (!path) return;
+      backupBusy = true;
+      const counts = await exportBackup(path);
+      backupStatus = `Backed up ${describeCounts(counts)} to ${path}`;
+    } catch (e) {
+      console.error(e);
+      // Rejections are authored backend copy; infrastructure failures are rare.
+      backupError = String(e);
+    } finally {
+      backupBusy = false;
+    }
+  }
+
+  async function restoreViaDialog() {
+    backupStatus = "";
+    backupError = "";
+    try {
+      const picked = await open({
+        title: "Open a Sprout backup",
+        multiple: false,
+        directory: false,
+        filters: [{ name: "Sprout backup", extensions: ["json"] }],
+      });
+      if (typeof picked !== "string") return;
+      backupBusy = true;
+      restoreFile = picked;
+      restoreCounts = await inspectBackup(picked);
+    } catch (e) {
+      console.error(e);
+      backupError = String(e);
+      restoreFile = "";
+      restoreCounts = null;
+    } finally {
+      backupBusy = false;
+    }
+  }
+
+  async function importBackupFile(file: string) {
+    backupBusy = true;
+    try {
+      const summary = await importBackup(file);
+      const restored = describeCounts(summary.inserted);
+      const skipped =
+        summary.skipped.products +
+        summary.skipped.presets +
+        summary.skipped.launch_entries +
+        summary.skipped.quick_actions +
+        summary.skipped.clips;
+      if (!restored) {
+        backupStatus = "Nothing to restore — everything in the file already exists.";
+      } else if (skipped > 0) {
+        backupStatus =
+          `Restored ${restored}. ${skipped} item${skipped === 1 ? " was" : "s were"} already present and kept.`;
+      } else {
+        backupStatus = `Restored ${restored}.`;
+      }
+    } catch (e) {
+      console.error(e);
+      // Rejections are authored backend copy; infrastructure failures are rare.
+      backupError = String(e);
+    } finally {
+      backupBusy = false;
     }
   }
 </script>
@@ -439,6 +544,31 @@
 
       <article class="knob">
         <div class="knob__body">
+          <span class="knob__label">Backup</span>
+          <p class="knob__hint">
+            Copies your products, presets, launch entries, quick actions, and clips into one JSON
+            file you pick; restoring adds what's missing and keeps what's already here. Run
+            history, logs, settings, dock memory, and install directories never leave this PC.
+          </p>
+          {#if backupStatus}
+            <Notice tone="ok">{backupStatus}</Notice>
+          {/if}
+          {#if backupError}
+            <Notice tone="error">{backupError}</Notice>
+          {/if}
+        </div>
+        <div class="knob__input">
+          <Button variant="secondary" onclick={exportViaDialog} disabled={backupBusy}>
+            Export…
+          </Button>
+          <Button onclick={restoreViaDialog} disabled={backupBusy}>
+            Restore…
+          </Button>
+        </div>
+      </article>
+
+      <article class="knob">
+        <div class="knob__body">
           <span class="knob__label">Sprout updates</span>
           <p class="knob__hint">
             Checks GitHub releases for a newer build. An update also appears
@@ -502,6 +632,32 @@
   <p>Sprout restarts when the installer finishes.</p>
   {#if installError}
     <Notice tone="error">{installError}</Notice>
+  {/if}
+</ConfirmDialog>
+
+<ConfirmDialog
+  open={restoreCounts !== null}
+  title="Restore backup?"
+  confirmLabel="Restore"
+  onconfirm={() => {
+    const file = restoreFile;
+    restoreCounts = null;
+    restoreFile = "";
+    if (file) void importBackupFile(file);
+  }}
+  oncancel={() => {
+    restoreCounts = null;
+    restoreFile = "";
+  }}
+>
+  {#if restoreCounts && describeCounts(restoreCounts)}
+    <p>
+      <strong>{restoreFile.split(/[\\/]/).pop()}</strong> contains
+      {describeCounts(restoreCounts)}.
+    </p>
+    <p>Items that already exist here are kept — nothing is overwritten.</p>
+  {:else}
+    <p>This file contains no items to restore.</p>
   {/if}
 </ConfirmDialog>
 

@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   ActiveRunInfo,
+  BackupCounts,
+  BackupImportSummary,
   Clip,
   ClipInput,
   Composition,
@@ -83,6 +85,25 @@ export function exportPreset(path: string, presetId: string): Promise<void> {
 
 export function importPreset(path: string): Promise<ImportResult> {
   return invoke<ImportResult>("import_preset", { path });
+}
+
+/** Writes one whole-app backup (ticket 80) to `path` — products, presets,
+ *  launch entries, quick actions, and clips in one JSON file — and returns
+ *  the per-collection counts for the success notice. */
+export function exportBackup(path: string): Promise<BackupCounts> {
+  return invoke<BackupCounts>("export_backup", { path });
+}
+
+/** Parses a whole-app backup without writing anything (ticket 80): the
+ *  parsed counts shown in the restore confirmation before the user commits. */
+export function inspectBackup(path: string): Promise<BackupCounts> {
+  return invoke<BackupCounts>("inspect_backup", { path });
+}
+
+/** Restores a whole-app backup (ticket 80): a transactional merge that skips
+ *  identities which already exist. Returns inserted/skipped per collection. */
+export function importBackup(path: string): Promise<BackupImportSummary> {
+  return invoke<BackupImportSummary>("import_backup", { path });
 }
 
 export function takePendingImport(): Promise<string | null> {

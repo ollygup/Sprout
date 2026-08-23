@@ -35,8 +35,22 @@ impl OrderedList {
         values: &[&dyn ToSql],
     ) -> Result<i64> {
         let tx = conn.unchecked_transaction()?;
+        let id = self.append_at_end(&tx, insert_sql, values)?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    /// [`Self::create_at_end`]'s core without its own transaction — for
+    /// callers appending many rows under ONE transaction (the whole-app
+    /// backup restore). Sequential calls land in call order.
+    pub(crate) fn append_at_end(
+        &self,
+        conn: &Connection,
+        insert_sql: &str,
+        values: &[&dyn ToSql],
+    ) -> Result<i64> {
         let mut binds: Vec<&dyn ToSql> = values.to_vec();
-        let position: i64 = tx.query_row(
+        let position: i64 = conn.query_row(
             &format!(
                 "SELECT COALESCE(MAX(position), -1) + 1 FROM {}",
                 self.table
@@ -45,10 +59,8 @@ impl OrderedList {
             |row| row.get(0),
         )?;
         binds.push(&position);
-        tx.execute(insert_sql, binds.as_slice())?;
-        let id = tx.last_insert_rowid();
-        tx.commit()?;
-        Ok(id)
+        conn.execute(insert_sql, binds.as_slice())?;
+        Ok(conn.last_insert_rowid())
     }
 
     /// Removes a row by id and compacts the positions so the list stays
