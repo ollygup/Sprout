@@ -75,12 +75,17 @@ pub struct ReleaseAsset {
     pub url: String,
 }
 
+// `Option` fields, not `#[serde(default)]`: GitHub answers `"body": null`
+// for releases published without notes (action-gh-release), and `default`
+// only covers a missing field — an explicit null would fail the whole
+// parse and read as "up to date" (silent-failure contract).
+
 #[derive(Deserialize)]
 struct ReleaseJson {
     #[serde(default)]
-    tag_name: String,
+    tag_name: Option<String>,
     #[serde(default)]
-    body: String,
+    body: Option<String>,
     #[serde(default)]
     assets: Vec<AssetJson>,
 }
@@ -88,9 +93,9 @@ struct ReleaseJson {
 #[derive(Deserialize)]
 struct AssetJson {
     #[serde(default)]
-    name: String,
+    name: Option<String>,
     #[serde(default)]
-    browser_download_url: String,
+    browser_download_url: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -105,15 +110,16 @@ pub fn parse_release(payload: &str) -> Option<ParsedRelease> {
     let assets = json
         .assets
         .into_iter()
-        .filter(|a| !a.name.is_empty() && !a.browser_download_url.is_empty())
-        .map(|a| ReleaseAsset {
-            name: a.name,
-            url: a.browser_download_url,
+        .filter_map(|a| match (a.name, a.browser_download_url) {
+            (Some(name), Some(url)) if !name.is_empty() && !url.is_empty() => {
+                Some(ReleaseAsset { name, url })
+            }
+            _ => None,
         })
         .collect();
     Some(ParsedRelease {
-        tag: json.tag_name,
-        notes: json.body,
+        tag: json.tag_name.unwrap_or_default(),
+        notes: json.body.unwrap_or_default(),
         assets,
     })
 }
@@ -293,6 +299,11 @@ mod tests {
     /// but a stable release may still carry a prerelease-suffixed tag.
     const RELEASE_V060_RC1: &str =
         include_str!("update/fixtures/release-v060-rc1.json");
+    /// The real shape of the first CI-published release: action-gh-release
+    /// left `body` explicitly null, which a plain `String` field rejects —
+    /// the silent "always up to date" bug this fixture pins (ADR-0012).
+    const RELEASE_V042_NULL_BODY: &str =
+        include_str!("update/fixtures/release-v042-null-body.json");
 
     // -- strip-v semver comparison --------------------------------------
 
@@ -364,6 +375,16 @@ mod tests {
         assert!(!is_newer(&release.tag, "0.4.1"));
     }
 
+    #[test]
+    fn null_body_and_null_asset_fields_parse() {
+        // GitHub's real shape for a notes-less release: explicit nulls, not
+        // absent fields — `#[serde(default)]` alone rejects these.
+        let release = parse_release(RELEASE_V042_NULL_BODY).expect("null-body release parses");
+        assert_eq!(release.tag, "v0.4.2");
+        assert_eq!(release.notes, "");
+        assert_eq!(release.assets.len(), 1);
+    }
+
     // -- asset selection --------------------------------------------------
 
     #[test]
@@ -424,6 +445,16 @@ mod tests {
         let update = evaluate(RELEASE_V050, "0.4.1").expect("update available");
         assert_eq!(update.version, "0.5.0");
         assert_eq!(update.url, "https://github.com/ollygup/Sprout/releases/download/v0.5.0/Sprout_0.5.0_x64-setup.exe");
+    }
+
+    #[test]
+    fn null_body_release_reads_as_an_update_for_an_older_build() {
+        let update = evaluate(RELEASE_V042_NULL_BODY, "0.4.1").expect("update available");
+        assert_eq!(update.version, "0.4.2");
+        assert_eq!(
+            update.url,
+            "https://github.com/ollygup/Sprout/releases/download/v0.4.2/Sprout_0.4.2_x64-setup.exe"
+        );
     }
 
     #[test]

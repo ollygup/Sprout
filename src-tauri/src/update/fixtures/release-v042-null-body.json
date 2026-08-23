@@ -1,0 +1,22 @@
+{
+  "url": "https://api.github.com/repos/ollygup/Sprout/releases/375117410",
+  "html_url": "https://github.com/ollygup/Sprout/releases/tag/v0.4.2",
+  "tag_name": "v0.4.2",
+  "target_commitish": "master",
+  "name": "v0.4.2",
+  "draft": false,
+  "prerelease": false,
+  "created_at": "2026-08-23T04:40:34Z",
+  "published_at": "2026-08-23T04:48:34Z",
+  "body": null,
+  "assets": [
+    {
+      "url": "https://api.github.com/repos/ollygup/Sprout/releases/assets/525836036",
+      "name": "Sprout_0.4.2_x64-setup.exe",
+      "content_type": "application/x-msdos-program",
+      "state": "uploaded",
+      "size": 2652161,
+      "browser_download_url": "https://github.com/ollygup/Sprout/releases/download/v0.4.2/Sprout_0.4.2_x64-setup.exe"
+    }
+  ]
+}
