@@ -1,0 +1,24 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Tag must equal Cargo.toml version
+        shell: pwsh
+        run: |
+          $cargo = (Select-String -Path src-tauri/Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          if ("v$cargo" -ne "${{ github.ref_name }}") { throw "tag ${{ github.ref_name }} != Cargo.toml $cargo" }
+      - run: npm ci
+      - run: npm run tauri build
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: src-tauri/target/release/bundle/nsis/Sprout_*_x64-setup.exe
