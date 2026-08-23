@@ -10,6 +10,7 @@
   import { launchImport } from "$lib/launchImport.svelte";
   import { startRunAwareness } from "$lib/runAwareness.svelte";
   import { startTheme } from "$lib/theme.svelte";
+  import { watchUpdates } from "$lib/updateState.svelte";
 
   let { children }: { children: Snippet } = $props();
 
@@ -34,6 +35,13 @@
   $effect(() => {
     if (isQuickLaunchWindow) return;
     startRunAwareness();
+  });
+
+  // The self-update watcher (ticket 74) feeds the rail pill and the Settings
+  // row from one store; the Quick Launch window renders neither.
+  $effect(() => {
+    if (isQuickLaunchWindow) return;
+    watchUpdates();
   });
 
   $effect(() => {

@@ -3,12 +3,18 @@
   import type { Settings } from "$lib/types";
   import { getSettings, updateSettings } from "$lib/api";
   import Button from "$lib/components/Button.svelte";
+  import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
   import Notice from "$lib/components/Notice.svelte";
   import Select from "$lib/components/Select.svelte";
   import { open } from "@tauri-apps/plugin-dialog";
   import { theme, restoreTheme, selectTheme } from "$lib/theme.svelte";
   import type { ThemeMode } from "$lib/theme.svelte";
+  import {
+    checkForUpdates,
+    installNow,
+    updateState,
+  } from "$lib/updateState.svelte";
 
   const themeOptions: { mode: ThemeMode; label: string }[] = [
     { mode: "system", label: "System" },
@@ -44,6 +50,13 @@
   let saving = $state(false);
   let saved = $state("");
   let error = $state("");
+
+  // The manual update check's outcome (ticket 74): the found-version state
+  // itself lives in the shared store, so the rail pill follows along.
+  let checking = $state(false);
+  let checkResult = $state<"idle" | "current" | "failed">("idle");
+  let installConfirmOpen = $state(false);
+  let installError = $state("");
 
   onMount(() => {
     load();
@@ -124,6 +137,34 @@
       error = "Couldn't save the settings — try again. If it keeps failing, close Sprout and relaunch.";
     } finally {
       saving = false;
+    }
+  }
+
+  async function runUpdateCheck() {
+    checking = true;
+    try {
+      const result = await checkForUpdates();
+      checkResult =
+        result.status === "available"
+          ? "idle"
+          : result.status === "up-to-date"
+            ? "current"
+            : "failed";
+    } finally {
+      checking = false;
+    }
+  }
+
+  async function applyInstall() {
+    try {
+      await installNow();
+      // A successful spawn exits the app within the second.
+      installConfirmOpen = false;
+    } catch (e) {
+      // Failure reopens the dialog with the error; the row's install
+      // button stays available for a retry.
+      installError = String(e);
+      installConfirmOpen = true;
     }
   }
 </script>
@@ -348,6 +389,51 @@
         </div>
       </article>
 
+      <article class="knob">
+        <div class="knob__body">
+          <span class="knob__label">Sprout updates</span>
+          <p class="knob__hint">
+            Checks GitHub releases for a newer build. An update also appears
+            beside the version in the navigation rail; installing downloads it
+            and restarts Sprout.
+          </p>
+          {#if updateState.installing}
+            <p class="knob__status" role="status">
+              Installing Sprout {updateState.available?.version} — Sprout
+              restarts when it finishes.
+            </p>
+          {:else if updateState.available}
+            <Notice tone="ok">Sprout {updateState.available.version} is available.</Notice>
+          {:else if checking}
+            <p class="knob__status" role="status">Checking…</p>
+          {:else if checkResult === "current"}
+            <Notice tone="ok">You're up to date.</Notice>
+          {:else if checkResult === "failed"}
+            <Notice tone="warn">
+              Couldn't reach the release feed just now — try again later.
+            </Notice>
+          {/if}
+        </div>
+        <div class="knob__input">
+          {#if updateState.installing}
+            <Button disabled>Installing…</Button>
+          {:else if updateState.available}
+            <Button
+              onclick={() => {
+                installError = "";
+                installConfirmOpen = true;
+              }}
+            >
+              Install {updateState.available.version}
+            </Button>
+          {:else}
+            <Button variant="secondary" onclick={runUpdateCheck} disabled={checking}>
+              {checking ? "Checking…" : "Check for updates"}
+            </Button>
+          {/if}
+        </div>
+      </article>
+
       <div class="form__actions">
         <Button kind="submit" disabled={saving}>
           {saving ? "Saving…" : "Save settings"}
@@ -356,6 +442,20 @@
     </form>
   {/if}
 </section>
+
+<ConfirmDialog
+  open={installConfirmOpen}
+  title="Update available"
+  confirmLabel={updateState.installing ? "Installing…" : "Install and restart"}
+  onconfirm={applyInstall}
+  oncancel={() => (installConfirmOpen = false)}
+>
+  <p>Install Sprout {updateState.available?.version} now?</p>
+  <p>Sprout restarts when the installer finishes.</p>
+  {#if installError}
+    <Notice tone="error">{installError}</Notice>
+  {/if}
+</ConfirmDialog>
 
 <style>
   .settings {
@@ -433,6 +533,14 @@
   .knob__hint {
     margin: 0;
     font-size: var(--text-xs);
+    color: var(--text-muted);
+  }
+
+  .knob__status {
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    letter-spacing: var(--tracking-mono);
     color: var(--text-muted);
   }
 

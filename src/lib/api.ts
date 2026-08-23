@@ -21,6 +21,7 @@ import type {
   RunSummary,
   Settings,
   StartRunResult,
+  UpdateCheck,
   VirtualDesktops,
   WingetMatch,
   WingetShow,
@@ -297,4 +298,18 @@ export function switchQuickLaunchDockEdge(edge: string): Promise<void> {
  * toggle would dock to; `docked` tells the two apart. */
 export function getQuickLaunchDockState(): Promise<QuickLaunchDockState> {
   return invoke<QuickLaunchDockState>("get_quick_launch_dock_state");
+}
+
+/** Checks GitHub Releases for a newer Sprout (ADR-0012). Runs on the
+ * backend's blocking pool; per the silent-failure contract every failure
+ * resolves to `update: null` rather than an error. */
+export function checkForUpdate(): Promise<UpdateCheck> {
+  return invoke<UpdateCheck>("check_for_update");
+}
+
+/** The user-confirmed apply step (ADR-0012): streams the setup exe to
+ * %TEMP%, spawns it passively, and exits the app shortly after so NSIS can
+ * replace it and relaunch. Failures here are reported — the user asked. */
+export function installUpdate(url: string): Promise<void> {
+  return invoke<void>("install_update", { url });
 }

@@ -71,12 +71,24 @@ The machine-local list of Launch entries that the tray one-click launcher and th
 _Avoid_: Quick start, launcher
 
 **Quick Launch window**:
-The miniature window opened from the tray icon with two tabs — Quick Launch (a single Start button that starts the whole Quick Launch list) and Quick Actions — for read-only, fast access. It floats as a persistent window (stays open until closed with × / Alt+F4 — blur never hides it — and is freely draggable) or docks as a Win32 AppBar (the Quick Launch dock) on the left/right screen edge. It has no configuration surface; all configuration happens in the main app.
+The miniature window opened from the tray icon with two tabs — Quick Launch (a single Start button that starts the whole Quick Launch list) and Quick Actions — for read-only, fast access. A third tab, **Quick Clips**, joins them once any Clip exists; until then the window stays a two-tab palette. It floats as a persistent window (stays open until closed with × / Alt+F4 — blur never hides it — and is freely draggable) or docks as a Win32 AppBar (the Quick Launch dock) on the left/right screen edge. It has no configuration surface; all configuration happens in the main app.
 _Avoid_: Miniature window, palette, tray menu
 **Quick Launch dock**:
 
-The Quick Launch window's docked form — a Win32 AppBar on the left/right screen edge, in one of two modes. **Fixed** reserves a slim strip (maximized windows shrink by it). **Auto-hide** is Sprout-driven and overlays: the strip slides out (~180 ms ease-out) when the cursor touches the docked screen edge and slides away to a 2 px sliver when the cursor leaves — other windows keep their full size either way, independent of the taskbar's own auto-hide setting, working even where the shell refuses the auto-hide registration. Never part of Presets or exports.
+The Quick Launch window's docked form — a Win32 AppBar on the left/right screen edge, in one of two modes. **Fixed** reserves a slim strip (maximized windows shrink by it). **Auto-hide** is Sprout-driven and overlays: the strip slides out (~180 ms ease-out) when the cursor touches the docked screen edge and slides away to a 2 px sliver when the cursor leaves — other windows keep their full size either way, independent of the taskbar's own auto-hide setting, working even where the shell refuses the auto-hide registration. Its docked-versus-floating state is remembered per monitor and restored whenever Sprout starts — including Windows auto-start (ADR-0013). Never part of Presets or exports.
 _Avoid_: Sidebar, tray bar, launcher bar
+
+**Auto-start**:
+Sprout's registration to start with Windows: at login only the tray-resident backend starts — the main window never appears — restoring the Quick Launch dock when it was docked, staying tray-only when it was floating (or not yet docked). On by default in installed builds; toggled in Settings. Machine-local; never part of Presets or exports.
+_Avoid_: Run at login, startup app, launch on boot
+
+**Clip**:
+A machine-local piece of plain text stored for one-click re-copying — click it in the Quick Clips tab or page and its content is back on the clipboard. Authored by hand (pasted from the machine's own clipboard into the add dialog); never captured automatically in the background. Ordered by the user; never part of Presets, Plan, or Run.
+_Avoid_: Snippet, clipboard entry, paste item
+
+**Quick Clips**:
+The list of Clips and its two surfaces: a main-app page (create, edit, reorder, delete) and a read-only tab in the Quick Launch window that appears only once at least one Clip exists. Included whole-app backups (Settings export); never part of Presets, Plan, Run, or exports of Presets.
+_Avoid_: Quick copy, clipboard manager
 
 **Quick Action**:
 A machine-local, user-authored named command (PowerShell, optional working directory) run from the Quick Launch window's Quick Actions tab (e.g. "docker start" → `docker compose up -d`); runs hidden as the current user with no elevation and no status UI. Optionally **stoppable**: while its process runs, the Run button becomes Stop, which either runs the action's own stop command (e.g. `docker compose stop`) or kills the process tree; tracking covers foreground commands only — detached commands (e.g. `-d`) report as not running because the process exits while the service continues. Configured in the main app's Quick Actions page; never part of Presets, Plan, Run, or exports.

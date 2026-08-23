@@ -3,7 +3,7 @@ name = "sprout"
 # App version. Single source of truth: this file — tauri.conf.json omits
 # `version` and Tauri v2 auto-inherits it from here into the exe metadata,
 # the window, and the installer. Never restate it elsewhere.
-version = "0.4.1"
+version = "0.4.2"
 description = "Preset-driven Windows software-installation desktop app"
 authors = ["Sprout contributors"]
 edition = "2021"
@@ -41,6 +41,11 @@ png = "0.17"
 # PNG → data URL for the search-result icons (ticket 40); already in the lock
 # file as a transitive of tauri.
 base64 = "0.22"
+# Self-update transport (ADR-0012): ureq on rustls — TLS-only integrity by
+# decision, and the smallest client that avoids tauri-plugin-updater's
+# signing-key machinery. Keep features minimal: spec NFR 43 budgets the
+# shipped exe under ~10 MB, and rustls is this crate's only heavy piece.
+ureq = { version = "2", default-features = false, features = ["tls"] }
 
 [dev-dependencies]
 tempfile = "3"

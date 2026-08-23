@@ -16,6 +16,7 @@ mod quick_window;
 mod run;
 mod settings;
 mod tray;
+mod update;
 mod walker;
 mod winget;
 mod worker;
@@ -448,6 +449,41 @@ fn update_theme(
 #[tauri::command]
 fn list_logs() -> Result<LogLocations, String> {
     Ok(logs::list_log_locations())
+}
+
+/// The answer to a self-update check (ADR-0012, ticket 73): the running
+/// build's version plus the newer release when one exists, or `None` —
+/// which is also what offline, private-repo 403/404, and malformed payloads
+/// all look like. The silent-failure contract means this never errors.
+#[derive(serde::Serialize)]
+pub struct UpdateCheck {
+    pub current_version: String,
+    pub update: Option<update::AvailableUpdate>,
+}
+
+/// Checks GitHub Releases for a newer Sprout (ADR-0012). Runs on the
+/// blocking pool so the network round-trip never touches the main thread;
+/// every failure resolves to "up to date" rather than an error surface.
+#[tauri::command]
+async fn check_for_update() -> Result<UpdateCheck, String> {
+    let update = tauri::async_runtime::spawn_blocking(update::check_for_update_silent)
+        .await
+        .unwrap_or(None);
+    Ok(UpdateCheck {
+        current_version: update::current_version().to_string(),
+        update,
+    })
+}
+
+/// The user-confirmed apply step (ADR-0012): downloads the setup exe to
+/// %TEMP%, spawns it detached with `/UPDATE /P /R`, and exits shortly after
+/// so NSIS can replace the running exe and relaunch (`/R`). Runs on the
+/// blocking pool; failures are reported — this action was explicit.
+#[tauri::command]
+async fn install_update(app: AppHandle, url: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || update::apply_update(&app, &url))
+        .await
+        .map_err(|e| format!("the update could not be applied: {e}"))?
 }
 
 /// The Logs screen's open-folder action: reveals `path` in Explorer.
@@ -1223,6 +1259,10 @@ pub fn run() {
             // that slides the docked strip to its sliver and back — Sprout
             // owns the motion; the OS never moves an appbar.
             quick_window::start_autohide_driver(app.handle().clone());
+            // The once-per-launch self-update check (ADR-0012, ticket 73):
+            // background thread, single `update-available` event on a newer
+            // release, silent on every failure.
+            update::start_background_check(app.handle().clone());
             // [DEBUG-66] ticket 66 repro loop (debug builds + opt-in env only).
             #[cfg(debug_assertions)]
             if std::env::var("SPROUT_DOCK_STRESS").as_deref() == Ok("1") {
@@ -1266,6 +1306,8 @@ pub fn run() {
             get_settings,
             update_settings,
             update_theme,
+            check_for_update,
+            install_update,
             list_logs,
             open_folder,
             list_launch_entries,

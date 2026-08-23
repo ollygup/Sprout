@@ -7,7 +7,7 @@ labels: [ready-for-agent]
 # Sprout — Preset-Driven Windows Installer Desktop App
 
 > Spec synthesized from the grilling session (Rust + Tauri, domain-modeling glossary in `docs/CONTEXT.md`, decisions in `docs/adr/`).
-> Local copy awaiting publish to the issue tracker — no tracker configured in this environment at spec time.
+> Historical record of the v1 spec — implemented through v0.4.x (parity gate passed 2026-08-15). Post-v1 scope (tray residency, Quick Launch window/dock, self-update, auto-start, Quick Clips) is decided in `docs/adr/`; this document is not kept current.
 
 ## Problem Statement
 
@@ -131,7 +131,7 @@ A Windows desktop application, **Sprout** (Rust + Tauri 2 + Svelte 5, single exe
 
 - macOS/Linux support (architecture is ready; implementation is not — their preset files carry a platform tag and are rejected with a clear message on the wrong OS).
 - Download-and-run installer step type (v2, additive via the registry).
-- App self-update and code signing.
+- Code signing. (App self-update was listed here in v1; reversed post-v1 by ADR-0012.)
 - Portable/USB data mode (app is installed; data is per-user).
 - In-app log viewer (location tab only).
 - Uninstalling products, remote/multi-machine management, preset auto-merge.
@@ -139,5 +139,5 @@ A Windows desktop application, **Sprout** (Rust + Tauri 2 + Svelte 5, single exe
 ## Further Notes
 
 - Size budget: Rust + Tauri exe ≈ 4–6 MB; frontend is hand-rolled Svelte (no heavy component library), so <10 MB is comfortable.
-- Docs already in-repo: `docs/CONTEXT.md` (glossary), `docs/adr/` (eight ADRs), `docs/research/0001-step-types-and-extensibility.md` (Q13 findings), `docs/release/parity-checklist.md` (release gate procedure).
+- Docs already in-repo: `docs/CONTEXT.md` (glossary), `docs/adr/` (grows over time — see the directory), `docs/research/0001-step-types-and-extensibility.md` (Q13 findings), `docs/release/parity-checklist.md` (release gate procedure).
 - The existing `scripts/`, `Setup.bat`, and `config/catalog.yaml` were moved to `legacy/` and kept runnable as the parity reference until the ticket-10 parity gate passed (2026-08-15), then deleted. Legacy's observable outcomes for the gate machine state are archived in `docs/release/clean-legacy-setup.log`; the catalog semantics live on as `tools/parity-preset.sprout.json`.

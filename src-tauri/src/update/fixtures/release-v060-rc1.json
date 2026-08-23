@@ -1,0 +1,23 @@
+{
+  "url": "https://api.github.com/repos/ollygup/Sprout/releases/187654999",
+  "html_url": "https://github.com/ollygup/Sprout/releases/tag/v0.6.0-rc.1",
+  "tag_name": "v0.6.0-rc.1",
+  "name": "Sprout 0.6.0 release candidate",
+  "draft": false,
+  "prerelease": true,
+  "created_at": "2026-08-21T18:02:44Z",
+  "published_at": "2026-08-21T18:10:00Z",
+  "body": "Release candidate — testing the self-update path.",
+  "assets": [
+    {
+      "url": "https://api.github.com/repos/ollygup/Sprout/releases/assets/401",
+      "id": 401,
+      "name": "Sprout_0.6.0-rc.1_x64-setup.exe",
+      "label": null,
+      "content_type": "application/x-msdownload",
+      "size": 48240,
+      "browser_download_url": "https://github.com/ollygup/Sprout/releases/download/v0.6.0-rc.1/Sprout_0.6.0-rc.1_x64-setup.exe"
+    }
+  ],
+  "author": { "login": "ollygup", "type": "User" }
+}

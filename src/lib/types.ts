@@ -427,3 +427,20 @@ export interface QuickLaunchDockState {
   docked: boolean;
   blocked: string | null;
 }
+
+/** A newer Sprout release (ADR-0012): the display version (tag stripped of
+ * its `v`) and the setup-exe download URL. Also the payload of the one-shot
+ * startup `update-available` event. */
+export interface AvailableUpdate {
+  version: string;
+  url: string;
+}
+
+/** One update check's answer: the running build's version plus a newer
+ * release when one exists. Per the silent-failure contract every check
+ * failure — offline, private repo, malformed payload — resolves to
+ * `update: null`, indistinguishable from up to date. */
+export interface UpdateCheck {
+  current_version: string;
+  update: AvailableUpdate | null;
+}
