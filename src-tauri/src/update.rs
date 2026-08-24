@@ -11,11 +11,17 @@
 //! Only the user-initiated apply step reports failures. The check is inert
 //! while the repo is private and activates when it goes public; no auth
 //! machinery either way.
+//!
+//! Apply-step integrity (ADR-0012 scheme B): release CI signs every setup
+//! exe with an ed25519 minisign key held as Actions secrets, and this module
+//! verifies the download against [`UPDATE_PUBKEY`] before the installer ever
+//! spawns — TLS alone no longer has to carry trust in the update path.
 
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
+use minisign_verify::{PublicKey, Signature};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
@@ -34,6 +40,14 @@ pub const UPDATE_AVAILABLE_EVENT: &str = "update-available";
 /// both the update pick and the download target must match it exactly.
 const SETUP_ASSET_PREFIX: &str = "Sprout_";
 const SETUP_ASSET_SUFFIX: &str = "_x64-setup.exe";
+
+/// CI's update-signing public key (ADR-0012 scheme B): the second line of
+/// the `<key>.pub` file produced by `tauri signer generate` — the base64
+/// body pasted verbatim (key id 5345CD6883CC4501). The matching private half
+/// lives only as GitHub Actions secrets. An empty string means this build
+/// cannot verify signatures, so every install refuses — fail-closed until a
+/// real key is embedded.
+const UPDATE_PUBKEY: &str = "RWQBRcyDaM1FU5hHUVavD5qe+TzSx+y5LY/DHzGH7jZxahgxpyGOcTrb";
 
 /// The whole request/response of a check, timeboxed so a stalled connection
 /// can never hang a startup thread or the Settings screen for long.
@@ -243,6 +257,18 @@ fn download_to_file(url: &str, target: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Fetches a small text asset — the `.sig` sidecar next to the installer —
+/// into memory.
+fn download_to_string(url: &str) -> Result<String, String> {
+    download_agent()
+        .get(url)
+        .set("User-Agent", USER_AGENT)
+        .call()
+        .map_err(|e| format!("the update signature could not be downloaded: {e}"))?
+        .into_string()
+        .map_err(|e| format!("the update signature could not be read: {e}"))
+}
+
 /// Spawns the NSIS installer detached from this process with its passive
 /// update flags: `/UPDATE` skips the uninstall-first page, `/P` keeps it to
 /// a progress bar, and `/R` relaunches Sprout once the new files land (the
@@ -261,6 +287,37 @@ fn spawn_installer_detached(installer: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Verifies installer bytes against a minisign signature made by CI's
+/// update key (ADR-0012 scheme B). Total and fail-closed: an empty or
+/// unreadable embedded key, an unparsable signature, and any mismatch all
+/// refuse — an unsigned, tampered, or corrupt setup exe never reaches the
+/// spawn step.
+fn verify_installer_signature(
+    public_key_body: &str,
+    installer_bytes: &[u8],
+    signature_text: &str,
+) -> Result<(), String> {
+    if public_key_body.trim().is_empty() {
+        return Err(
+            "this build has no update-signature key embedded — refusing to run the installer"
+                .into(),
+        );
+    }
+    let public_key = PublicKey::from_base64(public_key_body).map_err(|_| {
+        "the embedded update-signature key is unreadable — refusing to run the installer".to_string()
+    })?;
+    let signature = Signature::decode(signature_text)
+        .map_err(|_| "the downloaded signature could not be read — refusing to run the installer".to_string())?;
+    // Legacy mode off: CI's `tauri signer sign` emits pre-hashed minisign
+    // signatures, and anything older must never pass by accident.
+    public_key
+        .verify(installer_bytes, &signature, false)
+        .map_err(|_| {
+            "the installer failed its signature check — it may be tampered with or corrupt; refusing to run it"
+                .to_string()
+        })
+}
+
 /// The user-confirmed apply step behind the `install_update` command:
 /// downloads the setup asset to `%TEMP%\<asset-name>` (the URL's last path
 /// segment, refused unless it names a real Sprout installer), spawns the
@@ -274,6 +331,10 @@ pub fn apply_update(app: &AppHandle, url: &str) -> Result<(), String> {
     }
     let target = std::env::temp_dir().join(name);
     download_to_file(url, &target)?;
+    let installer_bytes = std::fs::read(&target)
+        .map_err(|e| format!("the downloaded installer could not be opened: {e}"))?;
+    let signature = download_to_string(&format!("{url}.sig"))?;
+    verify_installer_signature(UPDATE_PUBKEY, &installer_bytes, &signature)?;
     spawn_installer_detached(&target)?;
     // Give the installer a moment to take the stage, then leave quietly.
     let app = app.clone();
@@ -478,5 +539,66 @@ mod tests {
             ]
         }"#;
         assert!(evaluate(payload, "0.4.1").is_none());
+    }
+
+    // -- signature verification -------------------------------------------
+    // Generated once during implementation with two THROWAWAY keypairs
+    // (`tauri signer generate`); only public keys and signatures are
+    // committed here — the private halves were deleted.
+
+    /// Public half of throwaway fixture key A.
+    const FIXTURE_PUBKEY_A: &str = "RWTglbqsMsbGN4HSSS/bPaUG0JQe85HXO9QOYvhArOJNdgnoBKwoAZrn";
+    /// Public half of throwaway fixture key B — the wrong-key control.
+    const FIXTURE_PUBKEY_B: &str = "RWR3mjRnDMqxx7CFRPJUtcIN2R4edLWL4L7p4JPSnqVkvwRgSI4iQvqI";
+    /// The exact bytes fixture A signed.
+    const FIXTURE_PAYLOAD: &[u8] = b"Sprout update-signature fixture v1";
+    /// Fixture A's minisign signature over [`FIXTURE_PAYLOAD`], verbatim
+    /// `.sig` text (the trusted comment is part of the signed data and its
+    /// separator is a literal tab).
+    const FIXTURE_SIG_A: &str = concat!(
+        "untrusted comment: signature from tauri secret key\n",
+        "RUTglbqsMsbGN42Wh9VrDLz94YEesD3BzWrepMqOz7mergXNkAMM7jeN12fvO+lOJcuGfYn29kUQfScZA1sehOkFtpcZsWf+mAQ=\n",
+        "trusted comment: timestamp:1787573500\tfile:payload_a.bin\n",
+        "jVyuk/E8gPs8BShFplaXaahDIR2/0C4rE0HXB8MjBGZHRJOf0TKf2UDJSLh1aRFAd0VgnBy1W9sHuOz+drkZDA==\n",
+    );
+
+    #[test]
+    fn genuine_bytes_verify_against_the_signing_key() {
+        assert!(verify_installer_signature(FIXTURE_PUBKEY_A, FIXTURE_PAYLOAD, FIXTURE_SIG_A).is_ok());
+    }
+
+    #[test]
+    fn the_shipped_pubkey_is_a_valid_minisign_key() {
+        // Fail-closed means an empty key refuses installs — but a *garbled*
+        // non-empty one would too, silently bricking updates. This keeps the
+        // embedded constant itself honest.
+        assert!(!UPDATE_PUBKEY.trim().is_empty());
+        assert!(PublicKey::from_base64(UPDATE_PUBKEY).is_ok());
+    }
+
+    #[test]
+    fn one_flipped_byte_rejects() {
+        let mut tampered = FIXTURE_PAYLOAD.to_vec();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 1;
+        assert!(verify_installer_signature(FIXTURE_PUBKEY_A, &tampered, FIXTURE_SIG_A).is_err());
+    }
+
+    #[test]
+    fn wrong_pubkey_rejects() {
+        assert!(verify_installer_signature(FIXTURE_PUBKEY_B, FIXTURE_PAYLOAD, FIXTURE_SIG_A).is_err());
+    }
+
+    #[test]
+    fn empty_key_refuses_closed() {
+        let err = verify_installer_signature("", FIXTURE_PAYLOAD, FIXTURE_SIG_A)
+            .expect_err("empty key must refuse");
+        assert!(err.contains("no update-signature key"));
+        assert!(verify_installer_signature("   ", FIXTURE_PAYLOAD, FIXTURE_SIG_A).is_err());
+    }
+
+    #[test]
+    fn unreadable_signature_text_refuses() {
+        assert!(verify_installer_signature(FIXTURE_PUBKEY_A, FIXTURE_PAYLOAD, "not a signature").is_err());
     }
 }

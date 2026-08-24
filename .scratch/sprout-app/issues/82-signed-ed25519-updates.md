@@ -9,7 +9,9 @@ contract also hides unsigned-supply-chain risk.
 
 **Blocked by:** nothing (follow-up to 73/74; independent of 75–81)
 
-**Status:** ready-for-agent
+**Status:** implemented — awaiting the first signed release to go live
+(secrets created by the user; next tag ships the verifying build + first
+signed installer together)
 
 **Scheme (decided):** tauri/minisign — `tauri signer generate` + `tauri signer
 sign`, verified in-app by the `minisign-verify` crate (~0.2.x, tiny, no Tauri
@@ -18,13 +20,24 @@ now (cost/identity paperwork), revisit if distribution widens.
 
 ## Work items
 
-- [ ] **Keys (user, one-time):** `npm.cmd run tauri -- signer generate --ci -w <path> --password <pw>` outside any synced folder; private-key file content → GitHub secret `SPROUT_SIGNING_KEY`, password → `SPROUT_SIGNING_PASSWORD`; public key body (`RWR…` line) goes into the new constant below. Never commit or chat-paste the private half.
-- [ ] **`release.yml`:** signing step after `npm run tauri build` — pwsh, glob the single `Sprout_*_x64-setup.exe`, run `npx tauri signer sign "<exe>"` with `TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.SPROUT_SIGNING_KEY }}` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.SPROUT_SIGNING_PASSWORD }}`; extend the gh-release `files:` glob to also upload `*.exe.sig`.
-- [ ] **`release.yml` hardening:** pin third-party actions (`actions/checkout@v4`, `actions/setup-node@v4`, `dtolnay/rust-toolchain@stable`, `softprops/action-gh-release@v2`) by commit SHA; verify no workflow anywhere uses `pull_request_target`.
-- [ ] **`update.rs`:** `const UPDATE_PUBKEY: &str` holding the public-key base64 body; in `apply_update()` between `download_to_file` and `spawn_installer_detached`: fetch `<url>.sig` with the existing `download_agent` into a string (small response), then verify exe bytes via `PublicKey::from_base64` + `MinisigSig::from_string` + `pk.verify`. Fail-closed: empty constant or failed check = honest refusal error surfaced in the confirm dialog, installer never runs.
-- [ ] **Tests (fixture-style, no network):** generate two THROWAWAY keypairs locally during implementation; sign a fixed byte string once; embed pubkey + signature text as constants. Cases: genuine bytes verify; one flipped byte rejects; wrong pubkey rejects; empty-key refuses. Only public keys/signatures may be committed.
-- [ ] **ADR-0012 amendment:** new section recording scheme B, why (no CA cost/identity, adequate threat coverage: kills local-root-CA MITM injection + post-publish asset substitution; account compromise now requires stealing the Actions secret too), custody rules, residual risks (secret theft; no revocation short of shipping a new pubkey; verification only covers updates, not first installs).
-- [ ] **`cargo test` green; `npm run check` clean; synced to the share**
+- [x] **Keys (user, one-time):** user generated their own keypair (`tauri signer generate`, key id `5345CD6883CC4501`) outside any synced folder; private-key file content → GitHub secret `SPROUT_SIGNING_KEY`, password → `SPROUT_SIGNING_PASSWORD` (created 2026-08-24); public-key body embedded into `UPDATE_PUBKEY` by the agent. Private half never entered the repo, share, chat, or agent context.
+- [x] **`release.yml`:** signing step after `npm run tauri build` — pwsh, globs the single `Sprout_*_x64-setup.exe`, runs `npx tauri signer sign "<exe>"` with `TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.SPROUT_SIGNING_KEY }}` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.SPROUT_SIGNING_PASSWORD }}`; asserts the `.sig` was produced; gh-release `files:` uploads `*.exe.sig`.
+- [x] **`release.yml` hardening:** third-party actions pinned by commit SHA (`actions/checkout@11d5960…`, `actions/setup-node@49933ea…`, `dtolnay/rust-toolchain@4360b52…` stable head, `softprops/action-gh-release@3bb1273…` v2); verified `.github/workflows/` contains only `release.yml` — no `pull_request_target` anywhere.
+- [x] **`update.rs`:** `const UPDATE_PUBKEY: &str` added (currently **empty** = fail-closed until the real key body lands); `apply_update()` fetches `<url>.sig` via `download_to_string`/`download_agent` between download and spawn and calls `verify_installer_signature(UPDATE_PUBKEY, exe_bytes, sig_text)` — `PublicKey::from_base64` + `Signature::decode` + `pk.verify(..., allow_legacy=false)` (0.2.5 API; tauri emits pre-hashed `ED` signatures). Fail-closed: empty constant, unreadable key/sig, or failed check = honest refusal error surfaced through the confirm dialog; installer never spawns.
+- [x] **Tests (fixture-style, no network):** two throwaway keypairs generated during implementation, fixed byte string signed once each; pubkey bodies + signature text embedded as constants (private halves deleted). Cases: genuine bytes verify; one flipped byte rejects; wrong pubkey rejects; empty key refuses closed; unreadable signature text refuses. Only public material committed.
+- [x] **ADR-0012 amendment:** scheme-B section recorded — why (no CA cost/identity; kills local-root-CA MITM injection + post-publish asset substitution; account compromise now requires stealing the Actions secret too), custody rules, residual risks (secret theft; no revocation short of shipping a new pubkey; covers updates, not first installs). `docs/release/release-process.md` gained the secrets pre-flight.
+- [x] **`cargo test` green; `npm run check` clean; synced to the share** — 341 tests pass (incl. `the_shipped_pubkey_is_a_valid_minisign_key` guarding the embedded constant), svelte-check 0 errors; synced up and re-verified `0 copied`.
+
+## Validation
+
+- **Key-match proof without exposing the private half:** the signature file
+  embeds the signer's key id. Signing anything with the private key and
+  comparing that id against `5345CD6883CC4501` (from the `.pub`) proves the
+  pair matches what CI will use.
+- **True end-to-end:** the first release built after this code lands — CI's
+  sign step fails hard if either secret is missing/misspelled, and an
+  installed build refuses a bad or missing `.sig`, so a successful
+  tag → signed-release → in-app update cycle is the final proof.
 
 ## Rollout rule
 

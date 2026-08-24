@@ -3,7 +3,7 @@ name = "sprout"
 # App version. Single source of truth: this file — tauri.conf.json omits
 # `version` and Tauri v2 auto-inherits it from here into the exe metadata,
 # the window, and the installer. Never restate it elsewhere.
-version = "0.4.6"
+version = "0.4.7"
 description = "Preset-driven Windows software-installation desktop app"
 authors = ["Sprout contributors"]
 edition = "2021"
@@ -53,6 +53,11 @@ base64 = "0.22"
 # signing-key machinery. Keep features minimal: spec NFR 43 budgets the
 # shipped exe under ~10 MB, and rustls is this crate's only heavy piece.
 ureq = { version = "2", default-features = false, features = ["tls"] }
+# Update-signature verification (ADR-0012 scheme B): CI signs each setup exe
+# with an ed25519 minisign key and the app refuses to run anything that does
+# not verify against the embedded public key. Tiny pure-Rust verifier — no
+# Tauri updater baggage, no size-budget impact.
+minisign-verify = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
