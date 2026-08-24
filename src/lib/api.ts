@@ -3,6 +3,7 @@ import type {
   ActiveRunInfo,
   BackupCounts,
   BackupImportSummary,
+  BackupSelection,
   Clip,
   ClipInput,
   Composition,
@@ -87,11 +88,11 @@ export function importPreset(path: string): Promise<ImportResult> {
   return invoke<ImportResult>("import_preset", { path });
 }
 
-/** Writes one whole-app backup (ticket 80) to `path` — products, presets,
- *  launch entries, quick actions, and clips in one JSON file — and returns
- *  the per-collection counts for the success notice. */
-export function exportBackup(path: string): Promise<BackupCounts> {
-  return invoke<BackupCounts>("export_backup", { path });
+/** Writes one backup (ticket 80) to `path`, including only the selected
+ *  collections (ticket 87) — unchecked ones are empty arrays in the same
+ *  JSON file — and returns the per-collection counts for the notice. */
+export function exportBackup(path: string, selection: BackupSelection): Promise<BackupCounts> {
+  return invoke<BackupCounts>("export_backup", { path, selection });
 }
 
 /** Parses a whole-app backup without writing anything (ticket 80): the

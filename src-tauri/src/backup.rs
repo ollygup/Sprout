@@ -8,6 +8,13 @@
 //! never overwritten, and the whole merge lands in one transaction (a
 //! failure halfway leaves nothing behind).
 //!
+//! Exports may be selective (ticket 87): the user picks the collections in
+//! the export dialog, and unchecked ones are written as empty arrays in the
+//! SAME document format — there is no separate partial file type, because
+//! exported files circulate and a format split is irreversible once users
+//! hold files (ADR-0014). A partial file therefore restores through the
+//! ordinary flow with true counts.
+//!
 //! Machine-scoped state stays local by design: run history, logs, the
 //! Settings knobs, and the dock's per-monitor memory are never read into the
 //! document, and every install directory is stripped on the way out AND on
@@ -30,6 +37,42 @@ use crate::db;
 use crate::domain::{PresetRecord, Product};
 use crate::launch::{self, LaunchEntryInput};
 use crate::quick_actions::{self, QuickActionInput};
+
+/// Which content collections an export includes (ticket 87). Unchecked
+/// collections are written as empty arrays, so a partial export is the same
+/// document as a whole-app one and restores through the same flow
+/// (ADR-0014).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct BackupSelection {
+    pub products: bool,
+    pub presets: bool,
+    pub launch_entries: bool,
+    pub quick_actions: bool,
+    pub clips: bool,
+}
+
+impl BackupSelection {
+    /// Every collection included — what Export produced before ticket 87.
+    /// Test-only: production always receives the frontend's explicit picks.
+    #[cfg(test)]
+    pub fn all() -> Self {
+        Self {
+            products: true,
+            presets: true,
+            launch_entries: true,
+            quick_actions: true,
+            clips: true,
+        }
+    }
+
+    fn any(&self) -> bool {
+        self.products
+            || self.presets
+            || self.launch_entries
+            || self.quick_actions
+            || self.clips
+    }
+}
 
 /// The document's kind tag — a file without it is not a Sprout backup (a
 /// `.sprout.json` Preset, for one, is rejected here with its own message).
@@ -86,30 +129,60 @@ impl BackupDocument {
     }
 }
 
-/// Writes the whole-app backup of `conn`'s content to `path` and returns the
-/// per-collection counts for the success notice.
-pub fn export_backup(conn: &Connection, path: &str) -> Result<BackupCounts, String> {
-    let products = db::list_products(conn, None)
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .map(|record| record.product)
-        .collect();
-    let presets = db::list_presets(conn).map_err(|e| e.to_string())?;
-    let launch_entries = launch::list_launch_entries(conn)
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .map(|entry| entry.entry)
-        .collect();
-    let quick_actions = quick_actions::list_quick_actions(conn)
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .map(|action| action.action)
-        .collect();
-    let clips = clips::list_clips(conn)
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .map(|clip| clip.clip)
-        .collect();
+/// Writes the backup of `conn`'s content to `path`, limited to the
+/// collections `selection` includes, and returns the per-collection counts
+/// for the success notice. The document is the unchanged whole-app shape —
+/// unselected collections are simply empty arrays (ADR-0014).
+pub fn export_backup(
+    conn: &Connection,
+    path: &str,
+    selection: &BackupSelection,
+) -> Result<BackupCounts, String> {
+    if !selection.any() {
+        return Err("Pick at least one collection to export.".into());
+    }
+
+    let products = if selection.products {
+        db::list_products(conn, None)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|record| record.product)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let presets = if selection.presets {
+        db::list_presets(conn).map_err(|e| e.to_string())?
+    } else {
+        Vec::new()
+    };
+    let launch_entries = if selection.launch_entries {
+        launch::list_launch_entries(conn)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|entry| entry.entry)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let quick_actions = if selection.quick_actions {
+        quick_actions::list_quick_actions(conn)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|action| action.action)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let clips = if selection.clips {
+        clips::list_clips(conn)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|clip| clip.clip)
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     let mut doc = BackupDocument {
         kind: BACKUP_KIND.into(),
@@ -476,7 +549,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap().into_path();
         let file = write_file(&dir, "backup.json", "");
-        let counts = export_backup(&source, &file).unwrap();
+        let counts = export_backup(&source, &file, &BackupSelection::all()).unwrap();
         assert_eq!(
             counts,
             BackupCounts {
@@ -641,7 +714,7 @@ mod tests {
         seed_all(&source);
         let dir = tempfile::tempdir().unwrap().into_path();
         let file = write_file(&dir, "backup.json", "");
-        export_backup(&source, &file).unwrap();
+        export_backup(&source, &file, &BackupSelection::all()).unwrap();
 
         let summary = import_backup(&target, &file).unwrap();
         assert_eq!(summary.inserted.products, 1, "only vscode is new");
@@ -695,7 +768,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap().into_path();
         let file = write_file(&dir, "backup.json", "");
-        let on_disk = export_backup(&source, &file).unwrap();
+        let on_disk = export_backup(&source, &file, &BackupSelection::all()).unwrap();
         assert!(on_disk.products > 0);
 
         let target = conn();
@@ -743,7 +816,7 @@ mod tests {
         let source = conn();
         let dir = tempfile::tempdir().unwrap().into_path();
         let file = write_file(&dir, "empty.json", "");
-        let counts = export_backup(&source, &file).unwrap();
+        let counts = export_backup(&source, &file, &BackupSelection::all()).unwrap();
         assert_eq!(counts, BackupCounts::default());
 
         let target = conn();
@@ -754,12 +827,147 @@ mod tests {
     }
 
     #[test]
+    fn partial_export_writes_only_selected_collections() {
+        // Ticket 87: launch entries and clips ride; everything else is an
+        // empty array in the SAME document — kind tag, version, shape.
+        let source = conn();
+        seed_all(&source);
+
+        let dir = tempfile::tempdir().unwrap().into_path();
+        let file = write_file(&dir, "partial.json", "");
+        let counts = export_backup(
+            &source,
+            &file,
+            &BackupSelection {
+                products: false,
+                presets: false,
+                launch_entries: true,
+                quick_actions: false,
+                clips: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            counts,
+            BackupCounts {
+                launch_entries: 2,
+                clips: 2,
+                ..BackupCounts::default()
+            }
+        );
+
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(on_disk["kind"], BACKUP_KIND);
+        assert_eq!(on_disk["version"], 1);
+        assert_eq!(on_disk["products"].as_array().unwrap().len(), 0);
+        assert_eq!(on_disk["presets"].as_array().unwrap().len(), 0);
+        assert_eq!(on_disk["launch_entries"].as_array().unwrap().len(), 2);
+        assert_eq!(on_disk["quick_actions"].as_array().unwrap().len(), 0);
+        assert_eq!(on_disk["clips"].as_array().unwrap().len(), 2);
+
+        // An ordinary file: inspect and restore run the unchanged flow.
+        assert_eq!(
+            inspect_backup(&file).unwrap(),
+            BackupCounts {
+                launch_entries: 2,
+                clips: 2,
+                ..BackupCounts::default()
+            }
+        );
+        let target = conn();
+        let summary = import_backup(&target, &file).unwrap();
+        assert_eq!(
+            summary.inserted,
+            BackupCounts {
+                launch_entries: 2,
+                clips: 2,
+                ..BackupCounts::default()
+            }
+        );
+        assert_eq!(summary.skipped, BackupCounts::default());
+        assert!(db::list_products(&target, None).unwrap().is_empty());
+        assert!(db::list_presets(&target).unwrap().is_empty());
+        assert_eq!(launch::list_launch_entries(&target).unwrap().len(), 2);
+        assert_eq!(clips::list_clips(&target).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn partial_restore_into_a_populated_database_reports_true_counts() {
+        // The target already holds one entry the partial file carries: the
+        // merge must split inserted/skipped exactly there.
+        let target = conn();
+        launch::create_launch_entry(&target, &app_entry("Spotify")).unwrap();
+
+        let source = conn();
+        seed_all(&source);
+        let dir = tempfile::tempdir().unwrap().into_path();
+        let file = write_file(&dir, "partial.json", "");
+        export_backup(
+            &source,
+            &file,
+            &BackupSelection {
+                products: false,
+                presets: false,
+                launch_entries: true,
+                quick_actions: true,
+                clips: true,
+            },
+        )
+        .unwrap();
+
+        let summary = import_backup(&target, &file).unwrap();
+        assert_eq!(summary.inserted.launch_entries, 1, "only Ports is new");
+        assert_eq!(summary.skipped.launch_entries, 1);
+        assert_eq!(summary.inserted.quick_actions, 1);
+        assert_eq!(summary.skipped.quick_actions, 0);
+        assert_eq!(summary.inserted.clips, 2);
+        assert_eq!(summary.inserted.products, 0);
+        assert_eq!(summary.inserted.presets, 0);
+        assert_eq!(summary.skipped.products, 0);
+        assert_eq!(summary.skipped.presets, 0);
+
+        // No duplicates anywhere; the excluded collections never arrived.
+        assert!(db::list_products(&target, None).unwrap().is_empty());
+        assert!(db::list_presets(&target).unwrap().is_empty());
+        assert_eq!(launch::list_launch_entries(&target).unwrap().len(), 2);
+        assert_eq!(quick_actions::list_quick_actions(&target).unwrap().len(), 1);
+        assert_eq!(clips::list_clips(&target).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn zero_selection_is_refused_before_anything_is_written() {
+        let source = conn();
+        seed_all(&source);
+        let dir = tempfile::tempdir().unwrap().into_path();
+        let file = write_file(&dir, "nothing.json", "");
+        let err = export_backup(
+            &source,
+            &file,
+            &BackupSelection {
+                products: false,
+                presets: false,
+                launch_entries: false,
+                quick_actions: false,
+                clips: false,
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("at least one"), "got: {err}");
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "",
+            "the refusal happens before serialization"
+        );
+    }
+
+    #[test]
     fn invalid_records_fail_before_anything_is_written() {
         let source = conn();
         seed_all(&source);
         let dir = tempfile::tempdir().unwrap().into_path();
         let file = write_file(&dir, "backup.json", "");
-        export_backup(&source, &file).unwrap();
+        export_backup(&source, &file, &BackupSelection::all()).unwrap();
 
         // Corrupt one record past validation: a blank clip text can never
         // serve a copy.

@@ -23,6 +23,8 @@
     installNow,
     updateState,
   } from "$lib/updateState.svelte";
+  import { COLLECTIONS, EXPORT_ORDER } from "$lib/collections";
+  import type { CollectionKey } from "$lib/collections";
 
   const themeOptions: { mode: ThemeMode; label: string }[] = [
     { mode: "system", label: "System" },
@@ -79,6 +81,19 @@
   let backupError = $state("");
   let restoreFile = $state("");
   let restoreCounts: BackupCounts | null = $state(null);
+
+  // Selective export (ticket 87): the collection checklist lives inside the
+  // export dialog, not on the knob row (research 0007). Everything starts
+  // included, so the plain flow still writes the whole-app backup.
+  let exportOpen = $state(false);
+  let include = $state<Record<CollectionKey, boolean>>({
+    launch_entries: true,
+    quick_actions: true,
+    clips: true,
+    products: true,
+    presets: true,
+  });
+  const anyIncluded = $derived(Object.values(include).some(Boolean));
 
   onMount(() => {
     load();
@@ -209,22 +224,29 @@
   }
 
   /** "3 products, 1 preset, 5 launch entries" — the count list behind both
-   *  backup notices and the restore confirmation. */
+   *  backup notices and the restore confirmation. Nouns come from the
+   *  shared collection names so notices never drift from the tabs. */
   function describeCounts(counts: BackupCounts): string {
-    const parts = [
-      counts.products &&
-        `${counts.products} product${counts.products === 1 ? "" : "s"}`,
-      counts.presets && `${counts.presets} preset${counts.presets === 1 ? "" : "s"}`,
-      counts.launch_entries &&
-        `${counts.launch_entries} launch ${counts.launch_entries === 1 ? "entry" : "entries"}`,
-      counts.quick_actions &&
-        `${counts.quick_actions} quick action${counts.quick_actions === 1 ? "" : "s"}`,
-      counts.clips && `${counts.clips} clip${counts.clips === 1 ? "" : "s"}`,
-    ].filter(Boolean);
-    return parts.join(", ");
+    const phrase = (n: number, nouns: { one: string; many: string }) =>
+      n && `${n} ${n === 1 ? nouns.one : nouns.many}`;
+    return [
+      phrase(counts.products, COLLECTIONS.products),
+      phrase(counts.presets, COLLECTIONS.presets),
+      phrase(counts.launch_entries, COLLECTIONS.launch_entries),
+      phrase(counts.quick_actions, COLLECTIONS.quick_actions),
+      phrase(counts.clips, COLLECTIONS.clips),
+    ]
+      .filter(Boolean)
+      .join(", ");
   }
 
-  async function exportViaDialog() {
+  function openExportDialog() {
+    backupStatus = "";
+    backupError = "";
+    exportOpen = true;
+  }
+
+  async function exportSelected() {
     backupStatus = "";
     backupError = "";
     try {
@@ -235,7 +257,7 @@
       });
       if (!path) return;
       backupBusy = true;
-      const counts = await exportBackup(path);
+      const counts = await exportBackup(path, include);
       backupStatus = `Backed up ${describeCounts(counts)} to ${path}`;
     } catch (e) {
       console.error(e);
@@ -546,9 +568,9 @@
         <div class="knob__body">
           <span class="knob__label">Backup</span>
           <p class="knob__hint">
-            Copies your products, presets, launch entries, quick actions, and clips into one JSON
-            file you pick; restoring adds what's missing and keeps what's already here. Run
-            history, logs, settings, dock memory, and install directories never leave this PC.
+            Writes your collections into one JSON file you pick — choose what to include when you
+            export; restoring adds what's missing and keeps what's already here. Run history, logs,
+            settings, dock memory, and install directories never leave this PC.
           </p>
           {#if backupStatus}
             <Notice tone="ok">{backupStatus}</Notice>
@@ -558,10 +580,10 @@
           {/if}
         </div>
         <div class="knob__input">
-          <Button variant="secondary" onclick={exportViaDialog} disabled={backupBusy}>
+          <Button variant="secondary" onclick={openExportDialog} disabled={backupBusy}>
             Export…
           </Button>
-          <Button onclick={restoreViaDialog} disabled={backupBusy}>
+          <Button variant="secondary" onclick={restoreViaDialog} disabled={backupBusy}>
             Restore…
           </Button>
         </div>
@@ -659,6 +681,28 @@
   {:else}
     <p>This file contains no items to restore.</p>
   {/if}
+</ConfirmDialog>
+
+<ConfirmDialog
+  open={exportOpen}
+  title="Export backup"
+  confirmLabel="Export selected…"
+  confirmDisabled={!anyIncluded}
+  onconfirm={() => {
+    exportOpen = false;
+    void exportSelected();
+  }}
+  oncancel={() => (exportOpen = false)}
+>
+  <p>Everything is included by default — untick what should stay out of the file.</p>
+  <div class="export-picker" role="group" aria-label="Collections to include">
+    {#each EXPORT_ORDER as key (key)}
+      <label class="export-picker__item">
+        <input type="checkbox" bind:checked={include[key]} />
+        <span>{COLLECTIONS[key].label}</span>
+      </label>
+    {/each}
+  </div>
 </ConfirmDialog>
 
 <style>
@@ -810,5 +854,25 @@
   .form__actions {
     display: flex;
     justify-content: flex-end;
+  }
+
+  .export-picker {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .export-picker__item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    cursor: pointer;
+  }
+
+  .export-picker__item input[type="checkbox"] {
+    margin: 0;
+    accent-color: var(--accent);
+    width: 14px;
+    height: 14px;
   }
 </style>

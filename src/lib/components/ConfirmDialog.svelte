@@ -11,6 +11,7 @@
     oncancel,
     children,
     danger = false,
+    confirmDisabled = false,
   }: {
     open: boolean;
     title: string;
@@ -19,6 +20,9 @@
     oncancel: () => void;
     children: Snippet;
     danger?: boolean;
+    /** Disables the confirm action while its precondition is unmet —
+     *  e.g. an export dialog with every collection unticked. */
+    confirmDisabled?: boolean;
   } = $props();
 </script>
 
@@ -39,6 +43,7 @@
         class="confirm__danger"
         variant={danger ? "danger" : "primary"}
         onclick={onconfirm}
+        disabled={confirmDisabled}
       >
         {confirmLabel}
       </Button>

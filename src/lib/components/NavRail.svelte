@@ -4,18 +4,23 @@
   import ConfirmDialog from "./ConfirmDialog.svelte";
   import Notice from "./Notice.svelte";
   import { installNow, updateState } from "$lib/updateState.svelte";
+  import { COLLECTIONS } from "$lib/collections";
 
   // Frequency split (research 0004): daily quick surfaces first, setup next,
   // reference last — clusters separated by hairline dividers, no headings.
   const clusters = [
     [
-      { id: "launch", label: "Quick Launch", href: "/" },
-      { id: "quick-actions", label: "Quick Actions", href: "/quick-actions" },
-      { id: "clips", label: "Quick Clips", href: "/clips" },
+      { id: "launch", label: COLLECTIONS.launch_entries.label, href: "/" },
+      {
+        id: "quick-actions",
+        label: COLLECTIONS.quick_actions.label,
+        href: "/quick-actions",
+      },
+      { id: "clips", label: COLLECTIONS.clips.label, href: "/clips" },
     ],
     [
-      { id: "products", label: "Products", href: "/products" },
-      { id: "presets", label: "Presets", href: "/presets" },
+      { id: "products", label: COLLECTIONS.products.label, href: "/products" },
+      { id: "presets", label: COLLECTIONS.presets.label, href: "/presets" },
       { id: "plan", label: "Plan", href: "/plan" },
     ],
     [

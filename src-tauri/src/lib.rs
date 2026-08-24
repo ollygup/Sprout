@@ -200,15 +200,19 @@ fn import_preset(state: State<'_, AppState>, path: String) -> Result<ImportResul
     import_export::import_preset_file(&conn, &path)
 }
 
-/// Writes one whole-app backup (Settings → Backup) to `path`: every content
-/// collection — products, presets, launch entries, quick actions, clips — in
-/// one kind-tagged JSON document. Machine-scoped state (runs history, logs,
+/// Writes one backup (Settings → Backup) to `path`, limited to the selected
+/// collections — unchecked ones are empty arrays in the same kind-tagged
+/// JSON document (ADR-0014). Machine-scoped state (runs history, logs,
 /// settings knobs, dock memory) never travels. Returns the per-collection
 /// counts for the success notice.
 #[tauri::command]
-fn export_backup(state: State<'_, AppState>, path: String) -> Result<BackupCounts, String> {
+fn export_backup(
+    state: State<'_, AppState>,
+    path: String,
+    selection: backup::BackupSelection,
+) -> Result<BackupCounts, String> {
     let conn = lock(&state)?;
-    backup::export_backup(&conn, &path)
+    backup::export_backup(&conn, &path, &selection)
 }
 
 /// Reads a whole-app backup file and reports what a restore would write —

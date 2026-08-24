@@ -34,6 +34,15 @@ jobs:
           if ($exe.Count -ne 1) { throw "expected exactly one setup exe, found $($exe.Count)" }
           npx tauri signer sign "$($exe.FullName)"
           if (-not (Test-Path "$($exe.FullName).sig")) { throw "signature file was not produced" }
+          # tauri signer sign writes its sidecar base64-wrapped (Tauri's own
+          # updater format), but Sprout's shipped verifiers read bare minisign
+          # text (ADR-0012) — unwrap in place so every installed generation
+          # can verify this release. The app side accepts both shapes.
+          $sigPath = "$($exe.FullName).sig"
+          $wrapped = ((Get-Content $sigPath -Raw).Trim()) -replace '\s', ''
+          $minisign = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($wrapped))
+          if (-not $minisign.StartsWith('untrusted comment:')) { throw 'unexpected signature payload after unwrap' }
+          [IO.File]::WriteAllText($sigPath, $minisign, [Text.UTF8Encoding]::new($false))
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |

@@ -484,3 +484,14 @@ export interface BackupImportSummary {
   inserted: BackupCounts;
   skipped: BackupCounts;
 }
+
+/** Which collections a backup export includes (ticket 87): unchecked ones
+ * are written as empty arrays in the same document, so the file restores
+ * through the ordinary flow. */
+export interface BackupSelection {
+  products: boolean;
+  presets: boolean;
+  launch_entries: boolean;
+  quick_actions: boolean;
+  clips: boolean;
+}

@@ -287,6 +287,26 @@ fn spawn_installer_detached(installer: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Decodes a downloaded `.sig` payload into a minisign signature. CI signs
+/// with `tauri signer sign`, which emits the minisign text base64-wrapped on
+/// a single line (Tauri's updater sidecar format), while a bare minisign file
+/// starts with its "untrusted comment:" header — both are accepted so every
+/// shipped verifier generation can read current releases (ADR-0012).
+/// Everything else refuses, fail-closed.
+fn decode_signature(signature_text: &str) -> Result<Signature, ()> {
+    use base64::Engine as _;
+    let trimmed = signature_text.trim();
+    let minisign_text = if trimmed.starts_with("untrusted comment:") {
+        trimmed.to_owned()
+    } else {
+        let packed: String = trimmed.chars().filter(|c| !c.is_whitespace()).collect();
+        let decoded =
+            base64::engine::general_purpose::STANDARD.decode(packed.as_bytes()).map_err(|_| ())?;
+        String::from_utf8(decoded).map_err(|_| ())?
+    };
+    Signature::decode(&minisign_text).map_err(|_| ())
+}
+
 /// Verifies installer bytes against a minisign signature made by CI's
 /// update key (ADR-0012 scheme B). Total and fail-closed: an empty or
 /// unreadable embedded key, an unparsable signature, and any mismatch all
@@ -306,7 +326,7 @@ fn verify_installer_signature(
     let public_key = PublicKey::from_base64(public_key_body).map_err(|_| {
         "the embedded update-signature key is unreadable — refusing to run the installer".to_string()
     })?;
-    let signature = Signature::decode(signature_text)
+    let signature = decode_signature(signature_text)
         .map_err(|_| "the downloaded signature could not be read — refusing to run the installer".to_string())?;
     // Legacy mode off: CI's `tauri signer sign` emits pre-hashed minisign
     // signatures, and anything older must never pass by accident.
@@ -600,5 +620,38 @@ mod tests {
     #[test]
     fn unreadable_signature_text_refuses() {
         assert!(verify_installer_signature(FIXTURE_PUBKEY_A, FIXTURE_PAYLOAD, "not a signature").is_err());
+    }
+
+    /// The real `.sig` asset CI published with v0.4.8, captured verbatim from
+    /// the GitHub release (public data): one base64 line wrapping the
+    /// minisign text — exactly what `tauri signer sign` writes.
+    const REAL_CI_SIG_V048: &str =
+        include_str!("update/fixtures/ci-signature-v048-wrapped.txt");
+
+    #[test]
+    fn the_real_ci_signature_asset_clears_the_decode_stage() {
+        // Over a wrong payload the only acceptable refusal is the mismatch
+        // message — a "could not be read" here means CI's signature format
+        // itself failed to parse.
+        let err = verify_installer_signature(UPDATE_PUBKEY, b"not the installer bytes", REAL_CI_SIG_V048)
+            .expect_err("wrong payload must not verify");
+        assert!(!err.contains("could not be read"), "CI's signature must parse; got: {err}");
+    }
+
+    #[test]
+    fn tauri_wrapped_signatures_verify_end_to_end() {
+        // CI signs with `tauri signer sign`, which base64-wraps the minisign
+        // text (Tauri's updater sidecar format); the verifier must accept
+        // that shape as well as bare minisign files.
+        use base64::Engine as _;
+        let wrapped = base64::engine::general_purpose::STANDARD.encode(FIXTURE_SIG_A);
+        assert!(verify_installer_signature(FIXTURE_PUBKEY_A, FIXTURE_PAYLOAD, &wrapped).is_ok());
+    }
+
+    #[test]
+    fn wrapped_garbage_still_refuses_closed() {
+        use base64::Engine as _;
+        let wrapped = base64::engine::general_purpose::STANDARD.encode(b"not a signature");
+        assert!(verify_installer_signature(FIXTURE_PUBKEY_A, FIXTURE_PAYLOAD, &wrapped).is_err());
     }
 }

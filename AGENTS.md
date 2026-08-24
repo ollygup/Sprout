@@ -11,11 +11,11 @@ In repositories indexed by CodeGraph (a `.codegraph/` directory exists at the re
 
 If there is no `.codegraph/` directory, skip CodeGraph entirely — indexing is the user's decision.
 
-## Design rules
+## UI design rules
 
-- Every UI change must follow the `web-design-guidelines` and `frontend-design` skills and reuse the existing design system: tokens from `src/lib/styles/tokens.css` and components from `src/lib/components/`. No ad-hoc colors, type sizes, radii, or one-off component patterns; if a shared pattern genuinely doesn't fit, capture the deviation in the ticket and get it reviewed before shipping.
-- Before any UI/UX design decision, read the standing research notes under `docs/research/`: `0004-progressive-disclosure-and-clips.md`, `0005-page-chrome-consistency.md`, and `0006-notion-design-patterns.md` (Notion's factual method: visibility-on-surface vs configuration-elsewhere, minimal-until-content defaults, explicit-setup gating). Cite the rule you applied; new evidence goes in a new numbered research note.
-- Reusable UI geometry constants live in `src-tauri/src/constants/window.rs` — never re-declared in another module. Scan that file first before any UI-dimension change.
+- IF you change any UI (component, page, styling): USE the `web-design-guidelines` and `frontend-design` skills and REUSE the existing design system — tokens from `src/lib/styles/tokens.css`, components from `src/lib/components/`. NEVER introduce ad-hoc colors, type sizes, radii, or one-off component patterns. IF no shared pattern genuinely fits: capture the deviation in the ticket and get it reviewed before shipping.
+- IF you make any UI/UX design decision: FIRST read the standing research notes under `docs/research/` — `0004-progressive-disclosure-and-clips.md`, `0005-page-chrome-consistency.md`, and `0006-notion-design-patterns.md` (Notion's factual method: visibility-on-surface vs configuration-elsewhere, minimal-until-content defaults, explicit-setup gating) — and cite the rule you applied. IF you gather new evidence: record it in a NEW numbered research note.
+- IF you change any UI dimension: FIRST scan `src-tauri/src/constants/window.rs` and NEVER re-declare its values in another module (single size source; details in Conventions → Window sizing).
 
 ## Working copy rule (important)
 
@@ -24,14 +24,15 @@ If there is no `.codegraph/` directory, skip CodeGraph entirely — indexing is 
   - **Working copy (develop here):** `C:\Sprout`
 - **Never work directly on the share.** UNC paths break `.cmd`/`.bat` (npm, cargo helpers) — builds fail with "UNC paths are not supported". Always work in `C:\Sprout`.
 - **Never delete or restructure anything on the share.** The share is the fallback if the working copy messes up.
+- **Git is handled externally — never run it here (STRICT).** Git on this
+  project belongs to the user, outside this device: no `git init`, `clone`,
+  `add`, `commit`, `push`, `stash`, or ANY other git command against any
+  path under `C:\Sprout`, ever. A `.git` directory may exist under
+  `C:\Sprout` because it rides along with the share sync — that is fine;
+  treat it as inert data: ignore it, and never create, modify, delete, or
+  act on it. All version-control state lives elsewhere; changes made here
+  are published by syncing (`tools\sync.ps1`), not by committing.
 - **Sync with `tools\sync.ps1`, never raw robocopy.** The share's git working tree is owned by the other device (the only git client); a blind robocopy overwrites whatever it committed and produces merge conflicts. The script snapshots the share's content hashes at session start and refuses to overwrite any file the other device changed mid-session — divergences are reported as `SHARE-NEWER` for explicit resolution:
-
-```powershell
-# session start (refreshes C:\Sprout from the share, then snapshots it)
-tools\sync.ps1 -Down
-# session end (copies only what we changed, guarded by the snapshot)
-tools\sync.ps1 -Up
-```
 
 ```powershell
 # session start (refreshes C:\Sprout from the share, then snapshots it)
@@ -112,11 +113,6 @@ here is deleted from the repo or the share.
 - `src-tauri/src/` — Rust backend (`domain.rs` = domain model, `db.rs` = lazy SQLite (empty on first run — ADR-0008), `engine/` = PlatformEngine strategy seam, `lib.rs` = Tauri commands).
 - `docs/` — CONTEXT.md (glossary), specs/, adr/, research/, release/ (parity gate record + archived legacy log). `tools/` — parity compare, parity preset, sync.ps1 (guarded share sync). `.scratch/sprout-app/issues/` — ticket tracker (mark ACs done as you go).
 
-## Module design
-When extracting, refactoring interfaces, or deciding module boundaries,
-use codebase-design skill vocabulary (module/interface/seam/adapter/depth)
-and apply its deletion test before extracting to shared/.
-
 ## Conventions (Rust + Tauri + Svelte)
 - Constants: domain-split under constants/ (theme, window, app) — not one file.
 - App version: Cargo.toml only, tauri.conf.json omits it (auto-inherits).
@@ -125,8 +121,11 @@ and apply its deletion test before extracting to shared/.
   source — tauri.conf.json declares no windows (ADR-0013 boot-to-tray);
   runtime/docked dimensions Svelte needs come from a Tauri command, not a JS
   constant.
-- shared/: only for modules that hide real complexity or have a genuine
-  second adapter. Thin pass-throughs get inlined.
+- IF you extract code, refactor interfaces, or decide module boundaries:
+  USE codebase-design skill vocabulary (module/interface/seam/adapter/
+  depth) and apply its deletion test. IF you consider `shared/`: put a
+  module there ONLY when it hides real complexity or has a genuine second
+  adapter — thin pass-throughs get inlined.
 
 ## Comments
 - No WHAT comments — if the code needs one to be understood, fix the naming/interface instead.
