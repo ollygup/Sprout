@@ -14,6 +14,7 @@ If there is no `.codegraph/` directory, skip CodeGraph entirely — indexing is 
 ## Design rules
 
 - Every UI change must follow the `web-design-guidelines` and `frontend-design` skills and reuse the existing design system: tokens from `src/lib/styles/tokens.css` and components from `src/lib/components/`. No ad-hoc colors, type sizes, radii, or one-off component patterns; if a shared pattern genuinely doesn't fit, capture the deviation in the ticket and get it reviewed before shipping.
+- Before any UI/UX design decision, read the standing research notes under `docs/research/`: `0004-progressive-disclosure-and-clips.md`, `0005-page-chrome-consistency.md`, and `0006-notion-design-patterns.md` (Notion's factual method: visibility-on-surface vs configuration-elsewhere, minimal-until-content defaults, explicit-setup gating). Cite the rule you applied; new evidence goes in a new numbered research note.
 - Reusable UI geometry constants live in `src-tauri/src/constants/window.rs` — never re-declared in another module. Scan that file first before any UI-dimension change.
 
 ## Working copy rule (important)
@@ -32,6 +33,24 @@ tools\sync.ps1 -Down
 tools\sync.ps1 -Up
 ```
 
+```powershell
+# session start (refreshes C:\Sprout from the share, then snapshots it)
+tools\sync.ps1 -Down
+# session end (copies only what we changed, guarded by the snapshot)
+tools\sync.ps1 -Up
+```
+
+- **Sync triggers are mandatory, not background knowledge.** Run `-Down` as the
+  FIRST action of any working session, before reading or editing anything. Run
+  `-Up` every time a unit of work completes (published tickets/spec/docs, a
+  landed code change) and at session end — do not batch everything into one
+  end-of-day sync. If you join work already in progress and no fresh snapshot
+  exists for this session, sync `-Up` first if a snapshot from earlier the
+  same session exists; otherwise back up local edits before any `-Down`
+  (it overwrites differing local files).
+- PowerShell's execution policy blocks `.ps1` directly (same reason npm is
+  `npm.cmd`). Invoke it as:
+  `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "tools\sync.ps1" -Up`
 - Verify the sync by running `-Up` again — expect `0 copied` when in sync. Never run `-Up` without a snapshot; the script refuses.
 - The snapshot lives in `C:\Sprout\.sync-state.json` (excluded from the sync itself). If you must fall back to raw robocopy, add `/XF .sync-state.json` to the command below — and know that it silently clobbers newer share content:
 

@@ -5,16 +5,24 @@
   import Notice from "./Notice.svelte";
   import { installNow, updateState } from "$lib/updateState.svelte";
 
-  const items = [
-    { id: "products", label: "Products", href: "/" },
-    { id: "presets", label: "Presets", href: "/presets" },
-    { id: "plan", label: "Plan", href: "/plan" },
-    { id: "launch", label: "Quick Launch", href: "/launch" },
-    { id: "quick-actions", label: "Quick Actions", href: "/quick-actions" },
-    { id: "clips", label: "Quick Clips", href: "/clips" },
-    { id: "history", label: "History", href: "/history" },
-    { id: "logs", label: "Logs", href: "/logs" },
-    { id: "settings", label: "Settings", href: "/settings" },
+  // Frequency split (research 0004): daily quick surfaces first, setup next,
+  // reference last — clusters separated by hairline dividers, no headings.
+  const clusters = [
+    [
+      { id: "launch", label: "Quick Launch", href: "/" },
+      { id: "quick-actions", label: "Quick Actions", href: "/quick-actions" },
+      { id: "clips", label: "Quick Clips", href: "/clips" },
+    ],
+    [
+      { id: "products", label: "Products", href: "/products" },
+      { id: "presets", label: "Presets", href: "/presets" },
+      { id: "plan", label: "Plan", href: "/plan" },
+    ],
+    [
+      { id: "history", label: "History", href: "/history" },
+      { id: "logs", label: "Logs", href: "/logs" },
+      { id: "settings", label: "Settings", href: "/settings" },
+    ],
   ];
 
   const current = $derived(page.url.pathname);
@@ -49,17 +57,22 @@
   </div>
 
   <ul class="rail__list">
-    {#each items as item}
-      <li>
-        <a
-          href={item.href}
-          class="rail__item"
-          class:active={current === item.href}
-          aria-current={current === item.href ? "page" : undefined}
-        >
-          <span class="rail__label">{item.label}</span>
-        </a>
-      </li>
+    {#each clusters as cluster, ci}
+      {#if ci > 0}
+        <li class="rail__divider" aria-hidden="true"></li>
+      {/if}
+      {#each cluster as item}
+        <li>
+          <a
+            href={item.href}
+            class="rail__item"
+            class:active={current === item.href}
+            aria-current={current === item.href ? "page" : undefined}
+          >
+            <span class="rail__label">{item.label}</span>
+          </a>
+        </li>
+      {/each}
     {/each}
   </ul>
 
@@ -136,6 +149,12 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
+  }
+
+  .rail__divider {
+    height: 1px;
+    margin: var(--space-2) var(--space-1);
+    background: var(--border);
   }
 
   .rail__item {

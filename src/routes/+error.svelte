@@ -16,7 +16,7 @@
       {page.error?.message ?? "An unexpected error occurred."}
     </p>
     <a class="error__home" href="/">
-      <Icon name="seedling" size={15} /> Back to Products
+      <Icon name="seedling" size={15} /> Back to Quick Launch
     </a>
   </div>
 </main>
