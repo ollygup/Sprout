@@ -11,16 +11,24 @@ import { candidateIcon } from "$lib/api";
 /** Icon data URLs keyed by the entry's target path. */
 export const appIcons = $state<Record<string, string>>({});
 
-const requested = new Set<string>();
+/** Fetches deduplicated only while in flight — the cache itself prevents
+ *  refetching successes, so a failed or empty attempt (shell had no icon,
+ *  one rejected IPC call during the boot burst) retries naturally when the
+ *  row next mounts and becomes visible instead of being poisoned for the
+ *  whole webview session. */
+const inFlight = new Set<string>();
 
 async function fetchIcon(target: string) {
-  if (requested.has(target)) return;
-  requested.add(target);
+  if (appIcons[target] !== undefined || inFlight.has(target)) return;
+  inFlight.add(target);
   try {
     const url = await candidateIcon(target);
     if (url) appIcons[target] = url;
+    else console.warn(`[lazyIcon] no icon extracted for ${target}`);
   } catch (e) {
-    console.error(e);
+    console.warn(`[lazyIcon] icon fetch failed for ${target}:`, e);
+  } finally {
+    inFlight.delete(target);
   }
 }
 

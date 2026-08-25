@@ -8,7 +8,6 @@
     LaunchEntry,
     LaunchReport,
     QuickAction,
-    QuickActionRunState,
   } from "$lib/types";
   import {
     copyClip,
@@ -18,14 +17,18 @@
     listGroups,
     listLaunchEntries,
     listQuickActions,
-    listRunningQuickActions,
     runQuickAction,
     startLaunchEntry,
     startQuickLaunch,
-    stopQuickAction,
     switchQuickLaunchDockEdge,
     toggleQuickLaunchDock,
   } from "$lib/api";
+  import {
+    quickActionRuns,
+    stopActionRun,
+    syncQuickActionRuns,
+  } from "$lib/quickActionRuns.svelte";
+  import QuickActionRunControl from "$lib/components/QuickActionRunControl.svelte";
   import { clipTitle, launchReportSummary } from "$lib/format";
   import { appIcons, lazyIcon } from "$lib/lazyIcon.svelte";
   import { createGroupCollapse } from "$lib/groupCollapse.svelte";
@@ -74,16 +77,6 @@
   const launchCollapse = createGroupCollapse();
   const actionCollapse = createGroupCollapse();
   const clipCollapse = createGroupCollapse();
-  // Ticket 62: the ids of the actions whose tracked process is alive —
-  // seeded once from the registry on load, then kept current by the
-  // `quick-action-run-state-changed` events. No polling.
-  let runningActions = $state<Set<number>>(new Set());
-  // Ticket 92: the ids with a Stop in flight — set on click, cleared only by
-  // the process's exit event (research 0004 rule 5: silence reads as
-  // breakage, so the control says "Stopping…" until the backend confirms).
-  // A hung stop command cannot wedge it: the backend force-kills at its
-  // ten-second watchdog and the same exit event follows.
-  let stoppingActions = $state<Set<number>>(new Set());
   let loading = $state(true);
   let launching = $state(false);
   // Ticket 93: the entries with a single-entry start in flight — set on
@@ -138,23 +131,6 @@
     listen("quick-launch-changed", () => {
       load();
       refreshDock();
-    }).then((fn) => unlisteners.push(fn));
-    // Ticket 62: the backend emits one event per tracked action on start and
-    // again when its process exits — these drive the whole control state
-    // machine (Run → Running → Stopping → Run, ticket 92); nothing else
-    // mutates it. An exit event ends Stopping even when the watchdog had to
-    // force-kill, since both paths end in this same event.
-    listen<QuickActionRunState>("quick-action-run-state-changed", (e) => {
-      const next = new Set(runningActions);
-      const nextStopping = new Set(stoppingActions);
-      if (e.payload.running) {
-        next.add(e.payload.id);
-      } else {
-        next.delete(e.payload.id);
-      }
-      nextStopping.delete(e.payload.id);
-      runningActions = next;
-      stoppingActions = nextStopping;
     }).then((fn) => unlisteners.push(fn));
     // Ticket 61: a background dock failure — a shell-initiated re-assert
     // (ABN_POSCHANGED) or the drift watchdog — surfaces in the window's error
@@ -229,21 +205,22 @@
   async function load() {
     loading = true;
     try {
-      const [entriesResult, actionsResult, clipsResult, running, settings, lgs, ags, cgs] =
+      const [entriesResult, actionsResult, clipsResult, settings, lgs, ags, cgs] =
         await Promise.all([
           withTimeout(listLaunchEntries(), "The launch list"),
           withTimeout(listQuickActions(), "The quick actions list"),
           withTimeout(listClips(), "The clips list"),
-          withTimeout(listRunningQuickActions(), "The running-actions check"),
           withTimeout(getSettings(), "The settings"),
           withTimeout(listGroups("launch"), "The launch groups list"),
           withTimeout(listGroups("action"), "The action groups list"),
           withTimeout(listGroups("clip"), "The clip groups list"),
+          // Ticket 98: the shared run-state store — the same one the Quick
+          // Actions page reads — seeds itself from the registry here.
+          withTimeout(syncQuickActionRuns(), "The running-actions check"),
         ]);
       entries = entriesResult;
       actions = actionsResult;
       clips = clipsResult;
-      runningActions = new Set(running);
       // The same settings read carries the theme and all three Groups
       // features — every one live-updates through `quick-launch-changed`.
       launchGroupsOn = settings.launch_groups === "on";
@@ -409,23 +386,15 @@
     }
   }
 
-  /** Stop (tickets 62 & 92): runs the action's stop command, or kills the
-   *  process tree. The control flips to a disabled "Stopping…" spinner
-   *  immediately and recovers only through the run-state events — the exit,
-   *  or a Stop refusal (the registry already dropped it, say). */
+  /** Stop (tickets 62 & 92) via the shared store's lifecycle (ticket 98):
+   *  Stopping is set and cleared there; only a refusal surfaces here. */
   async function stop(action: QuickAction) {
     error = "";
-    const next = new Set(stoppingActions);
-    next.add(action.id);
-    stoppingActions = next;
     try {
-      await stopQuickAction(action.id);
+      await stopActionRun(action.id);
     } catch (e) {
       console.error(e);
       error = String(e);
-      const recovered = new Set(stoppingActions);
-      recovered.delete(action.id);
-      stoppingActions = recovered;
     }
   }
 
@@ -575,44 +544,17 @@
         <span class="qlw__tip-name">{action.name}</span>
         <span class="qlw__tip-body">{action.command}</span>
       </span>
-      {#if stoppingActions.has(action.id)}
-        <!-- Ticket 92: Stop in flight — disabled and muted until the exit
-             event lands; the spinner is the honest "something is happening"
-             (research 0004 rule 5). -->
-        <Button
-          variant="secondary"
-          disabled
-          aria-label={`Stopping ${action.name}`}
-          aria-describedby={`qlw-tip-action-${action.id}`}
-        >
-          <span class="qlw__stopping-spin" aria-hidden="true"></span>
-          Stopping…
-        </Button>
-      {:else if action.stoppable && runningActions.has(action.id)}
-        <!-- Ticket 92: the destructive verb gets the danger family, never
-             the accent — one primary verb per row (research 0005 rule 2). -->
-        <Button
-          variant="danger"
-          onclick={() => stop(action)}
-          aria-label={`Stop ${action.name}`}
-          aria-describedby={`qlw-tip-action-${action.id}`}
-        >
-          <Icon name="stop" size={13} />
-          Stop
-        </Button>
-      {:else}
-        <!-- Ticket 92: Run is the row's primary verb — accent-filled
-             (research 0005 rule 2). -->
-        <Button
-          variant="primary"
-          onclick={() => run(action)}
-          aria-label={`Run ${action.name}`}
-          aria-describedby={`qlw-tip-action-${action.id}`}
-        >
-          <Icon name="play" size={13} />
-          Run
-        </Button>
-      {/if}
+      <!-- Ticket 98: the three-state control is shared with the main app's
+           Quick Actions page — one markup, one spinner, one vocabulary. -->
+      <QuickActionRunControl
+        name={action.name}
+        stoppable={action.stoppable}
+        running={quickActionRuns.running.has(action.id)}
+        stopping={quickActionRuns.stopping.has(action.id)}
+        onrun={() => run(action)}
+        onstop={() => stop(action)}
+        describedby={`qlw-tip-action-${action.id}`}
+      />
     </li>
   {/snippet}
 
@@ -1049,32 +991,6 @@
     font-size: var(--text-sm);
     font-weight: 600;
     color: var(--text);
-  }
-
-  /* Ticket 92: the Stopping spinner — token families only (border track,
-     muted head); the button's own disabled treatment mutes the whole thing.
-     Reduced motion freezes it into a plain ring beside the "Stopping…" text
-     instead of spinning. */
-  .qlw__stopping-spin {
-    flex-shrink: 0;
-    width: 11px;
-    height: 11px;
-    border-radius: 50%;
-    border: 2px solid var(--border-strong);
-    border-top-color: var(--text-muted);
-    animation: qlw-stopping-spin 0.8s linear infinite;
-  }
-
-  @keyframes qlw-stopping-spin {
-    to {
-      transform: rotate(360deg);
-    }
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .qlw__stopping-spin {
-      animation: none;
-    }
   }
 
   /* Ticket 79: the read-only Quick Clips rows — whole-row click-to-copy,

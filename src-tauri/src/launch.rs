@@ -423,10 +423,16 @@ struct PendingMove {
 }
 
 /// Runs the whole Quick Launch list through the capped, queued pipeline
-/// (ticket 42): at most `cap` app entries in flight at once, the rest queue;
-/// an entry frees its slot when its main window appears; command entries and
-/// windowless apps free theirs at spawn; a failure never aborts the rest.
-/// The 15 s window timeout counts as started, so the queue always drains.
+/// (tickets 42 & 99): at most `cap` entries are in flight at once, the rest
+/// queue. Only an entry whose window must MOVE holds its slot — a
+/// desktop-assigned one frees it when its new window appears (that is the
+/// window that gets moved); every other entry — commands and unassigned
+/// apps alike — frees at spawn, so a plain run ends the moment the last
+/// spawn lands instead of idling out a window wait nothing consumes (the
+/// stall that used to hold `launch-run-done` — and with it every start
+/// affordance behind the single-flight guard — for up to 15 s per app).
+/// A failure never aborts the rest. The 15 s window timeout counts as
+/// started, so the queue always drains.
 /// The skip rule (ticket 48) is per-window-per-desktop: an app entry skips
 /// only when a window of its image already sits on the target desktop —
 /// the assigned one, or the current desktop when unassigned — and the reason
@@ -523,10 +529,22 @@ fn run_launch_queue_until(
         while in_flight.len() >= cap {
             free_slot(engine, &mut report, &mut in_flight, &mut pending_moves, window_timeout);
         }
+        // Ticket 99: only an entry whose window still has to MOVE holds a
+        // slot past spawn — one with a live desktop assignment. The wait
+        // exists to find that window (ticket 48); nothing user-visible
+        // consumes any other entry's confirmation, so holding the run open
+        // for it only delayed `launch-run-done` and wedged every start
+        // affordance behind the single-flight guard.
+        let assigned_and_live = entry
+            .entry
+            .desktop_id
+            .as_ref()
+            .map(|guid| engine.desktops().iter().any(|desktop| &desktop.id == guid));
         // Ticket 48: the visible-window snapshot is taken right before the
         // launch — the new-window resolution prefers windows that appeared
-        // after it, never one the user already has open.
-        let before = if entry.entry.kind == LaunchEntryKind::App {
+        // after it, never one the user already has open. Only the entries
+        // whose window gets waited on need it.
+        let before = if assigned_and_live == Some(true) {
             engine
                 .app_windows(&entry.entry.target)
                 .into_iter()
@@ -538,33 +556,27 @@ fn run_launch_queue_until(
         match engine.spawn(&entry.entry) {
             Ok(spawned) => {
                 report.started.push(entry.entry.name.clone());
-                if let Some(guid) = &entry.entry.desktop_id {
-                    // The fallback (ticket 44): a desktop that no longer
-                    // exists leaves the window on the current desktop — the
-                    // launch itself is untouched — and the summary says so.
-                    if engine.desktops().iter().any(|desktop| &desktop.id == guid) {
+                match assigned_and_live {
+                    Some(true) => {
                         pending_moves.insert(
                             spawned.clone(),
                             PendingMove {
-                                guid: guid.clone(),
+                                guid: entry.entry.desktop_id.clone().unwrap(),
                                 name: entry.entry.name.clone(),
                             },
                         );
-                    } else {
+                        in_flight.push((spawned, before, Instant::now()));
+                    }
+                    // The fallback (ticket 44): a desktop that no longer
+                    // exists leaves the window on the current desktop — the
+                    // launch itself is untouched — and the summary says so.
+                    Some(false) => {
                         report.notes.push(format!(
                             "{} opened on the current desktop — its desktop no longer exists",
                             entry.entry.name
                         ));
                     }
-                }
-                // Entries that must land on a desktop hold their slot until
-                // the window appears (the window is what gets moved);
-                // command entries without an assignment free theirs at
-                // spawn.
-                if entry.entry.kind == LaunchEntryKind::App
-                    || entry.entry.desktop_id.is_some()
-                {
-                    in_flight.push((spawned, before, Instant::now()));
+                    None => {}
                 }
             }
             Err(_) => report.failed.push(entry.entry.name.clone()),
@@ -1388,18 +1400,23 @@ mod tests {
 
     #[test]
     fn cap_is_honored_and_the_queue_drains() {
+        // Desktop-assigned entries hold their slots until their windows
+        // appear — the one case that exercises the cap (ticket 42); since
+        // ticket 99, unassigned entries free at spawn and cannot pace it.
+        let guid = "550fe0a1-3d41-4e5f-9a2b-c8d0e1f2a3b4";
         let engine = FakeLauncher::new()
+            .desktops(&[guid])
             .window_after(r"C:\Apps\A.exe", Duration::from_millis(10))
             .window_after(r"C:\Apps\B.exe", Duration::from_millis(10))
             .window_after(r"C:\Apps\C.exe", Duration::from_millis(10))
             .window_after(r"C:\Apps\D.exe", Duration::from_millis(10))
             .window_after(r"C:\Apps\E.exe", Duration::from_millis(10));
         let entries = vec![
-            app_entry("A", 1),
-            app_entry("B", 2),
-            app_entry("C", 3),
-            app_entry("D", 4),
-            app_entry("E", 5),
+            desktop_app_entry("A", 1, guid),
+            desktop_app_entry("B", 2, guid),
+            desktop_app_entry("C", 3, guid),
+            desktop_app_entry("D", 4, guid),
+            desktop_app_entry("E", 5, guid),
         ];
         let report = run_launch_queue_until(&engine, &entries, 2, SHORT_WINDOW, true);
         assert_eq!(report.started, vec!["A", "B", "C", "D", "E"]);
@@ -1427,17 +1444,43 @@ mod tests {
     }
 
     #[test]
-    fn window_timeout_counts_as_started_and_the_queue_never_stalls() {
+    fn unassigned_app_entries_free_their_slot_at_spawn() {
+        // Ticket 99: an app entry without a live desktop assignment frees
+        // its slot at spawn — nothing consumes its window confirmation, so
+        // holding the run open for it only stalled `launch-run-done` (and
+        // with it every start button behind the single-flight guard) for up
+        // to 15 s per app. Even a windowless or slow-windowing app finishes
+        // instantly now.
         let engine = FakeLauncher::new()
             .windowless(r"C:\Apps\A.exe")
-            .windowless(r"C:\Apps\B.exe")
-            .windowless(r"C:\Apps\C.exe");
-        let entries = vec![app_entry("A", 1), app_entry("B", 2), app_entry("C", 3)];
+            .window_after(r"C:\Apps\B.exe", Duration::from_millis(50));
+        let entries = vec![app_entry("A", 1), app_entry("B", 2)];
         let report = run_launch_queue_until(&engine, &entries, 2, SHORT_WINDOW, true);
-        // Windowless apps still count as started — a timeout is not a
-        // failure and must not stall the queue behind them.
-        assert_eq!(report.started, vec!["A", "B", "C"]);
+        assert_eq!(report.started, vec!["A", "B"]);
         assert!(report.failed.is_empty());
+        assert_eq!(engine.frees(), 0, "no slot was ever held");
+    }
+
+    #[test]
+    fn a_dead_desktop_assignment_frees_its_slot_at_spawn_too() {
+        // Assigned but the desktop no longer exists: the fallback note
+        // fires (ticket 44), and since ticket 99 there is no window to wait
+        // for either — the run ends at spawn instead of idling out the
+        // timeout.
+        let engine = FakeLauncher::new(); // no desktops at all
+        let entries = vec![desktop_app_entry(
+            "A",
+            1,
+            "550fe0a1-3d41-4e5f-9a2b-c8d0e1f2a3b4",
+        )];
+        let report = run_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW, true);
+        assert_eq!(report.started, vec!["A"]);
+        assert!(
+            report.notes[0].contains("no longer exists"),
+            "got: {:?}",
+            report.notes
+        );
+        assert_eq!(engine.frees(), 0, "nothing to wait on");
     }
 
     #[test]
@@ -1454,8 +1497,9 @@ mod tests {
         );
         assert!(report.failed.is_empty());
         assert_eq!(engine.spawned_targets(), vec!["B", "C"]);
-        // The skipped entry never held the single slot: B started directly.
-        assert_eq!(engine.max_concurrency(), 1);
+        // Nothing holds a slot here: the skipped entry spawned nothing, and
+        // the unassigned launches freed theirs at spawn (ticket 99).
+        assert_eq!(engine.frees(), 0);
         // The reason rides into the summary text (notification + page
         // event), so the no-op is never silent.
         assert!(launch_summary_body(&report).contains("A — already open on this desktop"));
@@ -1851,7 +1895,9 @@ mod tests {
         assert!(report.skipped.is_empty());
         assert!(report.notes.is_empty());
         assert!(engine.moved().is_empty());
-        assert!(engine.frees() > 0, "the app entry held and freed its slot");
+        // Dormant, the entry is just an unassigned app: it frees its slot
+        // at spawn (ticket 99) — no window wait, no move.
+        assert_eq!(engine.frees(), 0);
     }
 
     #[test]

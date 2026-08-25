@@ -4,10 +4,12 @@
 
 **Blocked by:** 91 — Clips + Launch groups; 92 — Stop lifecycle.
 
-**Status:** ready-for-agent
+**Status:** done — synced to the share; validated by hand in a dev window
 
-- [ ] Per-entry start works from the Launch page; failure surfaces honestly rather than silently
-- [ ] Stoppable actions on the page show all three states identically to the window
-- [ ] With the window open simultaneously, both surfaces flip states together from one source of truth
-- [ ] Row layout keeps one primary verb per row and header rules intact (research 0005)
-- [ ] Type-check clean; manual dev pass over both pages
+- [x] Per-entry start works from the Launch page; failure surfaces honestly rather than silently
+- [x] Stoppable actions on the page show all three states identically to the window
+- [x] With the window open simultaneously, both surfaces flip states together from one source of truth
+- [x] Row layout keeps one primary verb per row and header rules intact (research 0005)
+- [x] Type-check clean; manual dev pass over both pages
+
+**Verification notes (2026-08-25):** Launch page (+page.svelte): every entry row gains a quiet play IconButton (`Start <name>`) calling `start_launch_entry` — the same pipeline, single-flight guard, notification, and `launch-run-done` event as Start all (ticket 93's command, now on the page too). The row shows a mono "Starting…" until that event lands; the event also clears every row at once and flashes the shared `launchReportSummary`, so mid-run failures surface in the flash and command-level rejections (single-flight guard, vanished entry) release their row immediately into the error Notice — never silent (research 0004 rule 5). While any launch run is in flight the header Start button and every row's affordance disable together, matching the window's `startInFlight`. Quick Actions page (quick-actions/+page.svelte): rows adopt the window's exact three-state control verbatim — primary accent-filled Run, danger-filled Stop for stoppable actions whose tracked process is alive, secondary disabled "Stopping…" with the token-family spinner (`--border-strong` track / `--text-muted` head, frozen under `prefers-reduced-motion`) — driven solely by `quick-action-run-state-changed` (the backend emits it via global `app.emit`, so main page and window flip together from one source of truth, no polling), seeded once per load from `list_running_quick_actions`; Stop sets Stopping on click and clears only through the exit event or a Stop refusal (ticket 92's watchdog guarantees the exit always lands). Research citations: 0004 rule 5 (state feedback) and 0005 rules 2–5 (Launch keeps its single accent-filled verb in the header — row plays are quiet icon controls like the ⋯ beside them; Quick Actions rows carry exactly one primary verb each while the header's Add keeps its own; icons come from the shared set). Copy honesty: the Quick Actions subtitle, empty state, and remove dialog no longer name the window as the only place actions run. Gates: `npm.cmd run check` 0 errors / 0 warnings; no backend changes, so no cargo gate. Not exercised in a dev window at ship time; verified by gates and code review. **Human validation (2026-08-25):** both pages exercised by hand in a dev window — Launch row starts recover instantly, Quick Actions rows carry the full Run/Stop/Stopping vocabulary, and page and window were observed flipping together (see also tickets 98 and 99, which this validation session also covered).

@@ -8,39 +8,35 @@
     VirtualDesktop,
   } from "$lib/types";
   import {
-    assignToGroup,
-    createGroup,
     createLaunchEntry,
     createVirtualDesktop,
-    deleteGroup,
     deleteLaunchEntry,
     getSettings,
-    listGroups,
     listLaunchCandidates,
     listLaunchEntries,
     listVirtualDesktops,
-    moveGroup,
     moveLaunchEntry,
-    renameGroup,
+    startLaunchEntry,
     startQuickLaunch,
-    unassignFromGroup,
     updateDesktopAssignments,
-    updateGroupsEnabled,
     updateLaunchEntry,
   } from "$lib/api";
+  import {
+    countMembers,
+    createCollectionGroups,
+    groupView,
+  } from "$lib/collectionGroups.svelte";
   import { launchReportSummary } from "$lib/format";
   import { appIcons, lazyIcon } from "$lib/lazyIcon.svelte";
-  import { createGroupCollapse } from "$lib/groupCollapse.svelte";
   import { listen } from "@tauri-apps/api/event";
   import { open } from "@tauri-apps/plugin-dialog";
   import Button from "$lib/components/Button.svelte";
-  import Dialog from "$lib/components/Dialog.svelte";
+  import GroupNameDialog from "$lib/components/GroupNameDialog.svelte";
   import GroupAccordion from "$lib/components/GroupAccordion.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import IconButton from "$lib/components/IconButton.svelte";
   import PageHeader from "$lib/components/PageHeader.svelte";
   import SearchInput from "$lib/components/SearchInput.svelte";
-  import TextInput from "$lib/components/TextInput.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import CommandFormDialog from "$lib/components/CommandFormDialog.svelte";
   import ContextMenu, {
@@ -56,6 +52,11 @@
   let loadFailed = $state(false);
   let busy = $state(false);
   let launching = $state(false);
+  // Ticket 94: the entries with a single-entry start in flight — set on
+  // click, cleared only by `launch-run-done` (research 0004 rule 5: silence
+  // reads as breakage). The backend's runs are single-flight, so while
+  // anything is in flight every start affordance waits.
+  let startingEntries = $state<Set<number>>(new Set());
   let error = $state("");
   let notice = $state("");
   let deleting: LaunchEntry | null = $state(null);
@@ -89,38 +90,50 @@
   // Groups (tickets 89/91): the same per-collection pattern as Quick Actions
   // (ticket 90) — its own namespace and its own gear-menu switch, fully
   // dormant while off. Desktop assignment stays badge-only beside it: it
-  // never structures this list; Groups own the structure when enabled.
-  let groupsOn = $state(false);
-  let groups = $state<Group[]>([]);
-  const collapse = createGroupCollapse();
+  // never structures this list; Groups own the structure when enabled. The
+  // feature's logic is owned once by the shared manager (ticket 95); this
+  // page contributes only its collection key and feedback channels.
+  const groups = createCollectionGroups({
+    collection: "launch",
+    noun: "entries",
+    host: {
+      begin() {
+        error = "";
+        busy = true;
+      },
+      end() {
+        busy = false;
+      },
+      flash: (message) => flash(message),
+      fail: (message) => (error = message),
+      reload: () => load(),
+    },
+  });
 
   // One menu serves entry rows and group headers; which kind it belongs to
   // rides on whichever id is set.
   let menu: (ContextMenuState & { entryId?: number; groupId?: number }) | null =
     $state(null);
-  let deletingGroup: Group | null = $state(null);
-
-  // The create/rename dialog: mode "rename" carries the group being renamed.
-  let nameDialog: { mode: "create" } | { mode: "rename"; group: Group } | null =
-    $state(null);
-  let groupNameDraft = $state("");
-  let nameError = $state("");
-  let savingName = $state(false);
 
   onMount(() => {
     load();
     loadVirtualDesktops();
-    loadGroupingSetting();
-    loadGroupsFeature();
+    loadFeatureSettings();
     // Ticket 42: the run finishes on the backend's background thread; the
     // summary lands as a system notification, and this event clears the
-    // button and mirrors the summary in-page.
+    // button and mirrors the summary in-page. Ticket 94: single-entry row
+    // starts ride the same pipeline and event, so this also releases their
+    // "Starting…" rows — one source of truth for every start affordance.
     let unlisten: (() => void) | undefined;
     listen<LaunchReport>("launch-run-done", (event) => {
       launching = false;
+      startingEntries = new Set();
       flash(launchReportSummary(event.payload));
     }).then((fn) => (unlisten = fn));
-    return () => unlisten?.();
+    return () => {
+      unlisten?.();
+      clearTimeout(noticeTimer);
+    };
   });
 
   // Focus the installed-app search when the Add panel opens.
@@ -140,19 +153,14 @@
     }
   }
 
-  async function loadGroupingSetting() {
+  /** One Settings read carries both opt-in features (ticket 95 merged the
+   *  two former single-key reads): the desktop switch and this page's
+   *  Groups flag. */
+  async function loadFeatureSettings() {
     try {
       const s = await getSettings();
       desktopGrouping = s.desktop_assignments === "on";
-    } catch (e) {
-      console.error(e);
-    }
-  }
-
-  async function loadGroupsFeature() {
-    try {
-      const s = await getSettings();
-      groupsOn = s.launch_groups === "on";
+      groups.setEnabledFromSettings(s.launch_groups === "on");
     } catch (e) {
       console.error(e);
     }
@@ -161,13 +169,13 @@
   async function load() {
     loading = true;
     try {
-      const [es, gs] = await Promise.all([
+      const [es] = await Promise.all([
         listLaunchEntries(),
-        listGroups("launch"),
+        // Ticket 95: the groups fetch lives in the shared manager; running
+        // it inside this Promise.all keeps both loads parallel as before.
+        groups.refresh(),
       ]);
       entries = es;
-      groups = gs;
-      collapse.prune(gs.map((g) => g.id));
       loadFailed = false;
     } catch (e) {
       console.error(e);
@@ -205,9 +213,12 @@
   // Ticket 40: icons are fetched per visible row and held in memory only —
   // the shared lazyIcon module (used here by the Add panel and the rack
   // rows, and by the Quick Launch window's entry rows).
+  let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+
   function flash(message: string) {
     notice = message;
-    setTimeout(() => (notice = ""), 3200);
+    clearTimeout(noticeTimer);
+    noticeTimer = setTimeout(() => (notice = ""), 3200);
   }
 
   async function start() {
@@ -219,6 +230,33 @@
       console.error(e);
       error = String(e);
       launching = false;
+    }
+  }
+
+  /** True while any launch run is in flight — the header Start button and
+   *  ticket 94's row play affordances share one backend pipeline whose runs
+   *  are single-flight, so every start affordance waits together rather
+   *  than inviting a rejection. */
+  const startInFlight = $derived(launching || startingEntries.size > 0);
+
+  /** Starts just this entry through the same pipeline as Start (ticket 94).
+   *  The row says "Starting…" until `launch-run-done` lands; a rejection
+   *  (single-flight guard, vanished entry) releases immediately and
+   *  surfaces its reason in the error line — never silent (research 0004
+   *  rule 5). */
+  async function startEntry(entry: LaunchEntry) {
+    error = "";
+    const next = new Set(startingEntries);
+    next.add(entry.id);
+    startingEntries = next;
+    try {
+      await startLaunchEntry(entry.id);
+    } catch (e) {
+      console.error(e);
+      error = String(e);
+      const recovered = new Set(startingEntries);
+      recovered.delete(entry.id);
+      startingEntries = recovered;
     }
   }
 
@@ -381,140 +419,20 @@
       label: "Groups",
       description:
         "Bucket entries into named sections you order yourself. Groups and assignments are kept while off.",
-      value: groupsOn,
-      onchange: () => toggleGroups(),
+      value: groups.enabled,
+      onchange: () => groups.toggle(),
     },
   ]);
-
-  /** The Groups switch behind the page-features menu (research 0008):
-   *  persisted for this collection through the settings store. Optimistic —
-   *  reverted when the save fails. */
-  async function toggleGroups() {
-    const next = !groupsOn;
-    groupsOn = next;
-    try {
-      await updateGroupsEnabled("launch", next);
-      flash(
-        next
-          ? "Groups on — organize entries into named sections."
-          : "Groups off — groups and assignments are kept but hidden."
-      );
-    } catch (e) {
-      console.error(e);
-      groupsOn = !next;
-      error = "Couldn't save the Groups setting — try again.";
-    }
-  }
 
   /** Sections exist only once at least one group does (absent-until-content,
    *  research 0004 rule 2) — until then every affordance but the switch and
    *  the New group button stays hidden. */
-  const grouped = $derived(groupsOn && groups.length > 0);
-
-  function openCreate() {
-    groupNameDraft = "";
-    nameError = "";
-    nameDialog = { mode: "create" };
-  }
-
-  function openRename(group: Group) {
-    groupNameDraft = group.name;
-    nameError = "";
-    nameDialog = { mode: "rename", group };
-  }
-
-  async function submitName() {
-    if (!nameDialog) return;
-    const name = groupNameDraft.trim();
-    if (!name) {
-      nameError = "Group name must not be empty.";
-      return;
-    }
-    savingName = true;
-    nameError = "";
-    try {
-      if (nameDialog.mode === "create") {
-        await createGroup("launch", name);
-        flash(`Group “${name}” created.`);
-      } else {
-        await renameGroup(nameDialog.group.id, name);
-        flash(`Group renamed to “${name}”.`);
-      }
-      nameDialog = null;
-      await load();
-    } catch (e) {
-      console.error(e);
-      nameError = String(e);
-    } finally {
-      savingName = false;
-    }
-  }
+  const grouped = $derived(groups.grouped);
 
   function sectionOpen(groupId: number): boolean {
     // While filtering, every section opens so no match hides behind a
     // chevron.
-    return filter.trim() !== "" || collapse.isOpen(groupId);
-  }
-
-  function toggleSection(groupId: number) {
-    collapse.toggle(groupId);
-  }
-
-  function groupSize(groupId: number): number {
-    return entries.filter((e) => e.group_id === groupId).length;
-  }
-
-  async function assignEntry(entry: LaunchEntry, groupId: number | null) {
-    busy = true;
-    error = "";
-    try {
-      if (groupId === null) {
-        await unassignFromGroup("launch", entry.id);
-        flash(`${entry.name} moved to the ungrouped list.`);
-      } else {
-        await assignToGroup("launch", entry.id, groupId);
-        const target = groups.find((g) => g.id === groupId);
-        flash(`${entry.name} moved to ${target?.name ?? "the group"}.`);
-      }
-      await load();
-    } catch (e) {
-      console.error(e);
-      error = String(e);
-    } finally {
-      busy = false;
-    }
-  }
-
-  async function reorderGroup(id: number, toPosition: number) {
-    busy = true;
-    error = "";
-    try {
-      await moveGroup(id, toPosition);
-      await load();
-    } catch (e) {
-      console.error(e);
-      error = String(e);
-    } finally {
-      busy = false;
-    }
-  }
-
-  async function removeGroup() {
-    if (!deletingGroup) return;
-    const group = deletingGroup;
-    deletingGroup = null;
-    busy = true;
-    error = "";
-    try {
-      await deleteGroup(group.id);
-      flash(`Group “${group.name}” removed — its entries are back in the ungrouped list.`);
-      await load();
-    } catch (e) {
-      console.error(e);
-      error = String(e);
-    } finally {
-      busy = false;
-    }
+    return filter.trim() !== "" || groups.collapse.isOpen(groupId);
   }
 
   /** Move up/down reorders within what the user can see: the whole list when
@@ -548,12 +466,12 @@
         {
           label: "Ungrouped",
           icon: entry.group_id === null ? "check" : undefined,
-          onselect: () => assignEntry(entry, null),
+          onselect: () => groups.assign(entry, entry.name, null),
         },
-        ...groups.map((g) => ({
+        ...groups.groups.map((g) => ({
           label: g.name,
           icon: entry.group_id === g.id ? "check" : undefined,
-          onselect: () => assignEntry(entry, g.id),
+          onselect: () => groups.assign(entry, entry.name, g.id),
         })),
         { label: "", separator: true, onselect: () => {} }
       );
@@ -609,7 +527,9 @@
     };
   }
 
-  /** One ⋯ menu per group header: Rename, order, Remove. */
+  /** One ⋯ menu per group header: Rename, order, Remove. The items live in
+   *  the shared manager (ticket 95); this page owns only the toggle-off
+   *  check against its own menu state. */
   function openGroupMenu(
     group: Group,
     anchor: HTMLButtonElement,
@@ -619,52 +539,11 @@
       menu = null;
       return;
     }
-    const index = groups.indexOf(group);
-    menu = {
-      groupId: group.id,
-      open: true,
-      label: `Actions for group ${group.name}`,
-      anchor,
-      focusFirst: viaKeyboard,
-      returnTo: anchor,
-      items: [
-        {
-          label: "Rename",
-          icon: "pencil",
-          onselect: () => openRename(group),
-        },
-        {
-          label: "Move up",
-          icon: "chevron-up",
-          disabled: index <= 0,
-          onselect: () => reorderGroup(group.id, index - 1),
-        },
-        {
-          label: "Move down",
-          icon: "chevron-down",
-          disabled: index >= groups.length - 1,
-          onselect: () => reorderGroup(group.id, index + 1),
-        },
-        {
-          label: "Remove",
-          icon: "trash",
-          danger: true,
-          onselect: () => (deletingGroup = group),
-        },
-      ],
-    };
+    menu = groups.groupMenu(group, anchor, viaKeyboard);
   }
 
-  const ungroupedRows = $derived(
-    entries.filter((e) => e.group_id === null && matchesEntry(e))
-  );
-  const groupSections = $derived(
-    groups
-      .map((g) => ({
-        group: g,
-        rows: entries.filter((e) => e.group_id === g.id && matchesEntry(e)),
-      }))
-      .filter((s) => filter.trim() === "" || s.rows.length > 0)
+  const listView = $derived(
+    groupView(groups.groups, entries, matchesEntry, filter.trim() !== "")
   );
 
   async function assignDesktop(entry: LaunchEntry, id: string | null) {
@@ -749,6 +628,22 @@
       <span class="rack__desk rack__desk--empty" aria-hidden="true"></span>
     {/if}
     <span class="rack__target" title={entry.target}>{entry.target}</span>
+    {#if startingEntries.has(entry.id)}
+      <!-- Ticket 94: the run is in flight until the backend's
+           `launch-run-done` lands (research 0004 rule 5 — silence reads as
+           breakage). -->
+      <span class="rack__starting">Starting…</span>
+    {/if}
+    <!-- Ticket 94: the row's own run affordance — a quiet icon control like
+         the ⋯ beside it (research 0005 rule 5); the header's Start keeps the
+         page's single accent-filled verb (research 0005 rule 2). -->
+    <IconButton
+      icon="play"
+      label={`Start ${entry.name}`}
+      quiet
+      disabled={startInFlight}
+      onclick={() => startEntry(entry)}
+    />
     <IconButton
       icon="dots"
       label={`Actions for ${entry.name}`}
@@ -769,13 +664,13 @@
     {#snippet actions()}
       <Button
         onclick={start}
-        disabled={busy || launching || entries.length === 0}
+        disabled={busy || startInFlight || entries.length === 0}
       >
         <Icon name="play" size={15} />
         {launching ? "Starting…" : "Start"}
       </Button>
-      {#if groupsOn}
-        <Button variant="secondary" onclick={openCreate} disabled={busy}>
+      {#if groups.enabled}
+        <Button variant="secondary" onclick={() => groups.openCreate()} disabled={busy}>
           <Icon name="plus" size={15} />
           New group
         </Button>
@@ -943,20 +838,20 @@
       </div>
     </EmptyState>
   {:else if grouped}
-    {#if ungroupedRows.length > 0}
+    {#if listView.ungrouped.length > 0}
       <ul class="rack">
-        {#each ungroupedRows as entry (entry.id)}
+        {#each listView.ungrouped as entry (entry.id)}
           {@render entryRow(entry)}
         {/each}
       </ul>
     {/if}
-    {#each groupSections as section (section.group.id)}
+    {#each listView.sections as section (section.group.id)}
       <GroupAccordion
         open={sectionOpen(section.group.id)}
         controls={`ql-group-${section.group.id}`}
         name={section.group.name}
-        count={groupSize(section.group.id)}
-        onToggle={() => toggleSection(section.group.id)}
+        count={countMembers(entries, section.group.id)}
+        onToggle={() => groups.collapse.toggle(section.group.id)}
       >
         {#snippet actions()}
           <IconButton
@@ -1008,53 +903,30 @@
 </ConfirmDialog>
 
 <ConfirmDialog
-  open={deletingGroup !== null}
+  open={groups.removing !== null}
   title="Remove group?"
   confirmLabel="Remove"
   danger
-  onconfirm={removeGroup}
-  oncancel={() => (deletingGroup = null)}
+  onconfirm={() => groups.removeGroup()}
+  oncancel={() => groups.cancelRemove()}
 >
   <p>
-    <strong>{deletingGroup?.name}</strong> will be deleted. Its entries will
+    <strong>{groups.removing?.name}</strong> will be deleted. Its entries will
     not be — they return to the ungrouped list.
   </p>
 </ConfirmDialog>
 
-<Dialog
-  open={nameDialog !== null}
-  title={nameDialog?.mode === "rename" ? "Rename group" : "New group"}
-  onclose={() => (nameDialog = null)}
-  width={380}
->
-  <form
-    class="name-form"
-    onsubmit={(e) => {
-      e.preventDefault();
-      submitName();
-    }}
-  >
-    <TextInput
-      label="Name"
-      id="launch-group-name"
-      value={groupNameDraft}
-      placeholder="e.g. Daily drivers"
-      required
-      onchange={(v) => (groupNameDraft = v)}
-    />
-    {#if nameError}
-      <Notice tone="error">{nameError}</Notice>
-    {/if}
-    <div class="name-form__buttons">
-      <Button variant="secondary" onclick={() => (nameDialog = null)}>
-        Cancel
-      </Button>
-      <Button kind="submit" disabled={savingName}>
-        {nameDialog?.mode === "rename" ? "Rename" : "Create"}
-      </Button>
-    </div>
-  </form>
-</Dialog>
+<GroupNameDialog
+  naming={groups.naming}
+  draft={groups.nameDraft}
+  error={groups.nameError}
+  saving={groups.savingName}
+  inputId="launch-group-name"
+  placeholder="e.g. Daily drivers"
+  ondraft={(v) => (groups.nameDraft = v)}
+  onsubmit={() => groups.submitName()}
+  onclose={() => groups.cancelNaming()}
+/>
 
 <CommandFormDialog
   open={commandOpen}
@@ -1271,6 +1143,7 @@
 
   .rack__badge {
     display: inline-flex;
+    flex-shrink: 0;
     color: var(--accent);
   }
 
@@ -1281,12 +1154,19 @@
     flex-shrink: 0;
   }
 
+  /* Long names ellipsize instead of pushing the row's other columns out of
+     the card — the same treatment as every other rack (guidelines: text
+     containers handle long content). */
   .rack__name {
+    flex-shrink: 0;
+    max-width: 40%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     font-family: var(--font-display);
     font-size: var(--text-base);
     font-weight: 600;
     color: var(--text);
-    white-space: nowrap;
   }
 
   .rack__kind {
@@ -1333,6 +1213,16 @@
     color: var(--text-muted);
   }
 
+  /* Ticket 94: the single-entry start's in-flight word — the same mono
+     treatment as the Quick Launch window's entry rows. */
+  .rack__starting {
+    flex-shrink: 0;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    letter-spacing: var(--tracking-mono);
+    color: var(--text-muted);
+  }
+
   /* A group with no members yet keeps its place in the user's order without
      pretending to have content. */
   .rack__hint {
@@ -1341,17 +1231,5 @@
     border-radius: var(--radius);
     font-size: var(--text-xs);
     color: var(--text-muted);
-  }
-
-  .name-form {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-4);
-  }
-
-  .name-form__buttons {
-    display: flex;
-    justify-content: flex-end;
-    gap: var(--space-2);
   }
 </style>
