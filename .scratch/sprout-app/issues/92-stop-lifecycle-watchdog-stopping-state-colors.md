@@ -4,10 +4,12 @@
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done — synced to the share; light/dark manual pass pending a human
 
-- [ ] State transitions run Run → Running → Stopping → Run driven solely by run-state events
-- [ ] Hung stop command is killed at the ten-second timeout and the control recovers
-- [ ] Early process exit ends Stopping without waiting out the watchdog
-- [ ] Colors derive from token families in both themes; exactly one primary verb per surface preserved
-- [ ] Backend tests cover both watchdog paths; manual pass in light and dark
+- [x] State transitions run Run → Running → Stopping → Run driven solely by run-state events
+- [x] Hung stop command is killed at the ten-second timeout and the control recovers
+- [x] Early process exit ends Stopping without waiting out the watchdog
+- [x] Colors derive from token families in both themes; exactly one primary verb per surface preserved
+- [x] Backend tests cover both watchdog paths (`watchdog_fires_when_the_stop_hangs`, `watchdog_stands_down_when_the_exit_lands_first`, `watchdog_wakes_mid_wait_when_signaled`); manual pass in light and dark pending a human
+
+**Verification notes (2026-08-24):** Backend: `RunningQuickAction` carries an `ExitSignal` (Arc<(Mutex<bool>, Condvar)>) that the reaper marks the moment `Child::wait` returns — before the registry cleanup and the event — so a Stop's watchdog stands down at the earliest possible instant. A configured stop command now spawns `enforce_stop_watchdog` on its own thread: it waits out `quick_actions::STOP_WATCHDOG` (10 s) on the signal and force-kills the tree (`kill_tree`, same `taskkill /T /F`) when no exit landed, leaving a distinct "stop timed out after 10 s — force-killed the process tree" line in the run's output.log; the kill funnels into the usual reaper exit event, so the control always recovers through the one event path. The tree-kill stop path needs no watchdog (taskkill /F is immediate). Frontend (quick-launch-window/+page.svelte): a `stoppingActions` set is added on Stop click and cleared only by `quick-action-run-state-changed` (or a Stop refusal, e.g. the registry already dropped the action) — the control reads disabled "Stopping…" with a token-family spinner (`--border-strong` track / `--text-muted` head, frozen under `prefers-reduced-motion`) meanwhile. Colors: Run = primary variant (accent-filled, the row's single primary verb), Stop = danger variant (`--danger-text` fill), both themed by the existing light/dark token families; research citations: 0004 rule 5 (state feedback — silence reads as breakage) and 0005 rule 2 (one accent-filled verb per surface). Gates: `cargo test` 368 passed / 0 failed (4 new), `svelte-check` 0 errors / 0 warnings. Not exercised in a dev window; verified by gates and code review.

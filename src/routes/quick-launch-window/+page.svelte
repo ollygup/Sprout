@@ -4,6 +4,7 @@
   import { listen } from "@tauri-apps/api/event";
   import type {
     Clip,
+    Group,
     LaunchEntry,
     LaunchReport,
     QuickAction,
@@ -14,20 +15,25 @@
     getQuickLaunchDockState,
     getSettings,
     listClips,
+    listGroups,
     listLaunchEntries,
     listQuickActions,
     listRunningQuickActions,
     runQuickAction,
+    startLaunchEntry,
     startQuickLaunch,
     stopQuickAction,
     switchQuickLaunchDockEdge,
     toggleQuickLaunchDock,
   } from "$lib/api";
-  import { clipTitle } from "$lib/format";
+  import { clipTitle, launchReportSummary } from "$lib/format";
+  import { appIcons, lazyIcon } from "$lib/lazyIcon.svelte";
+  import { createGroupCollapse } from "$lib/groupCollapse.svelte";
   import type { QuickLaunchDockState } from "$lib/types";
   import { restoreTheme, type ThemeMode } from "$lib/theme.svelte";
   import { titleBarDragRegion } from "$lib/quickLaunchTitleBar";
   import Button from "$lib/components/Button.svelte";
+  import GroupAccordion from "$lib/components/GroupAccordion.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import IconButton from "$lib/components/IconButton.svelte";
   import SproutMark from "$lib/components/SproutMark.svelte";
@@ -45,16 +51,50 @@
   // clip exists — an empty feature must not occupy chrome (research 0004
   // rule 2); the main app's /clips page is its discoverability home and its
   // only editing surface.
+  // Ticket 93: the Launch tab lists its entries and every row starts just
+  // that entry; Start all stays pinned above the list. The list mirrors the
+  // main page's Groups toggle (flat when off; ungrouped-first plus
+  // default-expanded accordions with count badges when on) — the window
+  // itself has no configuration surface (CONTEXT: all configuration happens
+  // in the main app).
 
   let entries = $state<LaunchEntry[]>([]);
   let actions = $state<QuickAction[]>([]);
   let clips = $state<Clip[]>([]);
+  // Ticket 93: every tab mirrors its collection's Groups feature live from
+  // Settings (`launch_groups` / `action_groups` / `clip_groups`), plus each
+  // collection's groups in user order — the window has no configuration
+  // surface (CONTEXT: all configuration happens in the main app).
+  let launchGroupsOn = $state(false);
+  let actionGroupsOn = $state(false);
+  let clipGroupsOn = $state(false);
+  let launchGroups = $state<Group[]>([]);
+  let actionGroups = $state<Group[]>([]);
+  let clipGroups = $state<Group[]>([]);
+  const launchCollapse = createGroupCollapse();
+  const actionCollapse = createGroupCollapse();
+  const clipCollapse = createGroupCollapse();
   // Ticket 62: the ids of the actions whose tracked process is alive —
   // seeded once from the registry on load, then kept current by the
   // `quick-action-run-state-changed` events. No polling.
   let runningActions = $state<Set<number>>(new Set());
+  // Ticket 92: the ids with a Stop in flight — set on click, cleared only by
+  // the process's exit event (research 0004 rule 5: silence reads as
+  // breakage, so the control says "Stopping…" until the backend confirms).
+  // A hung stop command cannot wedge it: the backend force-kills at its
+  // ten-second watchdog and the same exit event follows.
+  let stoppingActions = $state<Set<number>>(new Set());
   let loading = $state(true);
   let launching = $state(false);
+  // Ticket 93: the entries with a single-entry start in flight — set on
+  // click, cleared only by `launch-run-done` (research 0004 rule 5: silence
+  // reads as breakage). The backend's runs are single-flight, so while
+  // anything is in flight every start affordance waits.
+  let startingEntries = $state<Set<number>>(new Set());
+  // Ticket 93: the finished run's summary line — the same wording the system
+  // notification and the main page's flash carry, auto-cleared like them.
+  let runNotice = $state("");
+  let runNoticeTimer: ReturnType<typeof setTimeout> | undefined;
   let error = $state("");
   let tab = $state("launch");
   // Ticket 59: the dock state is never null — while the window floats it
@@ -79,33 +119,42 @@
     load();
     refreshDock();
     // Ticket 42: the run finishes on the backend's background thread — the
-    // summary lands as a system notification, and this event just releases
-    // the Start button.
+    // summary lands as a system notification, this event releases the start
+    // affordances (Start all plus ticket 93's entry rows) and posts the
+    // summary line.
     // Ticket 57: the backend emits `quick-launch-changed` after every command
     // that mutates what this window renders — Launch entry mutations, Quick
     // Action mutations, Clip mutations, `update_settings`, `update_theme`.
     // The window listens once and re-runs its loads plus its dock-state
-    // refresh and theme re-apply, so entries/actions/clips/settings added in
-    // the main app appear without reopening it.
+    // refresh, so entries/actions/clips/settings changed in the main app —
+    // including the theme and the Groups toggle — appear without reopening
+    // it.
     const unlisteners: (() => void)[] = [];
-    listen<LaunchReport>("launch-run-done", () => {
+    listen<LaunchReport>("launch-run-done", (event) => {
       launching = false;
+      startingEntries = new Set();
+      flashRun(launchReportSummary(event.payload));
     }).then((fn) => unlisteners.push(fn));
     listen("quick-launch-changed", () => {
       load();
       refreshDock();
-      applyPersistedTheme();
     }).then((fn) => unlisteners.push(fn));
     // Ticket 62: the backend emits one event per tracked action on start and
-    // again when its process exits — this is what flips Run ↔ Stop.
+    // again when its process exits — these drive the whole control state
+    // machine (Run → Running → Stopping → Run, ticket 92); nothing else
+    // mutates it. An exit event ends Stopping even when the watchdog had to
+    // force-kill, since both paths end in this same event.
     listen<QuickActionRunState>("quick-action-run-state-changed", (e) => {
       const next = new Set(runningActions);
+      const nextStopping = new Set(stoppingActions);
       if (e.payload.running) {
         next.add(e.payload.id);
       } else {
         next.delete(e.payload.id);
       }
+      nextStopping.delete(e.payload.id);
       runningActions = next;
+      stoppingActions = nextStopping;
     }).then((fn) => unlisteners.push(fn));
     // Ticket 61: a background dock failure — a shell-initiated re-assert
     // (ABN_POSCHANGED) or the drift watchdog — surfaces in the window's error
@@ -116,20 +165,9 @@
     return () => {
       unlisteners.forEach((fn) => fn());
       clearTimeout(copiedTimer);
+      clearTimeout(runNoticeTimer);
     };
   });
-
-  async function applyPersistedTheme() {
-    try {
-      const s = await getSettings();
-      const mode = s.theme as ThemeMode;
-      if (mode === "system" || mode === "light" || mode === "dark") {
-        restoreTheme(mode);
-      }
-    } catch {
-      // The cached theme still applies; nothing to reconcile.
-    }
-  }
 
   async function refreshDock() {
     try {
@@ -191,17 +229,36 @@
   async function load() {
     loading = true;
     try {
-      const [entriesResult, actionsResult, clipsResult, running] =
+      const [entriesResult, actionsResult, clipsResult, running, settings, lgs, ags, cgs] =
         await Promise.all([
           withTimeout(listLaunchEntries(), "The launch list"),
           withTimeout(listQuickActions(), "The quick actions list"),
           withTimeout(listClips(), "The clips list"),
           withTimeout(listRunningQuickActions(), "The running-actions check"),
+          withTimeout(getSettings(), "The settings"),
+          withTimeout(listGroups("launch"), "The launch groups list"),
+          withTimeout(listGroups("action"), "The action groups list"),
+          withTimeout(listGroups("clip"), "The clip groups list"),
         ]);
       entries = entriesResult;
       actions = actionsResult;
       clips = clipsResult;
       runningActions = new Set(running);
+      // The same settings read carries the theme and all three Groups
+      // features — every one live-updates through `quick-launch-changed`.
+      launchGroupsOn = settings.launch_groups === "on";
+      actionGroupsOn = settings.action_groups === "on";
+      clipGroupsOn = settings.clip_groups === "on";
+      const mode = settings.theme as ThemeMode;
+      if (mode === "system" || mode === "light" || mode === "dark") {
+        restoreTheme(mode);
+      }
+      launchGroups = lgs;
+      actionGroups = ags;
+      clipGroups = cgs;
+      launchCollapse.prune(lgs.map((g) => g.id));
+      actionCollapse.prune(ags.map((g) => g.id));
+      clipCollapse.prune(cgs.map((g) => g.id));
       // Deleting the last clip removes the third tab again (accepted) — if
       // it was selected, land on Launch rather than a dead selection.
       if (clips.length === 0 && tab === "clips") tab = "launch";
@@ -260,6 +317,88 @@
     }
   }
 
+  // ------------------- ticket 93/97: clickable entries + groups ----------
+
+  /** Sections exist only once at least one group does — and in this
+   *  read-only surface a group with no members renders nothing at all
+   *  (research 0004 rule 2): there is no ⋯ menu here to fill it from. */
+  const launchGrouped = $derived(launchGroupsOn && launchGroups.length > 0);
+
+  const launchUngrouped = $derived(
+    entries.filter((e) => e.group_id === null)
+  );
+
+  const launchSections = $derived(
+    launchGroups
+      .map((g) => ({
+        group: g,
+        rows: entries.filter((e) => e.group_id === g.id),
+      }))
+      .filter((s) => s.rows.length > 0)
+  );
+
+  const actionsGrouped = $derived(actionGroupsOn && actionGroups.length > 0);
+
+  const actionsUngrouped = $derived(
+    actions.filter((a) => a.group_id === null)
+  );
+
+  const actionSections = $derived(
+    actionGroups
+      .map((g) => ({
+        group: g,
+        rows: actions.filter((a) => a.group_id === g.id),
+      }))
+      .filter((s) => s.rows.length > 0)
+  );
+
+  const clipsGrouped = $derived(clipGroupsOn && clipGroups.length > 0);
+
+  const clipsUngrouped = $derived(clips.filter((c) => c.group_id === null));
+
+  const clipSections = $derived(
+    clipGroups
+      .map((g) => ({
+        group: g,
+        rows: clips.filter((c) => c.group_id === g.id),
+      }))
+      .filter((s) => s.rows.length > 0)
+  );
+
+  /** True while any launch run is in flight — Start all and the entry rows
+   *  share one backend pipeline whose runs are single-flight, so every
+   *  start affordance waits together rather than inviting a rejection. */
+  const startInFlight = $derived(launching || startingEntries.size > 0);
+
+  /** Starts just this entry through the same pipeline as Start all
+   *  (ticket 93). The row says "Starting…" until `launch-run-done` lands;
+   *  a rejection (single-flight guard, vanished entry) releases immediately
+   *  and surfaces its reason in the error line. */
+  async function startEntry(entry: LaunchEntry) {
+    error = "";
+    const next = new Set(startingEntries);
+    next.add(entry.id);
+    startingEntries = next;
+    try {
+      await startLaunchEntry(entry.id);
+    } catch (e) {
+      console.error(e);
+      error = String(e);
+      const recovered = new Set(startingEntries);
+      recovered.delete(entry.id);
+      startingEntries = recovered;
+    }
+  }
+
+  /** Ticket 93: the finished run's summary as a quiet status line — visible
+   *  feedback for both Start all and single-entry starts (research 0004
+   *  rule 5), auto-cleared on the main page's flash cadence. */
+  function flashRun(message: string) {
+    runNotice = message;
+    clearTimeout(runNoticeTimer);
+    runNoticeTimer = setTimeout(() => (runNotice = ""), 3200);
+  }
+
   async function run(action: QuickAction) {
     error = "";
     try {
@@ -270,15 +409,23 @@
     }
   }
 
-  /** Stop (ticket 62): runs the action's stop command, or kills the process
-   *  tree; the exit event flips the button back to Run. */
+  /** Stop (tickets 62 & 92): runs the action's stop command, or kills the
+   *  process tree. The control flips to a disabled "Stopping…" spinner
+   *  immediately and recovers only through the run-state events — the exit,
+   *  or a Stop refusal (the registry already dropped it, say). */
   async function stop(action: QuickAction) {
     error = "";
+    const next = new Set(stoppingActions);
+    next.add(action.id);
+    stoppingActions = next;
     try {
       await stopQuickAction(action.id);
     } catch (e) {
       console.error(e);
       error = String(e);
+      const recovered = new Set(stoppingActions);
+      recovered.delete(action.id);
+      stoppingActions = recovered;
     }
   }
 
@@ -378,6 +525,126 @@
     </div>
   {/if}
 
+  {#snippet launchRow(entry: LaunchEntry)}
+    <!-- Ticket 93: one entry, one click. The whole row starts just that entry;
+         the accessible name carries the verb so screen readers hear what the
+         click does ("Start Spotify", not "Spotify, button"). -->
+    <li>
+      <button
+        type="button"
+        class="qlw__entry"
+        aria-label={`Start ${entry.name}`}
+        disabled={startInFlight}
+        onclick={() => startEntry(entry)}
+        use:lazyIcon={entry.kind === "app" ? entry.target : ""}
+      >
+        <span class="qlw__entry-badge" aria-hidden="true">
+          {#if entry.kind === "app" && appIcons[entry.target]}
+            <!-- Ticket 97: the app's real icon, lazily extracted; kind
+                 glyphs stay for commands and unresolvable targets. -->
+            <img
+              class="qlw__entry-icon"
+              src={appIcons[entry.target]}
+              alt=""
+              width={16}
+              height={16}
+            />
+          {:else}
+            <Icon
+              name={entry.kind === "app" ? "rocket" : "terminal"}
+              size={14}
+            />
+          {/if}
+        </span>
+        <span class="qlw__entry-name">{entry.name}</span>
+        {#if startingEntries.has(entry.id)}
+          <span class="qlw__entry-starting">Starting…</span>
+        {/if}
+      </button>
+    </li>
+  {/snippet}
+
+  {#snippet actionRow(action: QuickAction)}
+    <li class="qlw__action">
+      <span class="qlw__action-name">{action.name}</span>
+      <!-- Ticket 93: hover/focus tooltip — the bold name plus the command,
+           truncated to one line. The tip stays in the DOM (opacity only), so
+           `aria-describedby` below gives keyboard and screen-reader users
+           the same content. -->
+      <span class="qlw__tip" id={`qlw-tip-action-${action.id}`}>
+        <span class="qlw__tip-name">{action.name}</span>
+        <span class="qlw__tip-body">{action.command}</span>
+      </span>
+      {#if stoppingActions.has(action.id)}
+        <!-- Ticket 92: Stop in flight — disabled and muted until the exit
+             event lands; the spinner is the honest "something is happening"
+             (research 0004 rule 5). -->
+        <Button
+          variant="secondary"
+          disabled
+          aria-label={`Stopping ${action.name}`}
+          aria-describedby={`qlw-tip-action-${action.id}`}
+        >
+          <span class="qlw__stopping-spin" aria-hidden="true"></span>
+          Stopping…
+        </Button>
+      {:else if action.stoppable && runningActions.has(action.id)}
+        <!-- Ticket 92: the destructive verb gets the danger family, never
+             the accent — one primary verb per row (research 0005 rule 2). -->
+        <Button
+          variant="danger"
+          onclick={() => stop(action)}
+          aria-label={`Stop ${action.name}`}
+          aria-describedby={`qlw-tip-action-${action.id}`}
+        >
+          <Icon name="stop" size={13} />
+          Stop
+        </Button>
+      {:else}
+        <!-- Ticket 92: Run is the row's primary verb — accent-filled
+             (research 0005 rule 2). -->
+        <Button
+          variant="primary"
+          onclick={() => run(action)}
+          aria-label={`Run ${action.name}`}
+          aria-describedby={`qlw-tip-action-${action.id}`}
+        >
+          <Icon name="play" size={13} />
+          Run
+        </Button>
+      {/if}
+    </li>
+  {/snippet}
+
+  {#snippet clipRow(clip: Clip)}
+    {@const title = clipTitle(clip.name, clip.content)}
+    <li class="qlw__clip-row">
+      <button
+        type="button"
+        class="qlw__clip"
+        aria-label={`Copy ${title} to the clipboard`}
+        aria-describedby={`qlw-tip-clip-${clip.id}`}
+        onclick={() => copy(clip)}
+      >
+        <span class="qlw__clip-badge" aria-hidden="true">
+          <Icon name={copiedId === clip.id ? "check" : "copy"} size={14} />
+        </span>
+        <span class="qlw__clip-name">{title}</span>
+        {#if copiedId === clip.id}
+          <span class="qlw__clip-copied">Copied</span>
+        {:else}
+          <span class="qlw__clip-excerpt">{clip.content}</span>
+        {/if}
+      </button>
+      <!-- Ticket 93: same tooltip contract as the action rows — bold name
+           plus the full content on one truncated line. -->
+      <span class="qlw__tip" id={`qlw-tip-clip-${clip.id}`}>
+        <span class="qlw__tip-name">{title}</span>
+        <span class="qlw__tip-body">{clip.content}</span>
+      </span>
+    </li>
+  {/snippet}
+
   <div class="qlw__tabs">
     <Tabs
       tabs={qlTabs}
@@ -401,15 +668,54 @@
               </p>
             </div>
           {:else}
+            <!-- Ticket 93: Start all stays pinned on top; the entry list
+                 scrolls beneath it. -->
             <div class="qlw__launch">
               <p class="qlw__count">
                 {entries.length} {entries.length === 1 ? "entry" : "entries"}
                 in the Quick Launch list.
               </p>
-              <Button onclick={start} disabled={launching}>
+              <Button onclick={start} disabled={startInFlight}>
                 <Icon name="play" size={15} />
                 {launching ? "Starting…" : "Start all"}
               </Button>
+              <div class="qlw__list">
+                {#if !launchGrouped}
+                  <ul class="qlw__entries">
+                    {#each entries as entry (entry.id)}
+                      {@render launchRow(entry)}
+                    {/each}
+                  </ul>
+                {:else}
+                  {#if launchUngrouped.length > 0}
+                    <ul class="qlw__entries">
+                      {#each launchUngrouped as entry (entry.id)}
+                        {@render launchRow(entry)}
+                      {/each}
+                    </ul>
+                  {/if}
+                  {#each launchSections as section (section.group.id)}
+                    <!-- The shared GroupAccordion in its flush strip variant:
+                         sections exist only while they have members —
+                         nothing here can fill an empty one (research 0004
+                         rule 2). -->
+                    <GroupAccordion
+                      flush
+                      open={launchCollapse.isOpen(section.group.id)}
+                      controls={`qlw-group-${section.group.id}`}
+                      name={section.group.name}
+                      count={section.rows.length}
+                      onToggle={() => launchCollapse.toggle(section.group.id)}
+                    >
+                      <ul class="qlw__entries">
+                        {#each section.rows as entry (entry.id)}
+                          {@render launchRow(entry)}
+                        {/each}
+                      </ul>
+                    </GroupAccordion>
+                  {/each}
+                {/if}
+              </div>
             </div>
           {/if}
         {:else if id === "actions"}
@@ -427,66 +733,92 @@
               </p>
             </div>
           {:else}
-            <ul class="qlw__actions">
-              {#each actions as action (action.id)}
-                <li class="qlw__action">
-                  <span class="qlw__action-name" title={action.command}>
-                    {action.name}
-                  </span>
-                  {#if action.stoppable && runningActions.has(action.id)}
-                    <Button
-                      variant="secondary"
-                      onclick={() => stop(action)}
-                      aria-label={`Stop ${action.name}`}
-                    >
-                      <Icon name="stop" size={13} />
-                      Stop
-                    </Button>
-                  {:else}
-                    <Button
-                      variant="secondary"
-                      onclick={() => run(action)}
-                      aria-label={`Run ${action.name}`}
-                    >
-                      <Icon name="play" size={13} />
-                      Run
-                    </Button>
-                  {/if}
-                </li>
-              {/each}
-            </ul>
+            <!-- Ticket 97: the tab mirrors the collection's Groups toggle,
+                 exactly like the Launch list. -->
+            <div class="qlw__list qlw__list--padded">
+              {#if !actionsGrouped}
+                <ul class="qlw__actions">
+                  {#each actions as action (action.id)}
+                    {@render actionRow(action)}
+                  {/each}
+                </ul>
+              {:else}
+                {#if actionsUngrouped.length > 0}
+                  <ul class="qlw__actions">
+                    {#each actionsUngrouped as action (action.id)}
+                      {@render actionRow(action)}
+                    {/each}
+                  </ul>
+                {/if}
+                {#each actionSections as section (section.group.id)}
+                  <GroupAccordion
+                    flush
+                    open={actionCollapse.isOpen(section.group.id)}
+                    controls={`qlw-actions-group-${section.group.id}`}
+                    name={section.group.name}
+                    count={section.rows.length}
+                    onToggle={() => actionCollapse.toggle(section.group.id)}
+                  >
+                    <ul class="qlw__actions">
+                      {#each section.rows as action (action.id)}
+                        {@render actionRow(action)}
+                      {/each}
+                    </ul>
+                  </GroupAccordion>
+                {/each}
+              {/if}
+            </div>
           {/if}
         {:else}
-          <ul class="qlw__clips">
-            {#each clips as clip (clip.id)}
-              {@const title = clipTitle(clip.name, clip.content)}
-              <li>
-                <button
-                  type="button"
-                  class="qlw__clip"
-                  aria-label={`Copy ${title} to the clipboard`}
-                  onclick={() => copy(clip)}
-                >
-                  <span class="qlw__clip-badge" aria-hidden="true">
-                    <Icon
-                      name={copiedId === clip.id ? "check" : "copy"}
-                      size={14}
-                    />
-                  </span>
-                  <span class="qlw__clip-name">{title}</span>
-                  {#if copiedId === clip.id}
-                    <span class="qlw__clip-copied">Copied</span>
-                  {:else}
-                    <span class="qlw__clip-excerpt">{clip.content}</span>
-                  {/if}
-                </button>
-              </li>
-            {/each}
-          </ul>
+          {#if loading && clips.length === 0}
+            <p class="qlw__sifting" aria-live="polite">Loading…</p>
+          {:else}
+            <!-- Ticket 97: same Groups mirror as the other two tabs. -->
+            <div class="qlw__list qlw__list--padded">
+              {#if !clipsGrouped}
+                <ul class="qlw__clips">
+                  {#each clips as clip (clip.id)}
+                    {@render clipRow(clip)}
+                  {/each}
+                </ul>
+              {:else}
+                {#if clipsUngrouped.length > 0}
+                  <ul class="qlw__clips">
+                    {#each clipsUngrouped as clip (clip.id)}
+                      {@render clipRow(clip)}
+                    {/each}
+                  </ul>
+                {/if}
+                {#each clipSections as section (section.group.id)}
+                  <GroupAccordion
+                    flush
+                    open={clipCollapse.isOpen(section.group.id)}
+                    controls={`qlw-clips-group-${section.group.id}`}
+                    name={section.group.name}
+                    count={section.rows.length}
+                    onToggle={() => clipCollapse.toggle(section.group.id)}
+                  >
+                    <ul class="qlw__clips">
+                      {#each section.rows as clip (clip.id)}
+                        {@render clipRow(clip)}
+                      {/each}
+                    </ul>
+                  </GroupAccordion>
+                {/each}
+              {/if}
+            </div>
+          {/if}
         {/if}
       {/snippet}
     </Tabs>
   </div>
+
+  {#if runNotice}
+    <!-- Ticket 93: the finished launch run's summary (Start all and
+         single-entry starts alike) — visible feedback, not just the system
+         notification (research 0004 rule 5). -->
+    <p class="qlw__status" role="status">{runNotice}</p>
+  {/if}
 
   {#if error}
     <div class="qlw__error-row">
@@ -573,11 +905,36 @@
     color: var(--text-muted);
   }
 
+  /* Ticket 93: Start all and the count stay pinned; the entry list scrolls
+     beneath them inside the tab panel. */
   .qlw__launch {
     display: flex;
     flex-direction: column;
-    gap: var(--space-4);
-    padding: var(--space-5) var(--space-4);
+    gap: var(--space-3);
+    height: 100%;
+    padding: var(--space-4);
+  }
+
+  /* Ticket 93/97: the scroll container every tab's list lives in. Launch
+     nests it inside the pinned Start-all head; Actions/Clips use it directly
+     with their own padding (`--padded`). The bottom runway is where
+     below-anchored tooltips land at full scroll. */
+  .qlw__list {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--space-3);
+  }
+
+  .qlw__list--padded {
+    padding: var(--space-3);
+  }
+
+  .qlw__list > :last-child {
+    padding-bottom: calc(var(--space-7) + var(--space-6));
   }
 
   .qlw__count {
@@ -586,17 +943,93 @@
     color: var(--text-muted);
   }
 
-  .qlw__actions {
+  .qlw__entries {
     list-style: none;
     margin: 0;
-    padding: var(--space-3) var(--space-3) var(--space-4);
+    padding: 0;
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
-    overflow-y: auto;
+  }
+
+  .qlw__entry {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    width: 100%;
+    padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: border-color var(--dur-fast) var(--ease-out);
+  }
+
+  .qlw__entry:hover:not(:disabled),
+  .qlw__entry:focus-visible {
+    border-color: var(--accent-tint-border);
+  }
+
+  .qlw__entry:focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: -2px;
+  }
+
+  .qlw__entry:disabled {
+    cursor: default;
+  }
+
+  .qlw__entry:disabled .qlw__entry-name {
+    color: var(--text-muted);
+  }
+
+  .qlw__entry-badge {
+    display: inline-flex;
+    flex-shrink: 0;
+    color: var(--text-muted);
+  }
+
+  /* Ticket 97: the entry's real app icon, where one resolves. */
+  .qlw__entry-icon {
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+  }
+
+  .qlw__entry-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--font-display);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  .qlw__entry-starting {
+    flex-shrink: 0;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    letter-spacing: var(--tracking-mono);
+    color: var(--text-muted);
+  }
+
+  .qlw__actions {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
   }
 
   .qlw__action {
+    position: relative;
     display: flex;
     align-items: center;
     gap: var(--space-3);
@@ -618,17 +1051,42 @@
     color: var(--text);
   }
 
+  /* Ticket 92: the Stopping spinner — token families only (border track,
+     muted head); the button's own disabled treatment mutes the whole thing.
+     Reduced motion freezes it into a plain ring beside the "Stopping…" text
+     instead of spinning. */
+  .qlw__stopping-spin {
+    flex-shrink: 0;
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    border: 2px solid var(--border-strong);
+    border-top-color: var(--text-muted);
+    animation: qlw-stopping-spin 0.8s linear infinite;
+  }
+
+  @keyframes qlw-stopping-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .qlw__stopping-spin {
+      animation: none;
+    }
+  }
+
   /* Ticket 79: the read-only Quick Clips rows — whole-row click-to-copy,
    * same visual language as the actions list. No editing affordances here:
    * all CRUD stays on the main app's /clips page (research 0004 rule 3). */
   .qlw__clips {
     list-style: none;
     margin: 0;
-    padding: var(--space-3) var(--space-3) var(--space-4);
+    padding: 0;
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
-    overflow-y: auto;
   }
 
   .qlw__clip {
@@ -693,6 +1151,64 @@
     color: var(--accent);
   }
 
+  .qlw__clip-row {
+    position: relative;
+  }
+
+  /* Ticket 93/97: hover/focus tooltips on the action and clip rows — the
+     bold name plus the row's content (command / clip text) truncated to one
+     line. Anchored BELOW the row so the scrollport never clips it at the
+     top; each `.qlw__list` carries bottom runway on its last child so a
+     last-row tooltip fits at full scroll. The tip is hidden with opacity
+     only — never display/visibility — so `aria-describedby` still exposes
+     its content to assistive tech, and keyboard focus (`:focus-within`)
+     raises exactly what hovering does. */
+  .qlw__tip {
+    position: absolute;
+    z-index: 30;
+    top: calc(100% + var(--space-2));
+    left: 0;
+    max-width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    padding: var(--space-2) var(--space-3);
+    background: var(--bg-surface);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-dialog);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity var(--dur-fast) var(--ease-out);
+  }
+
+  .qlw__action:hover .qlw__tip,
+  .qlw__action:focus-within .qlw__tip,
+  .qlw__clip-row:hover .qlw__tip,
+  .qlw__clip-row:focus-within .qlw__tip {
+    opacity: 1;
+  }
+
+  .qlw__tip-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--font-display);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  .qlw__tip-body {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    letter-spacing: var(--tracking-mono);
+    color: var(--text-muted);
+  }
+
   .qlw__sr {
     position: absolute;
     width: 1px;
@@ -732,6 +1248,16 @@
     margin: 0;
     font-size: var(--text-sm);
     color: var(--text-muted);
+  }
+
+  /* Ticket 93: the finished run's summary line — quiet visible feedback
+     beside (not replacing) the system notification. */
+  .qlw__status {
+    margin: 0;
+    padding: 0 var(--space-4) var(--space-2);
+    font-size: var(--text-sm);
+    color: var(--text-muted);
+    overflow-wrap: anywhere;
   }
 
   .qlw__error-row {

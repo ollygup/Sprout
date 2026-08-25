@@ -8,6 +8,7 @@
 mod db;
 mod domain;
 mod engine;
+mod groups;
 mod icons;
 mod import_export;
  mod launch;
@@ -663,6 +664,23 @@ fn start_quick_launch(state: State<'_, AppState>, app: AppHandle) -> Result<(), 
     launch_entries(&app, &state, entries)
 }
 
+/// Starts one Launch entry through the same capped, queued pipeline as Start
+/// all (ticket 93) — the Quick Launch window's clickable entry rows. The
+/// single-flight guard applies equally: a row click while a run is in flight
+/// is rejected, never stacked, and the summary notification and
+/// `launch-run-done` event report the single-entry outcome like any run.
+#[tauri::command]
+fn start_launch_entry(state: State<'_, AppState>, app: AppHandle, id: i64) -> Result<(), String> {
+    let conn = lock(&state)?;
+    let entry = launch::list_launch_entries(&conn)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|entry| entry.id == id)
+        .ok_or_else(|| "That entry is gone from the Quick Launch list — try again.".to_string())?;
+    drop(conn);
+    launch_entries(&app, &state, vec![entry])
+}
+
 /// The shared launch-run body behind the Quick Launch window's and the
 /// page's Start buttons (tickets 42 & 54): the single-flight guard, the
 /// background thread running the capped, queued pipeline, the per-run log
@@ -968,6 +986,129 @@ fn copy_clip(app: AppHandle, state: State<'_, AppState>, id: i64) -> Result<(), 
         .map_err(|e| format!("Could not reach the clipboard: {e}"))
 }
 
+// ------------------- Groups (ticket 89) ------------------------------------
+
+/// Lists one collection's Groups in user order (ticket 89).
+#[tauri::command]
+fn list_groups(
+    state: State<'_, AppState>,
+    collection: groups::Collection,
+) -> Result<Vec<groups::Group>, String> {
+    let conn = lock(&state)?;
+    groups::list_groups(&conn, collection).map_err(|e| e.to_string())
+}
+
+/// Appends a Group at the end of its collection's order, name validated
+/// first (ticket 89). The Quick Launch window is told via
+/// `quick-launch-changed` so its lists re-render without reopening.
+#[tauri::command]
+fn create_group(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    collection: groups::Collection,
+    name: String,
+) -> Result<groups::Group, String> {
+    groups::validate_group_name(&name)?;
+    let conn = lock(&state)?;
+    let created = groups::create_group(&conn, collection, &name).map_err(|e| e.to_string())?;
+    drop(conn);
+    let _ = app.emit("quick-launch-changed", ());
+    Ok(created)
+}
+
+/// Renames a Group in place; order and membership are untouched (ticket 89).
+#[tauri::command]
+fn rename_group(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: i64,
+    name: String,
+) -> Result<(), String> {
+    groups::validate_group_name(&name)?;
+    let conn = lock(&state)?;
+    groups::rename_group(&conn, id, &name).map_err(|e| e.to_string())?;
+    drop(conn);
+    let _ = app.emit("quick-launch-changed", ());
+    Ok(())
+}
+
+/// Removes a Group: members return to ungrouped, never deleted (ticket 89).
+#[tauri::command]
+fn delete_group(app: AppHandle, state: State<'_, AppState>, id: i64) -> Result<(), String> {
+    let conn = lock(&state)?;
+    groups::delete_group(&conn, id).map_err(|e| e.to_string())?;
+    drop(conn);
+    let _ = app.emit("quick-launch-changed", ());
+    Ok(())
+}
+
+/// Moves a Group to another position within its collection's order, clamped
+/// (ticket 89).
+#[tauri::command]
+fn move_group(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: i64,
+    to_position: i64,
+) -> Result<(), String> {
+    let conn = lock(&state)?;
+    groups::move_group(&conn, id, to_position).map_err(|e| e.to_string())?;
+    drop(conn);
+    let _ = app.emit("quick-launch-changed", ());
+    Ok(())
+}
+
+/// Puts one item into one Group of its own collection — the item's single
+/// group reference; any previous membership is replaced (ticket 89). An item
+/// offered to another collection's group is refused at the data layer.
+#[tauri::command]
+fn assign_to_group(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    collection: groups::Collection,
+    item_id: i64,
+    group_id: i64,
+) -> Result<(), String> {
+    let conn = lock(&state)?;
+    groups::assign_item(&conn, collection, item_id, group_id).map_err(|e| e.to_string())?;
+    drop(conn);
+    let _ = app.emit("quick-launch-changed", ());
+    Ok(())
+}
+
+/// Clears an item's group membership — back to ungrouped (ticket 89).
+#[tauri::command]
+fn unassign_from_group(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    collection: groups::Collection,
+    item_id: i64,
+) -> Result<(), String> {
+    let conn = lock(&state)?;
+    groups::unassign_item(&conn, collection, item_id).map_err(|e| e.to_string())?;
+    drop(conn);
+    let _ = app.emit("quick-launch-changed", ());
+    Ok(())
+}
+
+/// One collection's Groups toggle (ticket 89): persists only that
+/// collection's knob. Off stays fully dormant — surfaces render flat while
+/// stored groups and memberships survive untouched — so a live Quick Launch
+/// window is told via `quick-launch-changed`.
+#[tauri::command]
+fn update_groups_enabled(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    collection: groups::Collection,
+    enabled: bool,
+) -> Result<(), String> {
+    let conn = lock(&state)?;
+    settings::save_groups_feature(&conn, collection, if enabled { "on" } else { "off" })?;
+    drop(conn);
+    let _ = app.emit("quick-launch-changed", ());
+    Ok(())
+}
+
 /// Runs one stored Quick Action (tickets 50 & 62): the action's PowerShell
 /// command, hidden (`CREATE_NO_WINDOW`), working directory honored when set,
 /// current user, no elevation, no status UI, no notification. The spawned
@@ -1017,6 +1158,7 @@ fn run_quick_action(app: AppHandle, state: State<'_, AppState>, id: i64) -> Resu
     if let Some(p) = &log_path {
         quick_actions::write_run_log_header(p, &action.action, id, pid);
     }
+    let exited = quick_actions::ExitSignal::new();
     state
         .running_actions
         .lock()
@@ -1026,6 +1168,7 @@ fn run_quick_action(app: AppHandle, state: State<'_, AppState>, id: i64) -> Resu
             quick_actions::RunningQuickAction {
                 pid,
                 log_path: log_path.clone(),
+                exited: exited.clone(),
             },
         );
     let _ = app.emit(
@@ -1033,7 +1176,8 @@ fn run_quick_action(app: AppHandle, state: State<'_, AppState>, id: i64) -> Resu
         quick_actions::QuickActionRunState { id, running: true },
     );
     // The reaper owns the Child: it waits for the exit, records the exit
-    // code in the run's output.log (ticket 64), drops the registry entry
+    // code in the run's output.log (ticket 64), marks the exit signal so a
+    // Stop's watchdog stands down (ticket 92), drops the registry entry
     // (only if this run is still the tracked one — a Stop already removed
     // it), and tells the window. PIDs die with the boot anyway, so the
     // registry stays per-session.
@@ -1043,6 +1187,7 @@ fn run_quick_action(app: AppHandle, state: State<'_, AppState>, id: i64) -> Resu
         if let Some(p) = &log_path {
             quick_actions::write_run_log_exit(p, status.and_then(|s| s.code()));
         }
+        exited.signal();
         if let Some(state) = app.try_state::<AppState>() {
             if let Ok(mut registry) = state.running_actions.lock() {
                 if registry.get(&id).map(|r| r.pid) == Some(pid) {
@@ -1062,10 +1207,12 @@ fn run_quick_action(app: AppHandle, state: State<'_, AppState>, id: i64) -> Resu
 /// command when it has one (same hidden PowerShell spawn path, the action's
 /// working directory honored), otherwise kills the tracked process tree
 /// (`taskkill /T /F`). The registry entry is removed here; the reaper notices
-/// the death and emits the not-running event. Both the stop line and — when
-/// a stop command ran — its output land in the run's `output.log` (ticket
-/// 64). Stopping an action that is not running is a clear error, never a
-/// silent success.
+/// the death and emits the not-running event. A configured stop command is
+/// watched (ticket 92): when it has not finished the process inside
+/// `quick_actions::STOP_WATCHDOG`, the tree is force-killed so a hung stop
+/// can never wedge the control. Both the stop line and — when a stop command
+/// ran — its output land in the run's `output.log` (ticket 64). Stopping an
+/// action that is not running is a clear error, never a silent success.
 #[tauri::command]
 fn stop_quick_action(state: State<'_, AppState>, id: i64) -> Result<(), String> {
     let tracked = state
@@ -1097,7 +1244,17 @@ fn stop_quick_action(state: State<'_, AppState>, id: i64) -> Result<(), String> 
                 &stop_command,
                 action.action.cwd.as_deref(),
                 log_file.as_ref(),
-            )
+            )?;
+            // The watchdog (ticket 92): a stop command that never finishes
+            // the process gets its tree force-killed at STOP_WATCHDOG; an
+            // early exit stands it down through the reaper's signal.
+            let exited = tracked.exited.clone();
+            let pid = tracked.pid;
+            let log_path = tracked.log_path.clone();
+            std::thread::spawn(move || {
+                quick_actions::enforce_stop_watchdog(pid, log_path.as_deref(), &exited);
+            });
+            Ok(())
         }
         None => {
             if let Some(p) = &tracked.log_path {
@@ -1554,6 +1711,7 @@ pub fn run() {
             move_launch_entry,
             test_launch_command,
             start_quick_launch,
+            start_launch_entry,
             list_launch_candidates,
             candidate_icon,
             list_virtual_desktops,
@@ -1573,6 +1731,14 @@ pub fn run() {
             delete_clip,
             move_clip,
             copy_clip,
+            list_groups,
+            create_group,
+            rename_group,
+            delete_group,
+            move_group,
+            assign_to_group,
+            unassign_from_group,
+            update_groups_enabled,
             close_quick_launch_window,
             toggle_quick_launch_dock,
             switch_quick_launch_dock_edge,

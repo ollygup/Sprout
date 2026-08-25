@@ -1,32 +1,46 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import type {
+    Group,
     LaunchCandidate,
     LaunchEntry,
     LaunchReport,
     VirtualDesktop,
   } from "$lib/types";
   import {
-    candidateIcon,
+    assignToGroup,
+    createGroup,
     createLaunchEntry,
     createVirtualDesktop,
+    deleteGroup,
     deleteLaunchEntry,
     getSettings,
+    listGroups,
     listLaunchCandidates,
     listLaunchEntries,
     listVirtualDesktops,
+    moveGroup,
     moveLaunchEntry,
+    renameGroup,
     startQuickLaunch,
+    unassignFromGroup,
     updateDesktopAssignments,
+    updateGroupsEnabled,
     updateLaunchEntry,
   } from "$lib/api";
+  import { launchReportSummary } from "$lib/format";
+  import { appIcons, lazyIcon } from "$lib/lazyIcon.svelte";
+  import { createGroupCollapse } from "$lib/groupCollapse.svelte";
   import { listen } from "@tauri-apps/api/event";
   import { open } from "@tauri-apps/plugin-dialog";
   import Button from "$lib/components/Button.svelte";
+  import Dialog from "$lib/components/Dialog.svelte";
+  import GroupAccordion from "$lib/components/GroupAccordion.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import IconButton from "$lib/components/IconButton.svelte";
   import PageHeader from "$lib/components/PageHeader.svelte";
   import SearchInput from "$lib/components/SearchInput.svelte";
+  import TextInput from "$lib/components/TextInput.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import CommandFormDialog from "$lib/components/CommandFormDialog.svelte";
   import ContextMenu, {
@@ -67,23 +81,44 @@
   // page-features gear menu is its only switch (research 0008), default off
   // and fully dormant when off. The desktop list itself still loads so
   // turning the switch on works without a reload; below Windows 11 24H2
-  // (`desktopSupported` false) the whole menu disappears regardless.
+  // (`desktopSupported` false) the desktop item disappears from the menu.
   let desktops = $state<VirtualDesktop[]>([]);
   let desktopSupported = $state(false);
   let desktopGrouping = $state(false);
-  let menu: (ContextMenuState & { entryId: number }) | null = $state(null);
+
+  // Groups (tickets 89/91): the same per-collection pattern as Quick Actions
+  // (ticket 90) — its own namespace and its own gear-menu switch, fully
+  // dormant while off. Desktop assignment stays badge-only beside it: it
+  // never structures this list; Groups own the structure when enabled.
+  let groupsOn = $state(false);
+  let groups = $state<Group[]>([]);
+  const collapse = createGroupCollapse();
+
+  // One menu serves entry rows and group headers; which kind it belongs to
+  // rides on whichever id is set.
+  let menu: (ContextMenuState & { entryId?: number; groupId?: number }) | null =
+    $state(null);
+  let deletingGroup: Group | null = $state(null);
+
+  // The create/rename dialog: mode "rename" carries the group being renamed.
+  let nameDialog: { mode: "create" } | { mode: "rename"; group: Group } | null =
+    $state(null);
+  let groupNameDraft = $state("");
+  let nameError = $state("");
+  let savingName = $state(false);
 
   onMount(() => {
     load();
     loadVirtualDesktops();
     loadGroupingSetting();
+    loadGroupsFeature();
     // Ticket 42: the run finishes on the backend's background thread; the
     // summary lands as a system notification, and this event clears the
     // button and mirrors the summary in-page.
     let unlisten: (() => void) | undefined;
     listen<LaunchReport>("launch-run-done", (event) => {
       launching = false;
-      flash(reportSummary(event.payload));
+      flash(launchReportSummary(event.payload));
     }).then((fn) => (unlisten = fn));
     return () => unlisten?.();
   });
@@ -114,10 +149,25 @@
     }
   }
 
+  async function loadGroupsFeature() {
+    try {
+      const s = await getSettings();
+      groupsOn = s.launch_groups === "on";
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
   async function load() {
     loading = true;
     try {
-      entries = await listLaunchEntries();
+      const [es, gs] = await Promise.all([
+        listLaunchEntries(),
+        listGroups("launch"),
+      ]);
+      entries = es;
+      groups = gs;
+      collapse.prune(gs.map((g) => g.id));
       loadFailed = false;
     } catch (e) {
       console.error(e);
@@ -152,58 +202,12 @@
       : []
   );
 
-  // Ticket 40: icons are fetched per visible row and held in memory only.
-  let icons = $state<Record<string, string>>({});
-  let iconRequests = new Set<string>();
-
-  function lazyIcon(node: HTMLElement, target: string) {
-    const io = new IntersectionObserver((entries) => {
-      if (!entries.some((e) => e.isIntersecting)) return;
-      io.disconnect();
-      fetchIcon(target);
-    });
-    io.observe(node);
-    return {
-      update(next: string) {
-        target = next;
-      },
-      destroy() {
-        io.disconnect();
-      },
-    };
-  }
-
-  async function fetchIcon(target: string) {
-    if (iconRequests.has(target)) return;
-    iconRequests.add(target);
-    try {
-      const url = await candidateIcon(target);
-      if (url) icons[target] = url;
-    } catch (e) {
-      console.error(e);
-    }
-  }
-
+  // Ticket 40: icons are fetched per visible row and held in memory only —
+  // the shared lazyIcon module (used here by the Add panel and the rack
+  // rows, and by the Quick Launch window's entry rows).
   function flash(message: string) {
     notice = message;
     setTimeout(() => (notice = ""), 3200);
-  }
-
-  // Ticket 42: the same wording the system notification carries. Ticket 44:
-  // the desktop-assignment notes ride along after the counts. Ticket 48:
-  // skipped entries list their reason, so a no-op run is never silent.
-  function reportSummary(report: LaunchReport): string {
-    const counts = [
-      `started ${report.started.length}`,
-      `skipped ${report.skipped.length}`,
-      `failed ${report.failed.length}`,
-    ];
-    const skipped =
-      report.skipped.length > 0 ? ` Skipped: ${report.skipped.join(", ")}.` : "";
-    const failed =
-      report.failed.length > 0 ? ` Failed: ${report.failed.join(", ")}.` : "";
-    const notes = report.notes.length > 0 ? ` ${report.notes.join(". ")}.` : "";
-    return `Quick Launch done — ${counts.join(", ")}.${skipped}${failed}${notes}`;
   }
 
   async function start() {
@@ -317,16 +321,14 @@
 
   // ------------------- added-entries filter (ticket 46) ------------------
 
-  const filterQ = $derived(filter.trim().toLowerCase());
-  const visible = $derived(
-    filterQ
-      ? entries.filter(
-          (e) =>
-            e.name.toLowerCase().includes(filterQ) ||
-            e.target.toLowerCase().includes(filterQ)
-        )
-      : entries
-  );
+  function matchesEntry(e: LaunchEntry): boolean {
+    const q = filter.trim().toLowerCase();
+    return (
+      e.name.toLowerCase().includes(q) || e.target.toLowerCase().includes(q)
+    );
+  }
+
+  const matchedCount = $derived(entries.filter(matchesEntry).length);
 
   // ------------------- desktop assignments (tickets 44 & 88) -------------
 
@@ -358,11 +360,13 @@
     }
   }
 
-  // One item below the 24H2 gate, none above it — an empty list makes the
-  // whole gear disappear (research 0004 rule 2: no chrome for a dead
-  // feature). The description is the only explanation the surface carries.
-  const featureItems = $derived(
-    desktopSupported
+  // The gear menu carries one row per opt-in feature: desktop grouping below
+  // its 24H2 gate only (an empty row would be chrome for a dead feature,
+  // research 0004 rule 2), Groups always — every collection page offers it
+  // (research 0008 rule 3: each row names the feature and explains both
+  // states).
+  const featureItems = $derived([
+    ...(desktopSupported
       ? [
           {
             label: "Desktop grouping",
@@ -372,13 +376,161 @@
             onchange: () => toggleDesktopAssignments(),
           },
         ]
-      : []
-  );
+      : []),
+    {
+      label: "Groups",
+      description:
+        "Bucket entries into named sections you order yourself. Groups and assignments are kept while off.",
+      value: groupsOn,
+      onchange: () => toggleGroups(),
+    },
+  ]);
 
-  /** One ⋯ menu per row: the desktop assignment list only while the feature
-   *  is on (ticket 88's dormancy — nothing about assignments exists in the
-   *  menu when it is off), then Move up / Move down / Remove over the flat
-   *  list order. */
+  /** The Groups switch behind the page-features menu (research 0008):
+   *  persisted for this collection through the settings store. Optimistic —
+   *  reverted when the save fails. */
+  async function toggleGroups() {
+    const next = !groupsOn;
+    groupsOn = next;
+    try {
+      await updateGroupsEnabled("launch", next);
+      flash(
+        next
+          ? "Groups on — organize entries into named sections."
+          : "Groups off — groups and assignments are kept but hidden."
+      );
+    } catch (e) {
+      console.error(e);
+      groupsOn = !next;
+      error = "Couldn't save the Groups setting — try again.";
+    }
+  }
+
+  /** Sections exist only once at least one group does (absent-until-content,
+   *  research 0004 rule 2) — until then every affordance but the switch and
+   *  the New group button stays hidden. */
+  const grouped = $derived(groupsOn && groups.length > 0);
+
+  function openCreate() {
+    groupNameDraft = "";
+    nameError = "";
+    nameDialog = { mode: "create" };
+  }
+
+  function openRename(group: Group) {
+    groupNameDraft = group.name;
+    nameError = "";
+    nameDialog = { mode: "rename", group };
+  }
+
+  async function submitName() {
+    if (!nameDialog) return;
+    const name = groupNameDraft.trim();
+    if (!name) {
+      nameError = "Group name must not be empty.";
+      return;
+    }
+    savingName = true;
+    nameError = "";
+    try {
+      if (nameDialog.mode === "create") {
+        await createGroup("launch", name);
+        flash(`Group “${name}” created.`);
+      } else {
+        await renameGroup(nameDialog.group.id, name);
+        flash(`Group renamed to “${name}”.`);
+      }
+      nameDialog = null;
+      await load();
+    } catch (e) {
+      console.error(e);
+      nameError = String(e);
+    } finally {
+      savingName = false;
+    }
+  }
+
+  function sectionOpen(groupId: number): boolean {
+    // While filtering, every section opens so no match hides behind a
+    // chevron.
+    return filter.trim() !== "" || collapse.isOpen(groupId);
+  }
+
+  function toggleSection(groupId: number) {
+    collapse.toggle(groupId);
+  }
+
+  function groupSize(groupId: number): number {
+    return entries.filter((e) => e.group_id === groupId).length;
+  }
+
+  async function assignEntry(entry: LaunchEntry, groupId: number | null) {
+    busy = true;
+    error = "";
+    try {
+      if (groupId === null) {
+        await unassignFromGroup("launch", entry.id);
+        flash(`${entry.name} moved to the ungrouped list.`);
+      } else {
+        await assignToGroup("launch", entry.id, groupId);
+        const target = groups.find((g) => g.id === groupId);
+        flash(`${entry.name} moved to ${target?.name ?? "the group"}.`);
+      }
+      await load();
+    } catch (e) {
+      console.error(e);
+      error = String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function reorderGroup(id: number, toPosition: number) {
+    busy = true;
+    error = "";
+    try {
+      await moveGroup(id, toPosition);
+      await load();
+    } catch (e) {
+      console.error(e);
+      error = String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function removeGroup() {
+    if (!deletingGroup) return;
+    const group = deletingGroup;
+    deletingGroup = null;
+    busy = true;
+    error = "";
+    try {
+      await deleteGroup(group.id);
+      flash(`Group “${group.name}” removed — its entries are back in the ungrouped list.`);
+      await load();
+    } catch (e) {
+      console.error(e);
+      error = String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
+  /** Move up/down reorders within what the user can see: the whole list when
+   *  flat, otherwise the ungrouped block or the entry's own group. The
+   *  positions passed down stay global list order. */
+  function moveSlice(entry: LaunchEntry): LaunchEntry[] {
+    if (!grouped) return entries;
+    return entries.filter((e) => e.group_id === entry.group_id);
+  }
+
+  /** One ⋯ menu per row: while Groups is on, group assignment comes first
+   *  (the structuring feature owns the top of the menu); the desktop
+   *  assignment list follows only while that feature is on (ticket 88's
+   *  dormancy); then Move up / Move down / Remove over the visible slice.
+   *  Desktop assignment stays badge-only in the list itself — it never
+   *  structures anything. */
   function openRowMenu(
     entry: LaunchEntry,
     anchor: HTMLButtonElement,
@@ -388,10 +540,24 @@
       menu = null;
       return;
     }
-    const index = visible.indexOf(entry);
-    const upDisabled = index <= 0;
-    const downDisabled = index >= visible.length - 1;
+    const slice = moveSlice(entry);
+    const index = slice.indexOf(entry);
     const items: ContextMenuItem[] = [];
+    if (grouped) {
+      items.push(
+        {
+          label: "Ungrouped",
+          icon: entry.group_id === null ? "check" : undefined,
+          onselect: () => assignEntry(entry, null),
+        },
+        ...groups.map((g) => ({
+          label: g.name,
+          icon: entry.group_id === g.id ? "check" : undefined,
+          onselect: () => assignEntry(entry, g.id),
+        })),
+        { label: "", separator: true, onselect: () => {} }
+      );
+    }
     if (desktopSupported && desktopGrouping) {
       items.push(
         {
@@ -416,14 +582,14 @@
       {
         label: "Move up",
         icon: "chevron-up",
-        disabled: upDisabled,
-        onselect: () => move(entry.id, entries.indexOf(visible[index - 1])),
+        disabled: index <= 0,
+        onselect: () => move(entry.id, entries.indexOf(slice[index - 1])),
       },
       {
         label: "Move down",
         icon: "chevron-down",
-        disabled: downDisabled,
-        onselect: () => move(entry.id, entries.indexOf(visible[index + 1])),
+        disabled: index >= slice.length - 1,
+        onselect: () => move(entry.id, entries.indexOf(slice[index + 1])),
       },
       {
         label: "Remove",
@@ -442,6 +608,64 @@
       items,
     };
   }
+
+  /** One ⋯ menu per group header: Rename, order, Remove. */
+  function openGroupMenu(
+    group: Group,
+    anchor: HTMLButtonElement,
+    viaKeyboard: boolean
+  ) {
+    if (menu?.groupId === group.id) {
+      menu = null;
+      return;
+    }
+    const index = groups.indexOf(group);
+    menu = {
+      groupId: group.id,
+      open: true,
+      label: `Actions for group ${group.name}`,
+      anchor,
+      focusFirst: viaKeyboard,
+      returnTo: anchor,
+      items: [
+        {
+          label: "Rename",
+          icon: "pencil",
+          onselect: () => openRename(group),
+        },
+        {
+          label: "Move up",
+          icon: "chevron-up",
+          disabled: index <= 0,
+          onselect: () => reorderGroup(group.id, index - 1),
+        },
+        {
+          label: "Move down",
+          icon: "chevron-down",
+          disabled: index >= groups.length - 1,
+          onselect: () => reorderGroup(group.id, index + 1),
+        },
+        {
+          label: "Remove",
+          icon: "trash",
+          danger: true,
+          onselect: () => (deletingGroup = group),
+        },
+      ],
+    };
+  }
+
+  const ungroupedRows = $derived(
+    entries.filter((e) => e.group_id === null && matchesEntry(e))
+  );
+  const groupSections = $derived(
+    groups
+      .map((g) => ({
+        group: g,
+        rows: entries.filter((e) => e.group_id === g.id && matchesEntry(e)),
+      }))
+      .filter((s) => filter.trim() === "" || s.rows.length > 0)
+  );
 
   async function assignDesktop(entry: LaunchEntry, id: string | null) {
     busy = true;
@@ -490,6 +714,56 @@
   <title>Quick Launch — Sprout</title>
 </svelte:head>
 
+{#snippet entryRow(entry: LaunchEntry)}
+  <li class="rack__row" use:lazyIcon={entry.kind === "app" ? entry.target : ""}>
+    <span class="rack__badge" aria-hidden="true">
+      {#if entry.kind === "app" && appIcons[entry.target]}
+        <!-- Ticket 97: the app's real icon, extracted lazily from its
+             target; kind glyphs stay for commands and unresolvable targets. -->
+        <img
+          class="rack__icon"
+          src={appIcons[entry.target]}
+          alt=""
+          width={16}
+          height={16}
+        />
+      {:else}
+        <Icon name={entry.kind === "app" ? "rocket" : "terminal"} size={14} />
+      {/if}
+    </span>
+    <span class="rack__name">{entry.name}</span>
+    <span class="rack__kind">
+      {entry.kind}
+      {#if entry.kind === "command" && entry.shell}
+        · {entry.shell}
+      {/if}
+    </span>
+    {#if desktopGrouping && desktopSupported && entry.desktop_id}
+      <span
+        class="rack__desk"
+        title={`Opens on ${desktopName(entry.desktop_id)}`}
+      >
+        {desktopName(entry.desktop_id)}
+      </span>
+    {:else if desktopGrouping && desktopSupported && !entry.desktop_id}
+      <span class="rack__desk rack__desk--empty" aria-hidden="true"></span>
+    {/if}
+    <span class="rack__target" title={entry.target}>{entry.target}</span>
+    <IconButton
+      icon="dots"
+      label={`Actions for ${entry.name}`}
+      quiet
+      data-ctx-trigger
+      onclick={(e) =>
+        openRowMenu(
+          entry,
+          e.currentTarget as HTMLButtonElement,
+          e.detail === 0
+        )}
+    />
+  </li>
+{/snippet}
+
 <section class="launch" aria-labelledby="launch-title">
   <PageHeader titleId="launch-title" title="Quick Launch">
     {#snippet actions()}
@@ -500,6 +774,12 @@
         <Icon name="play" size={15} />
         {launching ? "Starting…" : "Start"}
       </Button>
+      {#if groupsOn}
+        <Button variant="secondary" onclick={openCreate} disabled={busy}>
+          <Icon name="plus" size={15} />
+          New group
+        </Button>
+      {/if}
       <Button
         variant="secondary"
         onclick={toggleAdd}
@@ -511,9 +791,9 @@
       </Button>
     {/snippet}
     {#snippet subtitle()}
-      {visible.length} {visible.length === 1 ? "entry" : "entries"}
+      {matchedCount} {matchedCount === 1 ? "entry" : "entries"}
       {filter.trim()
-        ? visible.length === 1
+        ? matchedCount === 1
           ? " matches your filter."
           : " match your filter."
         : "."}
@@ -604,10 +884,10 @@
                     onclick={() => addCandidate(candidate)}
                     use:lazyIcon={candidate.target}
                   >
-                    {#if icons[candidate.target]}
+                    {#if appIcons[candidate.target]}
                       <img
                         class="hits__icon"
-                        src={icons[candidate.target]}
+                        src={appIcons[candidate.target]}
                         alt=""
                         width={24}
                         height={24}
@@ -645,7 +925,7 @@
     <p class="sifting" aria-live="polite">Loading…</p>
   {:else if loadFailed}
     <Notice tone="error">Could not load the Quick Launch list.</Notice>
-  {:else if visible.length === 0 && !filter.trim()}
+  {:else if entries.length === 0}
     <EmptyState icon="rocket" title="Nothing to launch yet">
       <p>
         Press <strong>Add</strong> to search this machine's installed apps,
@@ -653,7 +933,7 @@
         Quick Launch — one click starts them together.
       </p>
     </EmptyState>
-  {:else if visible.length === 0}
+  {:else if matchedCount === 0}
     <EmptyState title={`Nothing matches “${filter.trim()}”`}>
       <p>Try a different name, or clear the filter to see every entry.</p>
       <div class="empty-cta">
@@ -662,47 +942,52 @@
         </Button>
       </div>
     </EmptyState>
-  {:else}
-    <ul class="rack">
-      {#each visible as entry (entry.id)}
-        <li class="rack__row">
-          <span class="rack__badge" aria-hidden="true">
-            <Icon
-              name={entry.kind === "app" ? "rocket" : "terminal"}
-              size={14}
-            />
-          </span>
-          <span class="rack__name">{entry.name}</span>
-          <span class="rack__kind">
-            {entry.kind}
-            {#if entry.kind === "command" && entry.shell}
-              · {entry.shell}
-            {/if}
-          </span>
-          {#if desktopGrouping && desktopSupported && entry.desktop_id}
-            <span
-              class="rack__desk"
-              title={`Opens on ${desktopName(entry.desktop_id)}`}
-            >
-              {desktopName(entry.desktop_id)}
-            </span>
-          {:else if desktopGrouping && desktopSupported && !entry.desktop_id}
-            <span class="rack__desk rack__desk--empty" aria-hidden="true"></span>
-          {/if}
-          <span class="rack__target" title={entry.target}>{entry.target}</span>
+  {:else if grouped}
+    {#if ungroupedRows.length > 0}
+      <ul class="rack">
+        {#each ungroupedRows as entry (entry.id)}
+          {@render entryRow(entry)}
+        {/each}
+      </ul>
+    {/if}
+    {#each groupSections as section (section.group.id)}
+      <GroupAccordion
+        open={sectionOpen(section.group.id)}
+        controls={`ql-group-${section.group.id}`}
+        name={section.group.name}
+        count={groupSize(section.group.id)}
+        onToggle={() => toggleSection(section.group.id)}
+      >
+        {#snippet actions()}
           <IconButton
             icon="dots"
-            label={`Actions for ${entry.name}`}
+            label={`Actions for group ${section.group.name}`}
             quiet
             data-ctx-trigger
             onclick={(e) =>
-              openRowMenu(
-                entry,
+              openGroupMenu(
+                section.group,
                 e.currentTarget as HTMLButtonElement,
                 e.detail === 0
               )}
           />
-        </li>
+        {/snippet}
+        <ul class="rack">
+          {#each section.rows as entry (entry.id)}
+            {@render entryRow(entry)}
+          {/each}
+          {#if section.rows.length === 0}
+            <li class="rack__hint">
+              No entries here yet — use an entry's ⋯ menu to move one in.
+            </li>
+          {/if}
+        </ul>
+      </GroupAccordion>
+    {/each}
+  {:else}
+    <ul class="rack">
+      {#each entries.filter(matchesEntry) as entry (entry.id)}
+        {@render entryRow(entry)}
       {/each}
     </ul>
   {/if}
@@ -721,6 +1006,55 @@
     Launch. The app itself is untouched.
   </p>
 </ConfirmDialog>
+
+<ConfirmDialog
+  open={deletingGroup !== null}
+  title="Remove group?"
+  confirmLabel="Remove"
+  danger
+  onconfirm={removeGroup}
+  oncancel={() => (deletingGroup = null)}
+>
+  <p>
+    <strong>{deletingGroup?.name}</strong> will be deleted. Its entries will
+    not be — they return to the ungrouped list.
+  </p>
+</ConfirmDialog>
+
+<Dialog
+  open={nameDialog !== null}
+  title={nameDialog?.mode === "rename" ? "Rename group" : "New group"}
+  onclose={() => (nameDialog = null)}
+  width={380}
+>
+  <form
+    class="name-form"
+    onsubmit={(e) => {
+      e.preventDefault();
+      submitName();
+    }}
+  >
+    <TextInput
+      label="Name"
+      id="launch-group-name"
+      value={groupNameDraft}
+      placeholder="e.g. Daily drivers"
+      required
+      onchange={(v) => (groupNameDraft = v)}
+    />
+    {#if nameError}
+      <Notice tone="error">{nameError}</Notice>
+    {/if}
+    <div class="name-form__buttons">
+      <Button variant="secondary" onclick={() => (nameDialog = null)}>
+        Cancel
+      </Button>
+      <Button kind="submit" disabled={savingName}>
+        {nameDialog?.mode === "rename" ? "Rename" : "Create"}
+      </Button>
+    </div>
+  </form>
+</Dialog>
 
 <CommandFormDialog
   open={commandOpen}
@@ -940,6 +1274,13 @@
     color: var(--accent);
   }
 
+  /* Ticket 97: the entry's real app icon, where one resolves. */
+  .rack__icon {
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+  }
+
   .rack__name {
     font-family: var(--font-display);
     font-size: var(--text-base);
@@ -990,5 +1331,27 @@
     font-family: var(--font-mono);
     font-size: var(--text-xs);
     color: var(--text-muted);
+  }
+
+  /* A group with no members yet keeps its place in the user's order without
+     pretending to have content. */
+  .rack__hint {
+    padding: var(--space-3) var(--space-4);
+    border: 1px dashed var(--border-strong);
+    border-radius: var(--radius);
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+  }
+
+  .name-form {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+  }
+
+  .name-form__buttons {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--space-2);
   }
 </style>

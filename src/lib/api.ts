@@ -8,6 +8,8 @@ import type {
   ClipInput,
   Composition,
   ImportResult,
+  Group,
+  GroupsCollection,
   LaunchCandidate,
   LaunchCommandTest,
   LaunchEntry,
@@ -239,6 +241,13 @@ export function startQuickLaunch(): Promise<void> {
   return invoke<void>("start_quick_launch");
 }
 
+/** Starts one Launch entry through the same pipeline as Start all (ticket
+ * 93) — the Quick Launch window's clickable entry rows. Same single-flight
+ * guard, event, and summary notification as the whole-list run. */
+export function startLaunchEntry(id: number): Promise<void> {
+  return invoke<void>("start_launch_entry", { id });
+}
+
 /** The fresh installed-app snapshot behind the Quick Launch search (ticket
  * 39): Start Menu shortcuts + uninstall-registry entries, re-walked on every
  * call — never cached. The frontend filters the returned list locally. */
@@ -342,6 +351,58 @@ export function moveClip(id: number, toPosition: number): Promise<void> {
  *  only after the write landed, so a "Copied" flash never lies. */
 export function copyClip(id: number): Promise<void> {
   return invoke<void>("copy_clip", { id });
+}
+
+// ------------------- Groups (ticket 89) ------------------------------------
+
+/** Lists one collection's Groups in user order (ticket 89). */
+export function listGroups(collection: GroupsCollection): Promise<Group[]> {
+  return invoke<Group[]>("list_groups", { collection });
+}
+
+export function createGroup(
+  collection: GroupsCollection,
+  name: string
+): Promise<Group> {
+  return invoke<Group>("create_group", { collection, name });
+}
+
+export function renameGroup(id: number, name: string): Promise<void> {
+  return invoke<void>("rename_group", { id, name });
+}
+
+/** Deleting a group returns its members to ungrouped — never deletes them. */
+export function deleteGroup(id: number): Promise<void> {
+  return invoke<void>("delete_group", { id });
+}
+
+export function moveGroup(id: number, toPosition: number): Promise<void> {
+  return invoke<void>("move_group", { id, toPosition });
+}
+
+/** An item joins a group of its own collection only; cross-collection
+ *  assignments are refused at the data layer. */
+export function assignToGroup(
+  collection: GroupsCollection,
+  itemId: number,
+  groupId: number
+): Promise<void> {
+  return invoke<void>("assign_to_group", { collection, itemId, groupId });
+}
+
+export function unassignFromGroup(
+  collection: GroupsCollection,
+  itemId: number
+): Promise<void> {
+  return invoke<void>("unassign_from_group", { collection, itemId });
+}
+
+/** One collection's Groups toggle (ticket 89); persisted per collection. */
+export function updateGroupsEnabled(
+  collection: GroupsCollection,
+  enabled: boolean
+): Promise<void> {
+  return invoke<void>("update_groups_enabled", { collection, enabled });
 }
 
 /** The Quick Launch dock's toggle (ticket 53): docks the window to its

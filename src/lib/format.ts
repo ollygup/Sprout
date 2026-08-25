@@ -53,3 +53,26 @@ export function clipTitle(name: string, content: string): string {
     ""
   );
 }
+
+/** The end-of-run wording shared by the Quick Launch page's flash notice and
+ *  the Quick Launch window's status line (ticket 42): started / skipped /
+ *  failed counts, skipped entries with their reasons (ticket 48), and the
+ *  desktop-assignment notes (ticket 44) — a no-op run is never silent. */
+export function launchReportSummary(report: {
+  started: string[];
+  skipped: string[];
+  failed: string[];
+  notes: string[];
+}): string {
+  const counts = [
+    `started ${report.started.length}`,
+    `skipped ${report.skipped.length}`,
+    `failed ${report.failed.length}`,
+  ];
+  const skipped =
+    report.skipped.length > 0 ? ` Skipped: ${report.skipped.join(", ")}.` : "";
+  const failed =
+    report.failed.length > 0 ? ` Failed: ${report.failed.join(", ")}.` : "";
+  const notes = report.notes.length > 0 ? ` ${report.notes.join(". ")}.` : "";
+  return `Quick Launch done — ${counts.join(", ")}.${skipped}${failed}${notes}`;
+}

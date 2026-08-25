@@ -169,7 +169,7 @@
     aria-label={ctx.label}
     style="left: {pos.x}px; top: {pos.y}px;"
   >
-    {#each ctx.items as item, i (item.label)}
+    {#each ctx.items as item, i}
       {#if item.separator}
         <div class="ctx-sep" role="separator"></div>
       {:else}

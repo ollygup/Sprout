@@ -4,12 +4,12 @@
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Create/rename/reorder/delete/assign/unassign all work per collection
-- [ ] Assigning an item to another collection's group is rejected at the data layer
-- [ ] An item holds at most one group; deleting a group returns members to ungrouped without deleting them
-- [ ] List ordering helpers return ungrouped items first, then groups in user order
-- [ ] Settings keys persist with default-off values
-- [ ] Glossary documents Group and touches up Launch entry wording
-- [ ] Backend test suite covers isolation, single-membership, delete-cascade ordering
+- [x] Create/rename/reorder/delete/assign/unassign all work per collection
+- [x] Assigning an item to another collection's group is rejected at the data layer
+- [x] An item holds at most one group; deleting a group returns members to ungrouped without deleting them
+- [x] List ordering helpers return ungrouped items first, then groups in user order
+- [x] Settings keys persist with default-off values
+- [x] Glossary documents Group and touches up Launch entry wording
+- [x] Backend test suite covers isolation, single-membership, delete-cascade ordering

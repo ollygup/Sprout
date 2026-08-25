@@ -99,6 +99,12 @@ fn migrate(conn: &Connection) -> Result<()> {
              reboot_required INTEGER NOT NULL DEFAULT 0,
              log_path        TEXT NOT NULL
          );
+         CREATE TABLE IF NOT EXISTS groups (
+             id         INTEGER PRIMARY KEY AUTOINCREMENT,
+             collection TEXT NOT NULL CHECK (collection IN ('launch', 'action', 'clip')),
+             name       TEXT NOT NULL,
+             position   INTEGER NOT NULL DEFAULT 0
+         );
          CREATE TABLE IF NOT EXISTS launch_entries (
              id          INTEGER PRIMARY KEY AUTOINCREMENT,
              name        TEXT NOT NULL,
@@ -128,7 +134,41 @@ fn migrate(conn: &Connection) -> Result<()> {
     ensure_preset_imported_column(conn)?;
     ensure_product_timestamps(conn)?;
     ensure_product_install_dir(conn)?;
-    ensure_quick_action_stoppable(conn)
+    ensure_quick_action_stoppable(conn)?;
+    ensure_item_group_columns(conn)
+}
+
+/// Upgrades databases created before Groups existed (any database from
+/// tickets 01-88): creates the `groups` table (fresh databases already have
+/// it) and adds the nullable `group_id` column to the three item tables.
+/// Idempotent — re-runs change nothing.
+fn ensure_item_group_columns(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS groups (
+             id         INTEGER PRIMARY KEY AUTOINCREMENT,
+             collection TEXT NOT NULL CHECK (collection IN ('launch', 'action', 'clip')),
+             name       TEXT NOT NULL,
+             position   INTEGER NOT NULL DEFAULT 0
+         );",
+    )?;
+    for table in ["launch_entries", "quick_actions", "clips"] {
+        let exists: bool = conn.query_row(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name = 'group_id')"
+            ),
+            [],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            // ON DELETE SET NULL is the data-layer shape of ticket 89's
+            // delete rule: removing a group returns its members to ungrouped.
+            conn.execute_batch(&format!(
+                "ALTER TABLE {table} ADD COLUMN group_id
+                 REFERENCES groups(id) ON DELETE SET NULL"
+            ))?;
+        }
+    }
+    Ok(())
 }
 
 /// Upgrades databases created before the `imported` flag existed (dev
@@ -1862,7 +1902,7 @@ mod tests {
         tracked.name = "renamed".into();
         crate::quick_actions::update_quick_action(
             &conn,
-            &crate::quick_actions::QuickAction { id: list[1].id, action: tracked },
+            &crate::quick_actions::QuickAction { id: list[1].id, action: tracked, group_id: None },
         )
         .unwrap();
         assert_eq!(
@@ -2258,5 +2298,60 @@ mod tests {
         assert_eq!(load_dock_edge(&conn, monitor), None);
         upsert_meta(&conn, &dock_key(KEY_DOCK_MODE_PREFIX, monitor), "overlay").unwrap();
         assert_eq!(load_dock_mode(&conn, monitor), None);
+    }
+}
+
+#[cfg(test)]
+mod groups_migration_tests {
+    use super::*;
+
+    #[test]
+    fn migrates_databases_created_before_groups() {
+        // A database from tickets 01-88 has the item tables but no `groups`
+        // table and no `group_id` columns; init_at must add both and leave
+        // the schema fully usable.
+        let dir = tempfile::tempdir().unwrap().into_path();
+        std::fs::create_dir_all(&dir).unwrap();
+        {
+            let conn = Connection::open(dir.join("sprout.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE launch_entries (
+                     id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                     name        TEXT NOT NULL,
+                     kind        TEXT NOT NULL CHECK (kind IN ('app', 'command')),
+                     target      TEXT NOT NULL,
+                     shell       TEXT CHECK (shell IN ('powershell', 'cmd', 'none')),
+                     show_window INTEGER NOT NULL DEFAULT 0,
+                     desktop_id  TEXT,
+                     position    INTEGER NOT NULL DEFAULT 0
+                 );
+                 CREATE TABLE clips (
+                     id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                     name     TEXT NOT NULL,
+                     content  TEXT NOT NULL,
+                     position INTEGER NOT NULL DEFAULT 0
+                 );
+                 INSERT INTO launch_entries (name, kind, target, shell, position)
+                 VALUES ('legacy', 'command', 'echo hi', 'none', 0);",
+            )
+            .unwrap();
+        }
+        let conn = init_at(&dir).unwrap();
+
+        // The migrated table reads back with the group reference unset, and
+        // the new machinery works on it end to end.
+        let entries = crate::launch::list_launch_entries(&conn).unwrap();
+        assert_eq!(entries[0].group_id, None);
+        let group = crate::groups::create_group(&conn, crate::groups::Collection::Launch, "Legacy").unwrap();
+        crate::groups::assign_item(&conn, crate::groups::Collection::Launch, entries[0].id, group.id)
+            .unwrap();
+        let entries = crate::launch::list_launch_entries(&conn).unwrap();
+        assert_eq!(entries[0].group_id, Some(group.id));
+
+        // The migration is idempotent — re-running init changes nothing.
+        drop(conn);
+        let conn = init_at(&dir).unwrap();
+        let entries = crate::launch::list_launch_entries(&conn).unwrap();
+        assert_eq!(entries[0].group_id, Some(group.id));
     }
 }

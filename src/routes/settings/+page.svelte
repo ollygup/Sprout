@@ -185,6 +185,11 @@
         // Not this screen's knob — the Quick Launch toolbar owns it (ticket
         // 88); the loaded value passes through untouched.
         desktop_assignments: settings.desktop_assignments,
+        // Not these knobs either — each list page's toolbar owns its
+        // collection's Groups toggle (ticket 89); loaded values pass through.
+        launch_groups: settings.launch_groups,
+        action_groups: settings.action_groups,
+        clip_groups: settings.clip_groups,
       });
       saved = "Saved — the next run honors these.";
       // Reflect any clamping back into the fields.

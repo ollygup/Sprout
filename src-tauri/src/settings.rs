@@ -34,7 +34,12 @@
 //!   desktop assignments and shows their surface (ticket 88): "off" (default)
 //!   or "on". Dormant means fully dormant: no assignment menu or badge, and
 //!   the runner treats every entry as unassigned — while stored assignments
-//!   survive untouched, so re-enabling restores them.
+//!   survive untouched, so re-enabling restores them;
+//! - `launch_groups` / `action_groups` / `clip_groups` — whether each list
+//!   page offers its Groups feature (ticket 89): "off" (default) per
+//!   collection. Off is fully dormant — the lists render flat and no group
+//!   affordance appears anywhere (main app, window, dock) — while stored
+//!   groups and memberships survive untouched, so re-enabling restores them.
 
 use rusqlite::{params, Connection};
 
@@ -65,6 +70,9 @@ pub const DEFAULT_AUTOSTART: &str = "on";
 /// the list stays flat and assignments stay dormant until the user turns
 /// grouping on.
 pub const DEFAULT_DESKTOP_ASSIGNMENTS: &str = "off";
+/// Every collection's Groups feature is opt-in (ticket 89, research 0006
+/// patterns 2–3): the lists stay flat until the user turns grouping on.
+pub const DEFAULT_GROUPS_FEATURE: &str = "off";
 
 const KEY_TIMEOUT: &str = "settings.timeout_minutes";
 const KEY_RETENTION: &str = "settings.log_retention_days";
@@ -72,6 +80,9 @@ const KEY_THEME: &str = "settings.theme";
 const KEY_INSTALL_DIR: &str = "settings.install_dir";
 const KEY_LAUNCH_CONCURRENCY: &str = "launch.concurrency";
 const KEY_DESKTOP_ASSIGNMENTS: &str = "launch.desktop_assignments";
+const KEY_LAUNCH_GROUPS: &str = "launch.groups";
+const KEY_ACTION_GROUPS: &str = "actions.groups";
+const KEY_CLIP_GROUPS: &str = "clips.groups";
 const KEY_DOCK_MODE: &str = "dock.mode";
 const KEY_DOCK_EDGE: &str = "dock.edge";
 const KEY_DOCK_STATE: &str = "dock.state";
@@ -110,6 +121,14 @@ pub struct Settings {
     /// renders flat, and the runner treats every entry as unassigned — but
     /// stored assignments are never deleted.
     pub desktop_assignments: String,
+    /// Whether the Quick Launch page offers its Groups feature (ticket 89):
+    /// "on" or "off". Off is fully dormant — a flat list, no group
+    /// affordances — while stored groups and memberships survive untouched.
+    pub launch_groups: String,
+    /// Whether the Quick Actions page offers its Groups feature (ticket 89).
+    pub action_groups: String,
+    /// Whether the Quick Clips page offers its Groups feature (ticket 89).
+    pub clip_groups: String,
 }
 
 impl Default for Settings {
@@ -125,6 +144,9 @@ impl Default for Settings {
             dock_state: DEFAULT_DOCK_STATE.to_string(),
             autostart: DEFAULT_AUTOSTART.to_string(),
             desktop_assignments: DEFAULT_DESKTOP_ASSIGNMENTS.to_string(),
+            launch_groups: DEFAULT_GROUPS_FEATURE.to_string(),
+            action_groups: DEFAULT_GROUPS_FEATURE.to_string(),
+            clip_groups: DEFAULT_GROUPS_FEATURE.to_string(),
         }
     }
 }
@@ -196,6 +218,15 @@ pub fn validate_desktop_assignments(value: &str) -> std::result::Result<(), Stri
     }
 }
 
+/// Accepts only the two Groups-feature states every list page's toggle
+/// writes (ticket 89).
+pub fn validate_groups_feature(value: &str) -> std::result::Result<(), String> {
+    match value {
+        "on" | "off" => Ok(()),
+        _ => Err("Groups must be \"on\" or \"off\"".into()),
+    }
+}
+
 impl Settings {
     /// Rejects values that would break a run or empty the log archive.
     /// Timeouts must be at least 1 minute and at most a day; retention at
@@ -219,6 +250,9 @@ impl Settings {
         validate_dock_state(&self.dock_state)?;
         validate_autostart(&self.autostart)?;
         validate_desktop_assignments(&self.desktop_assignments)?;
+        validate_groups_feature(&self.launch_groups)?;
+        validate_groups_feature(&self.action_groups)?;
+        validate_groups_feature(&self.clip_groups)?;
         Ok(())
     }
 
@@ -273,6 +307,12 @@ pub fn load(conn: &Connection) -> Settings {
             .unwrap_or_else(|| DEFAULT_AUTOSTART.to_string()),
         desktop_assignments: validated(conn, KEY_DESKTOP_ASSIGNMENTS, validate_desktop_assignments)
             .unwrap_or_else(|| DEFAULT_DESKTOP_ASSIGNMENTS.to_string()),
+        launch_groups: validated(conn, KEY_LAUNCH_GROUPS, validate_groups_feature)
+            .unwrap_or_else(|| DEFAULT_GROUPS_FEATURE.to_string()),
+        action_groups: validated(conn, KEY_ACTION_GROUPS, validate_groups_feature)
+            .unwrap_or_else(|| DEFAULT_GROUPS_FEATURE.to_string()),
+        clip_groups: validated(conn, KEY_CLIP_GROUPS, validate_groups_feature)
+            .unwrap_or_else(|| DEFAULT_GROUPS_FEATURE.to_string()),
     }
 }
 
@@ -295,6 +335,9 @@ pub fn save(conn: &Connection, settings: &Settings) -> std::result::Result<(), S
     upsert_meta(&tx, KEY_AUTOSTART, &settings.autostart).map_err(|e| e.to_string())?;
     upsert_meta(&tx, KEY_DESKTOP_ASSIGNMENTS, &settings.desktop_assignments)
         .map_err(|e| e.to_string())?;
+    upsert_meta(&tx, KEY_LAUNCH_GROUPS, &settings.launch_groups).map_err(|e| e.to_string())?;
+    upsert_meta(&tx, KEY_ACTION_GROUPS, &settings.action_groups).map_err(|e| e.to_string())?;
+    upsert_meta(&tx, KEY_CLIP_GROUPS, &settings.clip_groups).map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())
 }
 
@@ -336,6 +379,23 @@ pub fn save_desktop_assignments(conn: &Connection, value: &str) -> std::result::
     upsert_meta(conn, KEY_DESKTOP_ASSIGNMENTS, value).map_err(|e| e.to_string())
 }
 
+/// Persists one collection's Groups toggle (ticket 89) — the list page's
+/// toolbar-row switch writes its own collection's key without touching the
+/// other knobs or collections.
+pub fn save_groups_feature(
+    conn: &Connection,
+    collection: crate::groups::Collection,
+    value: &str,
+) -> std::result::Result<(), String> {
+    validate_groups_feature(value)?;
+    let key = match collection {
+        crate::groups::Collection::Launch => KEY_LAUNCH_GROUPS,
+        crate::groups::Collection::Action => KEY_ACTION_GROUPS,
+        crate::groups::Collection::Clip => KEY_CLIP_GROUPS,
+    };
+    upsert_meta(conn, key, value).map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,6 +435,9 @@ mod tests {
             load(&conn).desktop_assignments,
             DEFAULT_DESKTOP_ASSIGNMENTS
         );
+        assert_eq!(load(&conn).launch_groups, DEFAULT_GROUPS_FEATURE);
+        assert_eq!(load(&conn).action_groups, DEFAULT_GROUPS_FEATURE);
+        assert_eq!(load(&conn).clip_groups, DEFAULT_GROUPS_FEATURE);
     }
 
     #[test]
@@ -391,6 +454,9 @@ mod tests {
             dock_state: "docked".to_string(),
             autostart: "off".to_string(),
             desktop_assignments: "on".to_string(),
+            launch_groups: "on".to_string(),
+            action_groups: "off".to_string(),
+            clip_groups: "on".to_string(),
         };
         {
             let conn = crate::db::init_at(&dir).unwrap();
@@ -452,6 +518,46 @@ mod tests {
         assert!(s.validate().is_ok());
         s.desktop_assignments = "on".to_string();
         assert!(s.validate().is_ok());
+        s.launch_groups = "maybe".to_string();
+        assert!(s.validate().is_err());
+        s.launch_groups = "on".to_string();
+        assert!(s.validate().is_ok());
+        s.action_groups = "maybe".to_string();
+        assert!(s.validate().is_err());
+        s.action_groups = "off".to_string();
+        assert!(s.validate().is_ok());
+        s.clip_groups = "maybe".to_string();
+        assert!(s.validate().is_err());
+        s.clip_groups = "on".to_string();
+        assert!(s.validate().is_ok());
+    }
+
+    #[test]
+    fn invalid_stored_groups_features_fall_back_to_default() {
+        let conn = conn();
+        // Broken values written by an older build must never surface the
+        // feature — each collection reads back as dormant (off).
+        upsert_meta(&conn, KEY_LAUNCH_GROUPS, "maybe").unwrap();
+        upsert_meta(&conn, KEY_ACTION_GROUPS, "").unwrap();
+        upsert_meta(&conn, KEY_CLIP_GROUPS, "1").unwrap();
+        let loaded = load(&conn);
+        assert_eq!(loaded.launch_groups, DEFAULT_GROUPS_FEATURE);
+        assert_eq!(loaded.action_groups, DEFAULT_GROUPS_FEATURE);
+        assert_eq!(loaded.clip_groups, DEFAULT_GROUPS_FEATURE);
+    }
+
+    #[test]
+    fn groups_feature_saver_targets_one_collection_only() {
+        let conn = conn();
+        save_groups_feature(&conn, crate::groups::Collection::Action, "on").unwrap();
+        let loaded = load(&conn);
+        assert_eq!(loaded.action_groups, "on");
+        assert_eq!(loaded.launch_groups, DEFAULT_GROUPS_FEATURE);
+        assert_eq!(loaded.clip_groups, DEFAULT_GROUPS_FEATURE);
+
+        save_groups_feature(&conn, crate::groups::Collection::Clip, "off").unwrap();
+        assert_eq!(load(&conn).clip_groups, "off");
+        assert!(save_groups_feature(&conn, crate::groups::Collection::Launch, "maybe").is_err());
     }
 
     #[test]
@@ -669,6 +775,9 @@ mod tests {
             dock_state: DEFAULT_DOCK_STATE.to_string(),
             autostart: DEFAULT_AUTOSTART.to_string(),
             desktop_assignments: DEFAULT_DESKTOP_ASSIGNMENTS.to_string(),
+            launch_groups: DEFAULT_GROUPS_FEATURE.to_string(),
+            action_groups: DEFAULT_GROUPS_FEATURE.to_string(),
+            clip_groups: DEFAULT_GROUPS_FEATURE.to_string(),
         };
         assert!(save(&conn, &bad).is_err());
         // Nothing was persisted.

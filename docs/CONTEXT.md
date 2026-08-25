@@ -63,8 +63,12 @@ _Avoid_: Post-install check
 ## Quick access (tray, window, dock)
 
 **Launch entry**:
-A single item in the Quick Launch list — either a picked app (`.lnk`/`.exe`, launched as-is) or a user-written command (PowerShell/cmd/no-shell, optional show-window) — optionally assigned to a virtual desktop. Assignments are opt-in (the page-features gear menu on Quick Launch, default off, ticket 88): on, the launched window moves to its desktop and assigned rows carry a badge; off, the feature is fully dormant — stored assignments are never shown or applied, but also never deleted. Assignments never structure the list itself. Machine-local; never part of Presets or exports.
+A single item in the Quick Launch list — either a picked app (`.lnk`/`.exe`, launched as-is) or a user-written command (PowerShell/cmd/no-shell, optional show-window). An entry may carry two independent, optional annotations, never to be confused: a **desktop assignment** (which virtual desktop its window opens on, ticket 88) and a **Group** membership (which user-named bucket it sits in, ticket 89) — assigning a desktop never groups an entry, and grouping one never assigns a desktop. Both are opt-in with their own toggles (default off); off means fully dormant — stored values are never shown or applied, but also never deleted. Neither structures the list unless its feature is on. Machine-local; never part of Presets or exports.
 _Avoid_: App entry, shortcut
+
+**Group**:
+A user-named bucket within exactly one collection (ticket 89): a Quick Action group holds only Quick Actions, a Clip group only Clips, a Launch-entry group only Launch entries — namespaces are isolated in storage, so cross-collection grouping is impossible, not just hidden. Each item belongs to at most one group; items start ungrouped, and deleting a group returns its members to ungrouped instead of deleting them. Lists render ungrouped items first, then groups in the user's own order. Opt-in per collection via each page's Groups toggle (default off): off renders every list flat while stored groups and memberships survive untouched. A Group is structure for organizing lists — unrelated to virtual-desktop assignment, which decides where a launched window opens.
+_Avoid_: Folder, category, tag, desktop group
 
 **Quick Launch**:
 The machine-local list of Launch entries that the tray one-click launcher and the Quick Launch window start. Never part of Presets, Plan, Run, or exports.

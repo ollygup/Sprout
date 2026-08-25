@@ -287,6 +287,25 @@ export interface Settings {
    *  flat list, no assignment menu or badge, runner ignores assignments —
    *  while stored assignments survive for re-enabling. */
   desktop_assignments: string;
+  /** Whether each list page offers its Groups feature (ticket 89): "on" or
+   *  "off", default off per collection. Off is fully dormant — flat list, no
+   *  group affordances — while stored groups and memberships survive for
+   *  re-enabling. */
+  launch_groups: string;
+  action_groups: string;
+  clip_groups: string;
+}
+
+/** Which collection a Group buckets (ticket 89) — the discriminator that
+ *  keeps the three namespaces apart at the data layer. */
+export type GroupsCollection = "launch" | "action" | "clip";
+
+/** A user-named bucket within exactly one collection (ticket 89). Items hold
+ *  at most one group; deleting a group returns members to ungrouped. */
+export interface Group {
+  id: number;
+  collection: GroupsCollection;
+  name: string;
 }
 
 /** What a Launch entry starts: a picked app (shortcut or exe) or a command
@@ -310,9 +329,12 @@ export interface LaunchEntryInput {
   desktop_id: string | null;
 }
 
-/** A Launch entry as stored: the input plus its library id. */
+/** A Launch entry as stored: the input plus its library id. `group_id` is
+ *  its optional Group membership (ticket 89) — assignments go through the
+ *  groups commands, never the edit payload. */
 export interface LaunchEntry extends LaunchEntryInput {
   id: number;
+  group_id: number | null;
 }
 
 /** The result of one Test click in the add-command dialog (ticket 41): exit
@@ -371,9 +393,11 @@ export interface QuickActionInput {
   stop_command: string | null;
 }
 
-/** A Quick Action as stored: the input plus its library id. */
+/** A Quick Action as stored: the input plus its library id. `group_id` is
+ *  its optional Group membership (ticket 89). */
 export interface QuickAction extends QuickActionInput {
   id: number;
+  group_id: number | null;
 }
 
 /** One run-state change for a tracked Quick Action (ticket 62): emitted on
@@ -395,9 +419,11 @@ export interface ClipInput {
   content: string;
 }
 
-/** A Clip as stored: the input plus its library id. */
+/** A Clip as stored: the input plus its library id. `group_id` is its
+ *  optional Group membership (ticket 89). */
 export interface Clip extends ClipInput {
   id: number;
+  group_id: number | null;
 }
 
 /** The assignment surface's gate + list (ticket 44): `supported` is false

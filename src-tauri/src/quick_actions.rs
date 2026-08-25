@@ -14,7 +14,8 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use rusqlite::{params, Connection, OptionalExtension, Result};
 use serde::{Deserialize, Serialize};
@@ -40,30 +41,91 @@ pub struct QuickActionInput {
 
 /// A Quick Action as stored: the input plus its library id. Position is
 /// internal (order within the list) and never part of the payload — reorders
-/// go through `move_quick_action`.
+/// go through `move_quick_action`. `group_id` is the action's optional Group
+/// membership (ticket 89), assigned through the groups commands only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuickAction {
     pub id: i64,
     #[serde(flatten)]
     pub action: QuickActionInput,
+    /// The one Group this action belongs to (`None` = ungrouped). Not part
+    /// of the edit payload — assignments go through `assign_to_group`.
+    #[serde(default)]
+    pub group_id: Option<i64>,
 }
 
 /// One tracked Quick Action run (ticket 62): the spawned process's id, held
 /// in the per-session registry for as long as the process lives. The pid is
 /// what a no-stop-command Stop kills (`taskkill /T /F`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct RunningQuickAction {
     pub pid: u32,
     /// This run's `output.log`, when its folder could be created (ticket 64)
     /// — the Stop path appends the stop line and the stop command's own
     /// output to it.
     pub log_path: Option<PathBuf>,
+    /// Marked by the reaper once the process exit lands (ticket 92) — the
+    /// stop-command watchdog waits on this instead of polling, so an early
+    /// exit stands it down immediately and a hung stop fires at the box.
+    pub exited: ExitSignal,
+}
+
+/// How long a configured stop command gets to finish the process (ticket 92)
+/// before its tree is force-killed. A hung stop command must never wedge the
+/// Stop control — after this box the run ends one way or another.
+pub const STOP_WATCHDOG: Duration = Duration::from_secs(10);
+
+/// One tracked run's exit signal (ticket 92): the reaper marks it when
+/// `Child::wait` returns; a Stop's watchdog waits on it, so a graceful stop
+/// command that never finishes is force-killed at [`STOP_WATCHDOG`] while an
+/// early exit stands the watchdog down without waiting out the box.
+#[derive(Clone, Debug, Default)]
+pub struct ExitSignal(Arc<(Mutex<bool>, Condvar)>);
+
+impl ExitSignal {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Marks the exit as landed and wakes every waiter. A poisoned lock is
+    /// recovered through: the flag is a plain bool whose value matters more
+    /// than whatever panicked while holding it.
+    fn lock_flag(&self) -> std::sync::MutexGuard<'_, bool> {
+        self.0 .0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Marks the exit as landed and wakes every waiter.
+    pub fn signal(&self) {
+        *self.lock_flag() = true;
+        self.0 .1.notify_all();
+    }
+
+    /// Waits up to `timeout` for [`Self::signal`]: `true` when the exit
+    /// landed within the box, `false` when the box expired — the caller
+    /// answers `false` by force-killing the process tree.
+    pub fn wait(&self, timeout: Duration) -> bool {
+        let mut exited = self.lock_flag();
+        let deadline = Instant::now() + timeout;
+        while !*exited {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            let (guard, _) = self
+                .0 .1
+                .wait_timeout(exited, remaining)
+                .unwrap_or_else(|e| e.into_inner());
+            exited = guard;
+        }
+        true
+    }
 }
 
 /// The run-state event payload (ticket 62), emitted as
 /// `quick-action-run-state-changed` when an action starts and again when its
-/// process exits — the Quick Launch window flips Run ↔ Stop from these
-/// events alone, with no polling.
+/// process exits — the Quick Launch window drives its whole control state
+/// machine from these events alone (Run → Running → Stopping → Run, ticket
+/// 92), with no polling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct QuickActionRunState {
     pub id: i64,
@@ -136,13 +198,14 @@ fn action_from_row(row: &rusqlite::Row) -> Result<QuickAction> {
             stoppable: row.get::<_, i64>(4)? != 0,
             stop_command: row.get(5)?,
         },
+        group_id: row.get(6)?,
     })
 }
 
 /// Every Quick Action in list order (position, then insertion order).
 pub fn list_quick_actions(conn: &Connection) -> Result<Vec<QuickAction>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, command, cwd, stoppable, stop_command
+        "SELECT id, name, command, cwd, stoppable, stop_command, group_id
          FROM quick_actions ORDER BY position, id",
     )?;
     let rows = stmt.query_map([], action_from_row)?;
@@ -152,7 +215,7 @@ pub fn list_quick_actions(conn: &Connection) -> Result<Vec<QuickAction>> {
 /// Fetches one action by id — the runner's lookup (ticket 50).
 pub fn get_quick_action(conn: &Connection, id: i64) -> Result<Option<QuickAction>> {
     conn.query_row(
-        "SELECT id, name, command, cwd, stoppable, stop_command
+        "SELECT id, name, command, cwd, stoppable, stop_command, group_id
          FROM quick_actions WHERE id = ?1",
         params![id],
         action_from_row,
@@ -199,8 +262,9 @@ pub(crate) fn append_action(conn: &Connection, action: &QuickActionInput) -> Res
         .map(|_| ())
 }
 
-/// Replaces an action's script and metadata in place (same id). Position is
-/// untouched — reorders go through `move_quick_action`.
+/// Replaces an action's script and metadata in place (same id). Position and
+/// the Group reference are untouched — reorders go through `move_quick_action`,
+/// group changes through `assign_to_group`/`unassign_from_group` (ticket 89).
 pub fn update_quick_action(conn: &Connection, action: &QuickAction) -> Result<()> {
     conn.execute(
         "UPDATE quick_actions
@@ -293,6 +357,29 @@ pub fn spawn_stop_command(
         .spawn()
         .map(|_| ())
         .map_err(|e| format!("failed to start '{exe}': {e}"))
+}
+
+/// The stop-command watchdog (ticket 92): waits out [`STOP_WATCHDOG`] for the
+/// tracked process's exit and force-kills its tree when none lands — a stop
+/// command that hangs must never leave a run wedged "running" forever. An
+/// early exit stands this down without waiting out the box. Runs on its own
+/// thread next to the spawned stop command; best-effort like every logging
+/// step (ticket 64).
+pub fn enforce_stop_watchdog(pid: u32, log_path: Option<&Path>, exited: &ExitSignal) {
+    if exited.wait(STOP_WATCHDOG) {
+        return;
+    }
+    if let Some(p) = log_path {
+        append_log_line(
+            p,
+            &format!(
+                "{} stop timed out after {} s — force-killed the process tree",
+                log_stamp(),
+                STOP_WATCHDOG.as_secs()
+            ),
+        );
+    }
+    crate::engine::windows::kill_tree(pid);
 }
 
 // ---------------------------------------------------------------------------
@@ -939,5 +1026,66 @@ mod tests {
         assert!(run.timed_out);
         assert_eq!(run.exit_code, None);
         assert!(run.output.contains("TIMED OUT"), "{}", run.output);
+    }
+
+    #[test]
+    fn watchdog_stands_down_when_the_exit_lands_first() {
+        // Ticket 92's early-exit path: the reaper signaled before Stop even
+        // started waiting, so the wait returns promptly with "exited" — no
+        // force-kill, no waiting out the box.
+        let signal = ExitSignal::new();
+        signal.signal();
+        let started = Instant::now();
+        assert!(signal.wait(STOP_WATCHDOG));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn watchdog_fires_when_the_stop_hangs() {
+        // Ticket 92's hung-stop path: nothing ever signals, so the box
+        // expires and reports "not exited" — the caller answers by killing
+        // the tree. (Shortened box; only the expiry behavior is under test.)
+        let signal = ExitSignal::new();
+        let started = Instant::now();
+        assert!(!signal.wait(Duration::from_millis(50)));
+        assert!(started.elapsed() >= Duration::from_millis(50));
+    }
+
+    #[test]
+    fn watchdog_wakes_mid_wait_when_signaled() {
+        // A slow-but-honest stop: the signal lands mid-box and wakes the
+        // waiter immediately instead of leaving it parked for the rest.
+        let signal = ExitSignal::new();
+        let marker = signal.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            marker.signal();
+        });
+        let started = Instant::now();
+        assert!(signal.wait(STOP_WATCHDOG));
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn forced_kill_leaves_a_log_line() {
+        // The watchdog's one record when it fires (ticket 92): a distinct
+        // timeout line in the run's output.log, separate from the requested
+        // stop line.
+        let dir = tempfile::tempdir().unwrap().into_path();
+        let log_path = dir.join("output.log");
+        write_run_log_stop(&log_path, "stop command: docker compose stop");
+        append_log_line(
+            &log_path,
+            &format!(
+                "{} stop timed out after {} s — force-killed the process tree",
+                log_stamp(),
+                STOP_WATCHDOG.as_secs()
+            ),
+        );
+        let contents = std::fs::read_to_string(&log_path).unwrap();
+        assert!(
+            contents.contains("stop timed out after 10 s — force-killed the process tree"),
+            "{contents}"
+        );
     }
 }

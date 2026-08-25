@@ -46,3 +46,7 @@ must be measured at runtime or tested per-DPI.
   exists (main app page is the discoverability home); rule 3 — the window tab
   is read-only click-to-copy, all CRUD lives on `/clips`; rule 4 governs the
   full → short → icon label degradation; rule 5 mandates the Copied flash.
+- **Groups sections (2026-08)**: rule 2 — group sections, row-menu assignment,
+  and management affordances all stay absent until at least one group exists;
+  the feature switch (page-features menu per research 0008) plus a New group
+  button are the only chrome while the collection has no groups.

@@ -25,12 +25,17 @@ pub struct ClipInput {
 
 /// A Clip as stored: the input plus its library id. Position is internal
 /// (order within the list) and never part of the payload — reorders go
-/// through `move_clip`.
+/// through `move_clip`. `group_id` is the clip's optional Group membership
+/// (ticket 89), assigned through the groups commands only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Clip {
     pub id: i64,
     #[serde(flatten)]
     pub clip: ClipInput,
+    /// The one Group this clip belongs to (`None` = ungrouped). Not part of
+    /// the edit payload — assignments go through `assign_to_group`.
+    #[serde(default)]
+    pub group_id: Option<i64>,
 }
 
 /// Rejects clips that could never serve their purpose: blank text has nothing
@@ -50,13 +55,14 @@ fn clip_from_row(row: &rusqlite::Row) -> Result<Clip> {
             name: row.get(1)?,
             content: row.get(2)?,
         },
+        group_id: row.get(3)?,
     })
 }
 
 /// Every Clip in list order (position, then insertion order).
 pub fn list_clips(conn: &Connection) -> Result<Vec<Clip>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, content
+        "SELECT id, name, content, group_id
          FROM clips ORDER BY position, id",
     )?;
     let rows = stmt.query_map([], clip_from_row)?;
@@ -66,7 +72,7 @@ pub fn list_clips(conn: &Connection) -> Result<Vec<Clip>> {
 /// Fetches one Clip by id — the clipboard-write command's lookup.
 pub fn get_clip(conn: &Connection, id: i64) -> Result<Option<Clip>> {
     conn.query_row(
-        "SELECT id, name, content FROM clips WHERE id = ?1",
+        "SELECT id, name, content, group_id FROM clips WHERE id = ?1",
         params![id],
         clip_from_row,
     )
@@ -97,8 +103,9 @@ pub(crate) fn append_clip(conn: &Connection, clip: &ClipInput) -> Result<()> {
         .map(|_| ())
 }
 
-/// Replaces a clip's text and name in place (same id). Position is untouched
-/// — reorders go through `move_clip`.
+/// Replaces a clip's text and name in place (same id). Position and the
+/// Group reference are untouched — reorders go through `move_clip`, group
+/// changes through `assign_to_group`/`unassign_from_group` (ticket 89).
 pub fn update_clip(conn: &Connection, clip: &Clip) -> Result<()> {
     conn.execute(
         "UPDATE clips SET name = ?1, content = ?2 WHERE id = ?3",

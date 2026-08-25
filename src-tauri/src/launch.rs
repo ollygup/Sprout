@@ -100,12 +100,17 @@ pub struct LaunchEntryInput {
 
 /// A Launch entry as stored: the input plus its library id. Position is
 /// internal (order within the list) and never part of the payload — reorders
-/// go through `move_launch_entry`.
+/// go through `move_launch_entry`. `group_id` is the entry's optional Group
+/// membership (ticket 89), assigned through the groups commands only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaunchEntry {
     pub id: i64,
     #[serde(flatten)]
     pub entry: LaunchEntryInput,
+    /// The one Group this entry belongs to (`None` = ungrouped). Not part of
+    /// the edit payload — assignments go through `assign_to_group`.
+    #[serde(default)]
+    pub group_id: Option<i64>,
 }
 
 /// Rejects entries that would break a launch: a blank name or target, an
@@ -189,13 +194,14 @@ fn entry_from_row(row: &rusqlite::Row) -> Result<LaunchEntry> {
             show_window: row.get(5)?,
             desktop_id: row.get(6)?,
         },
+        group_id: row.get(7)?,
     })
 }
 
 /// Every Launch entry in list order (position, then insertion order).
 pub fn list_launch_entries(conn: &Connection) -> Result<Vec<LaunchEntry>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, kind, target, shell, show_window, desktop_id
+        "SELECT id, name, kind, target, shell, show_window, desktop_id, group_id
          FROM launch_entries ORDER BY position, id",
     )?;
     let rows = stmt.query_map([], entry_from_row)?;
@@ -204,7 +210,7 @@ pub fn list_launch_entries(conn: &Connection) -> Result<Vec<LaunchEntry>> {
 
 fn get_entry(conn: &Connection, id: i64) -> Result<Option<LaunchEntry>> {
     conn.query_row(
-        "SELECT id, name, kind, target, shell, show_window, desktop_id
+        "SELECT id, name, kind, target, shell, show_window, desktop_id, group_id
          FROM launch_entries WHERE id = ?1",
         params![id],
         entry_from_row,
@@ -253,8 +259,9 @@ pub(crate) fn append_entry(conn: &Connection, entry: &LaunchEntryInput) -> Resul
         .map(|_| ())
 }
 
-/// Replaces an entry's metadata in place (same id). Position is untouched —
-/// reorders go through `move_launch_entry`.
+/// Replaces an entry's metadata in place (same id). Position and the Group
+/// reference are untouched — reorders go through `move_launch_entry`, group
+/// changes through `assign_to_group`/`unassign_from_group` (ticket 89).
 pub fn update_launch_entry(conn: &Connection, entry: &LaunchEntry) -> Result<()> {
     conn.execute(
         "UPDATE launch_entries
@@ -970,6 +977,7 @@ mod tests {
         LaunchEntry {
             id,
             entry: app_input(name),
+            group_id: None,
         }
     }
 
@@ -977,13 +985,14 @@ mod tests {
         LaunchEntry {
             id,
             entry: command_input(name),
+            group_id: None,
         }
     }
 
     fn desktop_app_entry(name: &str, id: i64, guid: &str) -> LaunchEntry {
         let mut input = app_input(name);
         input.desktop_id = Some(guid.into());
-        LaunchEntry { id, entry: input }
+        LaunchEntry { id, entry: input, group_id: None }
     }
 
     /// A desktop-assigned app entry pointing at an explicit target — a real
@@ -1000,6 +1009,7 @@ mod tests {
                 show_window: false,
                 desktop_id: Some(guid.into()),
             },
+            group_id: None,
         }
     }
 
@@ -1941,6 +1951,7 @@ mod live_probe {
                 show_window: false,
                 desktop_id: Some(desktop_two.id.clone()),
             },
+            group_id: None,
         };
 
         // State A: Edge closed → a fresh window lands on Desktop 2.
