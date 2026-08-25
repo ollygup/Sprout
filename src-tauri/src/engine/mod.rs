@@ -180,11 +180,13 @@ pub trait PlatformEngine: Send + Sync {
 /// — stable across Task View reorder, which is why assignments reference it —
 /// and its label: the Windows name when the desktop has one, "Desktop N"
 /// otherwise. The label is resolved by the engine, so the page never formats
-/// GUIDs.
+/// GUIDs. `current` marks the desktop the user is on right now, letting a
+/// menu offer "pin to this one" as an explicit assignment (ADR-0015 round).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DesktopInfo {
     pub id: String,
     pub name: String,
+    pub current: bool,
 }
 
 /// One spawn through the launcher seam (ticket 47): the process id when the

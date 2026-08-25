@@ -771,7 +771,7 @@
     </div>
   {/if}
 
-  <div class="qlw__sr" role="status" aria-live="polite">
+  <div class="sr-only" role="status" aria-live="polite">
     {copiedAnnouncement}
   </div>
 </div>
@@ -853,7 +853,8 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-3);
-    height: 100%;
+    flex: 1;
+    min-height: 0;
     padding: var(--space-4);
   }
 
@@ -1125,17 +1126,7 @@
     color: var(--text-muted);
   }
 
-  .qlw__sr {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    padding: 0;
-    margin: -1px;
-    overflow: hidden;
-    clip: rect(0 0 0 0);
-    white-space: nowrap;
-    border: 0;
-  }
+  /* The live region is the shared `.sr-only` utility (tokens.css). */
 
   .qlw__empty {
     display: flex;
@@ -1223,7 +1214,11 @@
   }
 
   /* The tab strip fills the window below the header; the active panel
-     stretches and lets its list scroll internally. */
+     stretches and lets its list scroll internally. The panel itself is a
+     flex column: it is a plain block in Tabs.svelte, and a block panel
+     clipped its direct-child lists (Actions/Clips grew past it with no
+     scrollbar — ticket 102's root cause); flexing it lets every tab's
+     `flex: 1; min-height: 0` scroll container actually resolve. */
   .qlw__tabs {
     flex: 1;
     min-height: 0;
@@ -1241,6 +1236,15 @@
   .qlw__tabs :global(.tabs__panel) {
     flex: 1;
     min-height: 0;
+    display: flex;
+    flex-direction: column;
     overflow: hidden;
+  }
+
+  /* This page's flexed panel ties with Tabs' own `.tabs__panel[hidden]`
+     once both carry their scope hashes, so re-state hiding here explicitly —
+     otherwise stylesheet order decides and every tab renders at once. */
+  .qlw__tabs :global(.tabs__panel[hidden]) {
+    display: none;
   }
 </style>

@@ -182,10 +182,7 @@
         dock_edge: dockEdge,
         dock_state: dockState,
         autostart,
-        // Not this screen's knob — the Quick Launch toolbar owns it (ticket
-        // 88); the loaded value passes through untouched.
-        desktop_assignments: settings.desktop_assignments,
-        // Not these knobs either — each list page's toolbar owns its
+        // Not this screen's knobs either — each list page owns its
         // collection's Groups toggle (ticket 89); loaded values pass through.
         launch_groups: settings.launch_groups,
         action_groups: settings.action_groups,

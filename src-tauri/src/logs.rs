@@ -625,7 +625,6 @@ mod tests {
                 dock_edge: settings::DEFAULT_DOCK_EDGE.to_string(),
                 dock_state: settings::DEFAULT_DOCK_STATE.to_string(),
                 autostart: settings::DEFAULT_AUTOSTART.to_string(),
-                desktop_assignments: settings::DEFAULT_DESKTOP_ASSIGNMENTS.to_string(),
                 launch_groups: settings::DEFAULT_GROUPS_FEATURE.to_string(),
                 action_groups: settings::DEFAULT_GROUPS_FEATURE.to_string(),
                 clip_groups: settings::DEFAULT_GROUPS_FEATURE.to_string(),

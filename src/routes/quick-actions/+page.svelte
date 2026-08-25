@@ -226,9 +226,10 @@
     return quickActions.filter((a) => a.group_id === action.group_id);
   }
 
-  /** One ⋯ menu per action row: group assignment first while grouping is on
-   *  (prior art: the Launch page's desktop list), then Edit, Move up / Move
-   *  down scoped to the visible slice, Remove. */
+  /** One ⋯ menu per action row, on the round's ordering standard (ticket
+   *  106): Edit first (the row's primary verb), then the Move to group
+   *  flyout while Groups is on, Move up / Move down over the visible slice,
+   *  Remove danger-last behind a separator. */
   function openRowMenu(
     action: QuickAction,
     anchor: HTMLButtonElement,
@@ -240,28 +241,21 @@
     }
     const slice = moveSlice(action);
     const index = slice.indexOf(action);
-    const items: ContextMenuItem[] = [];
-    if (grouped) {
-      items.push(
-        {
-          label: "Ungrouped",
-          icon: action.group_id === null ? "check" : undefined,
-          onselect: () => groups.assign(action, action.name, null),
-        },
-        ...groups.groups.map((g) => ({
-          label: g.name,
-          icon: action.group_id === g.id ? "check" : undefined,
-          onselect: () => groups.assign(action, action.name, g.id),
-        })),
-        { label: "", separator: true, onselect: () => {} }
-      );
-    }
-    items.push(
+    const items: ContextMenuItem[] = [
       {
         label: "Edit",
         icon: "pencil",
         onselect: () => openEdit(action),
       },
+    ];
+    if (groups.enabled) {
+      items.push({
+        label: "Move to group",
+        icon: "folder",
+        children: groups.moveToGroupChildren(action, action.name),
+      });
+    }
+    items.push(
       {
         label: "Move up",
         icon: "chevron-up",
@@ -274,6 +268,7 @@
         disabled: index >= slice.length - 1,
         onselect: () => move(action.id, quickActions.indexOf(slice[index + 1])),
       },
+      { label: "", separator: true, onselect: () => {} },
       {
         label: "Remove",
         icon: "trash",
@@ -364,12 +359,6 @@
 <section class="qa" aria-labelledby="qa-title">
   <PageHeader titleId="qa-title" title="Quick Actions">
     {#snippet actions()}
-      {#if groups.enabled}
-        <Button variant="secondary" onclick={() => groups.openCreate()} disabled={busy}>
-          <Icon name="plus" size={15} />
-          New group
-        </Button>
-      {/if}
       <Button onclick={openAdd} disabled={busy}>
         <Icon name="plus" size={15} />
         Add

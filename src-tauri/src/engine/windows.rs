@@ -1366,14 +1366,22 @@ fn virtual_desktops() -> Vec<crate::engine::DesktopInfo> {
     let Ok(desktops) = winvd::get_desktops() else {
         return Vec::new();
     };
+    let current = winvd::get_current_desktop()
+        .ok()
+        .and_then(|desktop| desktop.get_id().ok())
+        .map(|id| guid_to_id(&id));
     desktops
         .iter()
-        .map(|desktop| crate::engine::DesktopInfo {
-            id: desktop.get_id().map(|id| guid_to_id(&id)).unwrap_or_default(),
-            name: match desktop.get_name() {
-                Ok(name) if !name.trim().is_empty() => name,
-                _ => format!("Desktop {}", desktop.get_index().unwrap_or(0) + 1),
-            },
+        .map(|desktop| {
+            let id = desktop.get_id().map(|id| guid_to_id(&id)).unwrap_or_default();
+            crate::engine::DesktopInfo {
+                current: current.as_deref() == Some(id.as_str()),
+                id,
+                name: match desktop.get_name() {
+                    Ok(name) if !name.trim().is_empty() => name,
+                    _ => format!("Desktop {}", desktop.get_index().unwrap_or(0) + 1),
+                },
+            }
         })
         .collect()
 }

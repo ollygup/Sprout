@@ -295,6 +295,20 @@ fn column_strings(conn: &Connection, sql: &str) -> Result<Vec<String>, String> {
     rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
 }
 
+/// Reads rows through `map` into a set — the composite payload keys the merge
+/// compares against (ticket 103). `\u{1f}` joins key parts; it is a control
+/// character, so a target or command can never forge a cross-part collision.
+fn column_set<T, F>(conn: &Connection, sql: &str, map: F) -> Result<HashSet<T>, String>
+where
+    T: std::hash::Hash + Eq,
+    F: Fn(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+{
+    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([], map).map_err(|e| e.to_string())?;
+    let all = rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+    Ok(all.into_iter().collect())
+}
+
 /// The merging restore, all five collections under ONE transaction: any
 /// failure rolls back everything, so a half-restored library is impossible.
 fn merge(conn: &Connection, doc: &BackupDocument) -> Result<ImportSummary, String> {
@@ -338,36 +352,65 @@ fn merge(conn: &Connection, doc: &BackupDocument) -> Result<ImportSummary, Strin
         inserted.presets += 1;
     }
 
-    // Launch entries and Quick Actions: named things — same trimmed name
-    // (case-insensitive) means kept.
-    let mut entry_names: HashSet<String> = column_strings(&tx, "SELECT name FROM launch_entries")?
-        .into_iter()
-        .map(|name| name.trim().to_lowercase())
-        .collect();
+    // Launch entries and Quick Actions skip on PAYLOAD identity — the same
+    // rule the create/update commands enforce since ticket 103: kind + target
+    // for entries, command + working directory for actions, all case-folded
+    // (Windows paths) and trimmed. Names are display-only for both lists; a
+    // same-name-different-target entry from a backup is a distinct item and
+    // must land.
+    let mut entry_keys: HashSet<String> = column_set(
+        &tx,
+        "SELECT kind, target FROM launch_entries",
+        |row| {
+            Ok(format!(
+                "{0}\u{1f}{1}",
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?.trim().to_lowercase()
+            ))
+        },
+    )?;
     for entry in &doc.launch_entries {
-        let name_key = entry.name.trim().to_lowercase();
-        if entry_names.contains(&name_key) {
+        let key = format!(
+            "{0}\u{1f}{1}",
+            launch::kind_to_str(entry.kind),
+            entry.target.trim().to_lowercase()
+        );
+        if entry_keys.contains(&key) {
             skipped.launch_entries += 1;
             continue;
         }
         launch::append_entry(&tx, entry).map_err(|e| e.to_string())?;
-        entry_names.insert(name_key);
+        entry_keys.insert(key);
         inserted.launch_entries += 1;
     }
 
-    let mut action_names: HashSet<String> =
-        column_strings(&tx, "SELECT name FROM quick_actions")?
-            .into_iter()
-            .map(|name| name.trim().to_lowercase())
-            .collect();
+    let mut action_keys: HashSet<String> = column_set(
+        &tx,
+        "SELECT command, cwd FROM quick_actions",
+        |row| {
+            Ok(format!(
+                "{0}\u{1f}{1}",
+                row.get::<_, String>(0)?.trim().to_lowercase(),
+                row.get::<_, Option<String>>(1)?
+                    .map(|cwd| cwd.to_lowercase())
+                    .unwrap_or_default()
+            ))
+        },
+    )?;
     for action in &doc.quick_actions {
-        let name_key = action.name.trim().to_lowercase();
-        if action_names.contains(&name_key) {
+        let key = format!(
+            "{0}\u{1f}{1}",
+            action.command.trim().to_lowercase(),
+            quick_actions::normalized_cwd(action)
+                .map(|cwd| cwd.to_lowercase())
+                .unwrap_or_default()
+        );
+        if action_keys.contains(&key) {
             skipped.quick_actions += 1;
             continue;
         }
         quick_actions::append_action(&tx, action).map_err(|e| e.to_string())?;
-        action_names.insert(name_key);
+        action_keys.insert(key);
         inserted.quick_actions += 1;
     }
 
@@ -728,6 +771,54 @@ mod tests {
         assert_eq!(db::list_products(&target, None).unwrap().len(), 2);
         assert_eq!(launch::list_launch_entries(&target).unwrap().len(), 2);
         assert_eq!(clips::list_clips(&target).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn import_identity_is_payload_not_name() {
+        // Ticket 103's rule holds at import: names never decide — payloads do.
+        // Same name + different target lands; same payload under any name and
+        // case folds away.
+        let target = conn();
+        launch::create_launch_entry(&target, &app_entry("Spotify")).unwrap();
+        quick_actions::create_quick_action(&target, &action("Builder")).unwrap();
+
+        let doc = BackupDocument {
+            kind: BACKUP_KIND.into(),
+            version: 1,
+            exported_at: 0,
+            products: vec![],
+            presets: vec![],
+            launch_entries: vec![
+                LaunchEntryInput {
+                    name: "Spotify".into(),
+                    kind: launch::LaunchEntryKind::App,
+                    target: r"D:\Apps\Spotify.lnk".into(),
+                    shell: None,
+                    show_window: false,
+                    desktop_id: None,
+                },
+                LaunchEntryInput {
+                    name: "Music".into(),
+                    kind: launch::LaunchEntryKind::App,
+                    target: r"c:\APPS\SPOTIFY.LNK".into(),
+                    shell: None,
+                    show_window: false,
+                    desktop_id: None,
+                },
+            ],
+            quick_actions: vec![action("Build")],
+            clips: vec![],
+        };
+
+        let summary = merge(&target, &doc).unwrap();
+        assert_eq!(summary.inserted.launch_entries, 1, "different target = distinct");
+        assert_eq!(summary.skipped.launch_entries, 1, "same target folds");
+        assert_eq!(summary.inserted.quick_actions, 0, "same command+cwd skips");
+        assert_eq!(summary.skipped.quick_actions, 1);
+
+        let entries = launch::list_launch_entries(&target).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(quick_actions::list_quick_actions(&target).unwrap().len(), 1);
     }
 
     #[test]

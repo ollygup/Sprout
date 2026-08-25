@@ -28,6 +28,15 @@ widely-learned interface that solves the same problems.
   settings menu at the top right of your database → `Property visibility`";
   view-scoped toggles ("Wrap column", layout options) flip state shown by an
   accent-colored switch and the panel dismisses on outside click.
+- **Primary, verified first-hand 2026-08 (menu/disclosure round):** Notion
+  Help Center, *Navigate with the sidebar* —
+  https://www.notion.com/help/navigate-with-the-sidebar — Favorites is
+  content-gated ("This section will appear in your sidebar once you favorite
+  your first page") with no master switch anywhere and per-item removal
+  (`Remove from Favorites`); *Duplicate & restore content* and
+  *Keyboard shortcuts* docs corroborate the block/page ⋯·menus carrying
+  per-item icons and `Move to` as an organizational submenu whose flyout ends
+  in create-and-place destinations.
 
 ## The patterns
 
@@ -69,6 +78,37 @@ widely-learned interface that solves the same problems.
    menu (`PageFeaturesButton`, research 0008): object-scoped feature switches
    never leave their object's surface, and never migrate into the app's
    Settings screen.
+9. **Toggle/disclosure anatomy: caret in the margin, content at title level.**
+   Notion toggle blocks render a small filled triangle pointing right when
+   closed and rotating to point down when open (the HTML `<details>`/Finder
+   tree convention), hanging left of the block like a margin glyph. Child
+   content is indented to align with the *title text* start — not with the
+   container edge, not partway. An indent that matches neither (Sprout's
+   pre-2026-08 `--space-5` body under a ~34px icon-plus-gap header) reads as
+   drift in both directions at once.
+10. **Context menus: icons per item, organization by submenu, destruction
+    last.** Current Notion block-handle and ⋯·menus carry a small line icon on
+    most items (an earlier draft of this note claimed label-only menus — that
+    described older Notion; verified wrong 2026-08). Actions group as:
+    frequent/topical verbs first; organizational moves ("Move to") as submenus
+    whose flyout lists destinations plus create-and-place entries ("New page"
+    fuses creating the destination with moving there); destructive actions
+    last, separated. NN/g's contextual-menu guidance (research 0008 sources)
+    supplies the same ordering and the scent mitigation for nesting.
+11. **Content-gated activation replaces master switches** *(verified first-hand
+    against notion.com/help/navigate-with-the-sidebar, 2026-08)*. Favorites
+    "will appear in your sidebar once you favorite your first page" — the
+    feature has no on/off setting anywhere; first use is activation, and
+    opting out means removing items individually. The surface exists exactly
+    while its content does.
+12. **Annotation features activate by use; structural features keep a switch**
+    *(Sprout generalization, not a Notion observation — recorded here because
+    it classifies pattern 11's boundary).* Per-object metadata that changes no
+    layout (a badge, a launch target) can follow Favorites and gate purely on
+    content. Features that reorganize their whole surface into sections
+    (Sprout's Groups) keep an explicit opt-in switch (research 0008 rule 1),
+    because their dormant state protects the user from structural churn, not
+    just visual noise.
 
 ## Applied case study (2026-08, ticket 85 round)
 
@@ -85,3 +125,12 @@ item labels stable while only their order changes.
 study was revised after review into a page-features gear menu — research 0008
 records why and what changed. Patterns 1–8 stand unchanged; only that one
 idiom moved.)*
+
+*(Supersession, 2026-08 menu/disclosure round: the desktop-assignment switch
+from ticket 88 was then removed entirely — pattern 11 (Favorites model) and
+ADR-0015 record why; Groups keep their switches per pattern 12. The same round
+adopted pattern 9's caret/alignment for the shared Disclosure, pattern 10's
+menu structure for every context menu, and relocated group creation into the
+"Move to group" submenu per pattern 10's create-and-place fusion. Pattern 5's
+caution applied and accepted: two learned affordances — the desktop toggle and
+the toolbar Add-group button — were relocated into moment-of-use menus.)*

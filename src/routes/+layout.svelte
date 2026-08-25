@@ -88,6 +88,18 @@
 {/if}
 
 <style>
+  /* The whole app scrolls inside exactly one container — `.main` in the
+     shell, the tab lists in the mini window. The document itself must never
+     grow a scrollbar: a single stray pixel at document level puts a second
+     thumb at the window edge and scrolling it drags the rail and chrome
+     along (ticket 108). */
+  :global(html),
+  :global(body) {
+    height: 100%;
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+
   .mini {
     height: 100vh;
     overflow: hidden;

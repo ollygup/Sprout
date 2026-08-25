@@ -18,7 +18,6 @@
     moveLaunchEntry,
     startLaunchEntry,
     startQuickLaunch,
-    updateDesktopAssignments,
     updateLaunchEntry,
   } from "$lib/api";
   import {
@@ -78,14 +77,14 @@
   let candidatesFailed = $state(false);
   let searchInput = $state<HTMLInputElement>();
 
-  // Virtual-desktop assignments (tickets 44/88): an opt-in feature — the
-  // page-features gear menu is its only switch (research 0008), default off
-  // and fully dormant when off. The desktop list itself still loads so
-  // turning the switch on works without a reload; below Windows 11 24H2
-  // (`desktopSupported` false) the desktop item disappears from the menu.
+  // Virtual-desktop assignments (tickets 44/88/105, ADR-0015): an
+  // always-available per-entry annotation with no master switch — wherever
+  // the OS supports it (`desktopSupported`, Windows 11 24H2+) every entry's
+  // menu carries the Virtual desktop submenu and the first assignment is
+  // activation (research 0006 pattern 11). The desktop list still loads so
+  // assigning works without a reload.
   let desktops = $state<VirtualDesktop[]>([]);
   let desktopSupported = $state(false);
-  let desktopGrouping = $state(false);
 
   // Groups (tickets 89/91): the same per-collection pattern as Quick Actions
   // (ticket 90) — its own namespace and its own gear-menu switch, fully
@@ -153,13 +152,11 @@
     }
   }
 
-  /** One Settings read carries both opt-in features (ticket 95 merged the
-   *  two former single-key reads): the desktop switch and this page's
-   *  Groups flag. */
+  /** One Settings read carries this page's Groups flag — the only feature
+   *  switch left on the page (desktop assignment has none, ADR-0015). */
   async function loadFeatureSettings() {
     try {
       const s = await getSettings();
-      desktopGrouping = s.desktop_assignments === "on";
       groups.setEnabledFromSettings(s.launch_groups === "on");
     } catch (e) {
       console.error(e);
@@ -268,6 +265,14 @@
     }
   }
 
+  /** The picker and search adds are bulk-ish gestures, so a duplicate skips
+   *  with a notice instead of an error dialog (ticket 103) — the backend
+   *  check stays the authority for races; this is the quiet path. */
+  function duplicateTarget(target: string): boolean {
+    const t = target.trim().toLowerCase();
+    return entries.some((e) => e.kind === "app" && e.target.trim().toLowerCase() === t);
+  }
+
   async function addApp() {
     const picked = await open({
       title: "Pick an application to add",
@@ -276,6 +281,10 @@
       filters: [{ name: "Applications", extensions: ["exe", "lnk"] }],
     });
     if (typeof picked !== "string") return;
+    if (duplicateTarget(picked)) {
+      flash("Already in Quick Launch — nothing added.");
+      return;
+    }
     busy = true;
     error = "";
     try {
@@ -302,6 +311,12 @@
   }
 
   async function addCandidate(candidate: LaunchCandidate) {
+    if (duplicateTarget(candidate.target)) {
+      flash("Already in Quick Launch — nothing added.");
+      query = "";
+      searchInput?.focus();
+      return;
+    }
     busy = true;
     error = "";
     try {
@@ -372,49 +387,17 @@
 
   /** The label shown for an assignment: the desktop's name. An id the list
    *  no longer knows (the desktop was deleted) reads as "Desktop ?" — the
-   *  launch falls back with a note when grouping is on. */
+   *  launch falls back with a note. */
   function desktopName(id: string | null): string {
     if (!id) return "Current desktop";
     return desktops.find((d) => d.id === id)?.name ?? "Desktop ?";
   }
 
-  /** The feature switch behind the page-features menu (ticket 88): persisted
-   *  through the settings store so the runner and any live window obey the
-   *  same value. Optimistic — reverted when the save fails. */
-  async function toggleDesktopAssignments() {
-    const next = !desktopGrouping;
-    desktopGrouping = next;
-    try {
-      await updateDesktopAssignments(next);
-      flash(
-        next
-          ? "Desktop grouping on — stored assignments apply again."
-          : "Desktop grouping off — assignments are kept but ignored."
-      );
-    } catch (e) {
-      console.error(e);
-      desktopGrouping = !next;
-      error = "Couldn't save the desktop grouping setting — try again.";
-    }
-  }
-
-  // The gear menu carries one row per opt-in feature: desktop grouping below
-  // its 24H2 gate only (an empty row would be chrome for a dead feature,
-  // research 0004 rule 2), Groups always — every collection page offers it
-  // (research 0008 rule 3: each row names the feature and explains both
-  // states).
+  // The gear menu carries one row per opt-in feature (research 0008): only
+  // Groups remains — desktop assignment is not a switch anymore, it lives in
+  // each entry's menu (ADR-0015). Were no switch left at all, the whole gear
+  // would disappear with it (0008 rule 5).
   const featureItems = $derived([
-    ...(desktopSupported
-      ? [
-          {
-            label: "Desktop grouping",
-            description:
-              "Assigned entries launch on their virtual desktop. Assignments are kept while grouping is off.",
-            value: desktopGrouping,
-            onchange: () => toggleDesktopAssignments(),
-          },
-        ]
-      : []),
     {
       label: "Groups",
       description:
@@ -443,12 +426,12 @@
     return entries.filter((e) => e.group_id === entry.group_id);
   }
 
-  /** One ⋯ menu per row: while Groups is on, group assignment comes first
-   *  (the structuring feature owns the top of the menu); the desktop
-   *  assignment list follows only while that feature is on (ticket 88's
-   *  dormancy); then Move up / Move down / Remove over the visible slice.
-   *  Desktop assignment stays badge-only in the list itself — it never
-   *  structures anything. */
+  /** One ⋯ menu per entry, on the round's ordering standard (ticket 106,
+   *  research 0006 pattern 10): organizational submenus first — Move to group
+   *  while Groups is on, Virtual desktop wherever supported (ticket 105:
+   *  no master switch, ADR-0015) — then Move up / Move down over the visible
+   *  slice, and Remove danger-last behind a separator. Checkmarks mark the
+   *  current state; badges in the list itself show assignments. */
   function openRowMenu(
     entry: LaunchEntry,
     anchor: HTMLButtonElement,
@@ -461,40 +444,51 @@
     const slice = moveSlice(entry);
     const index = slice.indexOf(entry);
     const items: ContextMenuItem[] = [];
-    if (grouped) {
-      items.push(
-        {
-          label: "Ungrouped",
-          icon: entry.group_id === null ? "check" : undefined,
-          onselect: () => groups.assign(entry, entry.name, null),
-        },
-        ...groups.groups.map((g) => ({
-          label: g.name,
-          icon: entry.group_id === g.id ? "check" : undefined,
-          onselect: () => groups.assign(entry, entry.name, g.id),
-        })),
-        { label: "", separator: true, onselect: () => {} }
-      );
+    if (groups.enabled) {
+      items.push({
+        label: "Move to group",
+        icon: "folder",
+        children: groups.moveToGroupChildren(entry, entry.name),
+      });
     }
-    if (desktopSupported && desktopGrouping) {
-      items.push(
-        {
-          label: "Current desktop",
-          icon: entry.desktop_id === null ? "check" : undefined,
-          onselect: () => assignDesktop(entry, null),
-        },
-        ...desktops.map((d) => ({
-          label: d.name,
-          icon: entry.desktop_id === d.id ? "check" : undefined,
-          onselect: () => assignDesktop(entry, d.id),
-        })),
-        {
-          label: "New desktop…",
-          icon: "plus",
-          onselect: () => newDesktop(entry),
-        },
-        { label: "", separator: true, onselect: () => {} }
-      );
+    if (desktopSupported) {
+      // "Current desktop" pins the entry to the desktop the user is on right
+      // now — an explicit assignment, distinct from "No assignment" (launch
+      // where you start it). The numbered list skips that pinned one.
+      const currentId =
+        desktops.find((d) => d.current)?.id ?? null;
+      items.push({
+        label: "Virtual desktop",
+        icon: "monitor",
+        children: [
+          {
+            label: "No assignment",
+            icon: entry.desktop_id === null ? "check" : undefined,
+            onselect: () => assignDesktop(entry, null),
+          },
+          ...(currentId
+            ? [
+                {
+                  label: "Current desktop",
+                  icon: entry.desktop_id === currentId ? "check" : undefined,
+                  onselect: () => assignDesktop(entry, currentId),
+                },
+              ]
+            : []),
+          ...desktops
+            .filter((d) => d.id !== currentId)
+            .map((d) => ({
+              label: d.name,
+              icon: entry.desktop_id === d.id ? "check" : undefined,
+              onselect: () => assignDesktop(entry, d.id),
+            })),
+          {
+            label: "New desktop…",
+            icon: "plus",
+            onselect: () => newDesktop(entry),
+          },
+        ],
+      });
     }
     items.push(
       {
@@ -509,6 +503,7 @@
         disabled: index >= slice.length - 1,
         onselect: () => move(entry.id, entries.indexOf(slice[index + 1])),
       },
+      { label: "", separator: true, onselect: () => {} },
       {
         label: "Remove",
         icon: "trash",
@@ -554,7 +549,7 @@
       flash(
         id
           ? `${entry.name} will open on ${desktopName(id)}.`
-          : `${entry.name} will open on the current desktop.`
+          : `${entry.name} will open wherever you start it — no desktop assignment.`
       );
       await load();
     } catch (e) {
@@ -617,15 +612,15 @@
         · {entry.shell}
       {/if}
     </span>
-    {#if desktopGrouping && desktopSupported && entry.desktop_id}
+    {#if desktopSupported && entry.desktop_id}
+      <!-- Ticket 105: the badge is the assignment's visibility — it renders
+           exactly when supported && assigned, no placeholder column. -->
       <span
         class="rack__desk"
         title={`Opens on ${desktopName(entry.desktop_id)}`}
       >
         {desktopName(entry.desktop_id)}
       </span>
-    {:else if desktopGrouping && desktopSupported && !entry.desktop_id}
-      <span class="rack__desk rack__desk--empty" aria-hidden="true"></span>
     {/if}
     <span class="rack__target" title={entry.target}>{entry.target}</span>
     {#if startingEntries.has(entry.id)}
@@ -669,12 +664,6 @@
         <Icon name="play" size={15} />
         {launching ? "Starting…" : "Start"}
       </Button>
-      {#if groups.enabled}
-        <Button variant="secondary" onclick={() => groups.openCreate()} disabled={busy}>
-          <Icon name="plus" size={15} />
-          New group
-        </Button>
-      {/if}
       <Button
         variant="secondary"
         onclick={toggleAdd}
@@ -1181,10 +1170,10 @@
     color: var(--accent);
   }
 
-  /* The desktop-assignment badge (ticket 88): a quiet mono pill, same
-   * language as the kind pill but muted — it names, it doesn't accent. The
-   * empty twin reserves the column for unassigned rows while grouping is on,
-   * so targets stay aligned; when grouping is off neither span renders. */
+  /* The desktop-assignment badge (ticket 105): a quiet mono pill, same
+   * language as the kind pill but muted — it names, it doesn't accent. It
+   * renders only on assigned rows (supported && assigned), so no empty twin
+   * reserves the column. */
   .rack__desk {
     flex-shrink: 0;
     min-width: 88px;

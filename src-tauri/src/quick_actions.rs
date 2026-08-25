@@ -163,10 +163,34 @@ pub fn validate_quick_action(action: &QuickActionInput) -> std::result::Result<(
     validate_cwd(action.cwd.as_deref())
 }
 
+/// The name of an existing action with the same payload — command and
+/// working directory, both trimmed and compared case-insensitively (Windows
+/// paths); the display name plays no part. `except_id` excludes the action
+/// being edited. Kept out of [`validate_quick_action`] because the backup
+/// import validates every record and must keep its skip semantics; only the
+/// create/update commands consult this. Ticket 103.
+pub fn colliding_action(
+    conn: &Connection,
+    action: &QuickActionInput,
+    except_id: Option<i64>,
+) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT name FROM quick_actions
+         WHERE command COLLATE NOCASE = ?1
+           AND ((cwd IS NULL AND ?2 IS NULL)
+                OR (cwd IS NOT NULL AND ?2 IS NOT NULL AND cwd COLLATE NOCASE = ?2))
+           AND id != ?3
+         ORDER BY position, id LIMIT 1",
+        params![action.command.trim(), normalized_cwd(action), except_id.unwrap_or(-1)],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
 /// The stored working directory: whitespace-trimmed, empty values become
 /// `None` (the app's own working directory), so only meaningful absolute
-/// paths persist.
-fn normalized_cwd(action: &QuickActionInput) -> Option<String> {
+/// paths persist. Also the dedup key's cwd half (ticket 103).
+pub(crate) fn normalized_cwd(action: &QuickActionInput) -> Option<String> {
     action
         .cwd
         .as_deref()
@@ -618,6 +642,47 @@ mod tests {
             stoppable: false,
             stop_command: None,
         }
+    }
+
+    #[test]
+    fn duplicate_payload_detected_regardless_of_name_or_case() {
+        let c = conn();
+        let mut a = input("docker up");
+        a.command = "docker compose up -d".into();
+        a.cwd = Some(r"D:\Stack".into());
+        create_quick_action(&c, &a).unwrap();
+
+        // Same command and folder under any name collides; case folds.
+        let mut twin = input("whatever");
+        twin.command = "DOCKER COMPOSE UP -D".into();
+        twin.cwd = Some(r"d:\stack".into());
+        assert_eq!(
+            colliding_action(&c, &twin, None).unwrap().as_deref(),
+            Some("docker up")
+        );
+
+        // A different working directory is a different action.
+        let mut elsewhere = input("docker up prod");
+        elsewhere.command = "docker compose up -d".into();
+        elsewhere.cwd = Some(r"E:\Prod".into());
+        assert!(colliding_action(&c, &elsewhere, None).unwrap().is_none());
+
+        // No working directory and some working directory never collide.
+        let mut bare = input("bare");
+        bare.command = "git status".into();
+        create_quick_action(&c, &bare).unwrap();
+        let mut with_cwd = input("with cwd");
+        with_cwd.command = "git status".into();
+        with_cwd.cwd = Some(r"C:\Repo".into());
+        assert!(colliding_action(&c, &with_cwd, None).unwrap().is_none());
+
+        // Editing an action never trips over itself.
+        let stored = list_quick_actions(&c).unwrap();
+        assert!(
+            colliding_action(&c, &stored[0].action, Some(stored[0].id))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

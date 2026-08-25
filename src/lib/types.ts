@@ -282,11 +282,6 @@ export interface Settings {
   /** Whether Sprout starts with Windows (ticket 75): "on" or "off" — the
    *  Run-key registration is reconciled beside every toggle. */
   autostart: string;
-  /** Whether Quick Launch honors desktop assignments and shows their
-   *  surface (ticket 88): "on" or "off", default off. Off is fully dormant —
-   *  flat list, no assignment menu or badge, runner ignores assignments —
-   *  while stored assignments survive for re-enabling. */
-  desktop_assignments: string;
   /** Whether each list page offers its Groups feature (ticket 89): "on" or
    *  "off", default off per collection. Off is fully dormant — flat list, no
    *  group affordances — while stored groups and memberships survive for
@@ -374,6 +369,10 @@ export interface VirtualDesktop {
   id: string;
   /** The Windows name when the desktop has one; "Desktop N" otherwise. */
   name: string;
+  /** Whether this is the desktop the user is on right now — lets the
+   * submenu offer "pin to here" as an explicit assignment (ADR-0015 round,
+   * ticket 105). */
+  current: boolean;
 }
 
 /** The editable shape of a Quick Action (ticket 50): a named PowerShell

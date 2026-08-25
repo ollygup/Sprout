@@ -86,6 +86,9 @@ impl OrderedList {
                 ),
                 params![position],
             )?;
+            // The removed row may have been its group's last member — that
+            // group dissolves with this same transaction (ticket 106).
+            crate::groups::sweep_empty_groups(&tx)?;
         }
         tx.commit()
     }

@@ -216,8 +216,10 @@
     return clips.filter((c) => c.group_id === clip.group_id);
   }
 
-  /** One ⋯ menu per clip row: group assignment first while grouping is on,
-   *  then Edit, Move up / Move down scoped to the visible slice, Remove. */
+  /** One ⋯ menu per clip row, on the round's ordering standard (ticket
+   *  106): Edit first (the row's primary verb), then the Move to group
+   *  flyout while Groups is on, Move up / Move down over the visible slice,
+   *  Remove danger-last behind a separator. */
   function openRowMenu(
     clip: Clip,
     anchor: HTMLButtonElement,
@@ -230,30 +232,21 @@
     const title = clipTitle(clip.name, clip.content);
     const slice = moveSlice(clip);
     const index = slice.indexOf(clip);
-    const items: ContextMenuItem[] = [];
-    if (grouped) {
-      items.push(
-        {
-          label: "Ungrouped",
-          icon: clip.group_id === null ? "check" : undefined,
-          onselect: () =>
-            groups.assign(clip, clipTitle(clip.name, clip.content), null),
-        },
-        ...groups.groups.map((g) => ({
-          label: g.name,
-          icon: clip.group_id === g.id ? "check" : undefined,
-          onselect: () =>
-            groups.assign(clip, clipTitle(clip.name, clip.content), g.id),
-        })),
-        { label: "", separator: true, onselect: () => {} }
-      );
-    }
-    items.push(
+    const items: ContextMenuItem[] = [
       {
         label: "Edit",
         icon: "pencil",
         onselect: () => openEdit(clip),
       },
+    ];
+    if (groups.enabled) {
+      items.push({
+        label: "Move to group",
+        icon: "folder",
+        children: groups.moveToGroupChildren(clip, title),
+      });
+    }
+    items.push(
       {
         label: "Move up",
         icon: "chevron-up",
@@ -266,6 +259,7 @@
         disabled: index >= slice.length - 1,
         onselect: () => move(clip.id, clips.indexOf(slice[index + 1])),
       },
+      { label: "", separator: true, onselect: () => {} },
       {
         label: "Remove",
         icon: "trash",
@@ -353,12 +347,6 @@
 <section class="clips" aria-labelledby="clips-title">
   <PageHeader titleId="clips-title" title="Quick Clips">
     {#snippet actions()}
-      {#if groups.enabled}
-        <Button variant="secondary" onclick={() => groups.openCreate()} disabled={busy}>
-          <Icon name="plus" size={15} />
-          New group
-        </Button>
-      {/if}
       <Button onclick={openAdd} disabled={busy}>
         <Icon name="plus" size={15} />
         Add
@@ -615,15 +603,7 @@
     color: var(--text-muted);
   }
 
-  .sr-only {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    padding: 0;
-    margin: -1px;
-    overflow: hidden;
-    clip: rect(0 0 0 0);
-    white-space: nowrap;
-    border: 0;
-  }
+  /* The live region is the shared `.sr-only` utility (tokens.css) — its
+     local copy here lacked explicit offsets and stretched the document
+     (ticket 108). */
 </style>

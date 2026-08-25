@@ -18,12 +18,17 @@ import {
   updateGroupsEnabled,
 } from "./api";
 import { createGroupCollapse } from "./groupCollapse.svelte";
-import type { ContextMenuState } from "./components/ContextMenu.svelte";
+import type {
+  ContextMenuItem,
+  ContextMenuState,
+} from "./components/ContextMenu.svelte";
 import type { Group, GroupsCollection } from "./types";
 
-/** The naming dialog's subject: a fresh group or one being renamed. */
+/** The naming dialog's subject: a fresh group (optionally carrying the item
+ *  being assigned into it — ticket 106's create-and-assign) or one being
+ *  renamed. */
 export type GroupNaming =
-  | { mode: "create" }
+  | { mode: "create"; item?: { label: string; id: number } }
   | { mode: "rename"; group: Group };
 
 /** Everything the host surface contributes: its feedback channels and its
@@ -143,10 +148,13 @@ export function createCollectionGroups(options: {
       return savingName;
     },
 
-    openCreate() {
+    /** Ticket 106's create-and-assign: the "New group…" flyout item names
+     *  the group and lands the triggering row in it as one gesture. A group
+     *  exists only while it has members, so there is no memberless create. */
+    openCreateFor(item: { id: number }, label: string) {
       nameDraft = "";
       nameError = "";
-      naming = { mode: "create" };
+      naming = { mode: "create", item: { id: item.id, label } };
     },
 
     openRename(group: Group) {
@@ -173,8 +181,13 @@ export function createCollectionGroups(options: {
       nameError = "";
       try {
         if (naming.mode === "create") {
-          await createGroup(collection, name);
-          host.flash(`Group “${name}” created.`);
+          const created = await createGroup(collection, name);
+          if (naming.item) {
+            await assignToGroup(collection, naming.item.id, created.id);
+            host.flash(`“${naming.item.label}” moved to ${created.name}.`);
+          } else {
+            host.flash(`Group “${name}” created.`);
+          }
         } else {
           await renameGroup(naming.group.id, name);
           host.flash(`Group renamed to “${name}”.`);
@@ -240,8 +253,36 @@ export function createCollectionGroups(options: {
       return guarded(() => moveGroup(id, toPosition).then(host.reload));
     },
 
-    /** One ⋯ menu per group header: Rename, order, Remove. The page owns the
-     *  toggle-off check against its own menu state and may append fields. */
+    /** The "Move to group" flyout (ticket 106): Ungrouped ✓ | groups in user
+     *  order | "New group…" — create-and-assign in one gesture (research 0006
+     *  pattern 10's create-and-place fusion). Checkmarks mark the item's
+     *  current membership. */
+    moveToGroupChildren(
+      item: { id: number; group_id: number | null },
+      label: string
+    ): ContextMenuItem[] {
+      return [
+        {
+          label: "Ungrouped",
+          icon: item.group_id === null ? "check" : undefined,
+          onselect: () => this.assign(item, label, null),
+        },
+        ...list.map((g) => ({
+          label: g.name,
+          icon: item.group_id === g.id ? "check" : undefined,
+          onselect: () => this.assign(item, label, g.id),
+        })),
+        {
+          label: "New group…",
+          icon: "plus",
+          onselect: () => this.openCreateFor(item, label),
+        },
+      ];
+    },
+
+    /** One ⋯ menu per group header, on the round's ordering standard
+     *  (ticket 106): Rename, order, separator, Remove danger-last. The page
+     *  owns the toggle-off check against its own menu state. */
     groupMenu(
       group: Group,
       anchor: HTMLButtonElement,
@@ -273,6 +314,7 @@ export function createCollectionGroups(options: {
             disabled: index >= list.length - 1,
             onselect: () => this.reorderGroup(group.id, index + 1),
           },
+          { label: "", separator: true, onselect: () => {} },
           {
             label: "Remove",
             icon: "trash",

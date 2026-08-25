@@ -27,11 +27,15 @@
       '<path d="M12 20v-7"/><path d="M12 13c0-4.2-3.1-6.3-8-5.8C3.4 10.6 6 13 12 13z"/><path d="M12 11c0-3.4 2.4-5.4 6-4.9-.5 3.9-2.4 5.4-6 4.9z"/>',
     dots: '<path d="M5 12h.01M12 12h.01M19 12h.01"/>',
     info: '<circle cx="12" cy="12" r="9"/><path d="M12 8h.01"/><path d="M12 12v4"/>',
+    monitor:
+      '<rect x="3" y="4.5" width="18" height="13" rx="2"/><path d="M9 21h6"/>',
     play: '<path d="M7 4.5v15l13-7.5z"/>',
     stop: '<rect x="6" y="6" width="12" height="12" rx="1.5"/>',
     chevron: '<path d="m6 9 6 6 6-6"/>',
     "chevron-up": '<path d="m6 15 6-6 6 6"/>',
     "chevron-down": '<path d="m6 9 6 6 6-6"/>',
+    caret:
+      '<path d="m9 6.2 8.4 5a.94.94 0 0 1 0 1.6l-8.4 5A.8.8 0 0 1 8 17.1V6.9a.8.8 0 0 1 1-.7Z" fill="currentColor" stroke="none"/>',
     refresh: '<path d="M19 12a7 7 0 1 1-2.05-4.95"/><path d="M19 4v4h-4"/>',
     rocket:
       '<path d="M5 15c-1.5 1.3-2 5-2 5s3.7-.5 5-2"/><path d="M9 15 6 12c1.5-5 6-9 12-9 0 6-4 10.5-9 12z"/><path d="M15 9h.01"/>',

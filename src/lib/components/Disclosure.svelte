@@ -1,11 +1,13 @@
 <script lang="ts">
   import Icon from "./Icon.svelte";
 
-  /** Shared disclosure trigger (ticket 45): a chevron button that toggles an
+  /** Shared disclosure trigger (ticket 45): a caret button that toggles an
    *  associated panel. Icon-only (26×26 square, e.g. preset composer rows) or
-   *  with a label (e.g. the product form's Advanced section). The chevron
-   *  rotates on open via a transform-only transition; the global
-   *  prefers-reduced-motion rule collapses it to nothing. */
+   *  with a label (e.g. the product form's Advanced section). The filled
+   *  triangle points right when closed and rotates 90° to point down when
+   *  open — the <details>/Notion tree convention — via a transform-only
+   *  transition; the global prefers-reduced-motion rule collapses it to
+   *  nothing. */
   let {
     open,
     controls,
@@ -32,7 +34,7 @@
   onclick={onclick}
 >
   <span class="disclosure__chevron" aria-hidden="true">
-    <Icon name="chevron" size={15} />
+    <Icon name="caret" size={14} />
   </span>
   {#if label}
     <span class="disclosure__label">{label}</span>
@@ -67,7 +69,7 @@
   }
 
   .disclosure.open :global(svg) {
-    transform: rotate(180deg);
+    transform: rotate(90deg);
   }
 
   /* Labeled mode: a flat full-width section-header row (e.g. the product

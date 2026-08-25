@@ -78,5 +78,13 @@ tickets 90/91) apply this note directly.
 2026-08, ticket 88: desktop grouping first shipped as a checkbox beside the
 toolbar search; review found the label cryptic, the state nearly invisible,
 and toolbar parity with other pages broken. This note's rules are the
-correction; the shipped result is the gear trigger + switch panel described
-in rule 3, rendered through PageHeader's `features` slot per rule 4.
+correction; the shipped result is the gear trigger + switch panel described in
+rule 3, rendered through PageHeader's `features` slot per rule 4.
+
+Supersession, 2026-08 menu/disclosure round: the desktop-assignment switch this
+note was born from has since been removed entirely — research 0006 pattern 11
+and ADR-0015 record why (its on-state did nothing until assignments existed,
+failing the immediate-effect contract in rule 2's own source). The rules stand;
+Groups remain their live applied case, and the annotation-vs-structure
+classification in 0006 pattern 12 now decides which future knobs get a switch
+at all.

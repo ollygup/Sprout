@@ -497,23 +497,6 @@ fn update_autostart(
     autostart::sync_registration(&app, enabled)
 }
 
-/// The desktop-assignments toggle (ticket 88): persists only that knob —
-/// turning it on restores every stored assignment, turning it off makes the
-/// runner ignore them again. `quick-launch-changed` tells a live Quick
-/// Launch window to re-read what it renders.
-#[tauri::command]
-fn update_desktop_assignments(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    enabled: bool,
-) -> Result<(), String> {
-    let conn = lock(&state)?;
-    settings::save_desktop_assignments(&conn, if enabled { "on" } else { "off" })?;
-    drop(conn);
-    let _ = app.emit("quick-launch-changed", ());
-    Ok(())
-}
-
 /// The Logs screen's picture of where logs live and how big they are — no
 /// content, ever.
 #[tauri::command]
@@ -580,6 +563,9 @@ fn create_launch_entry(
 ) -> Result<launch::LaunchEntry, String> {
     launch::validate_launch_entry(&entry)?;
     let conn = lock(&state)?;
+    if let Some(existing) = launch::colliding_entry(&conn, &entry, None).map_err(|e| e.to_string())? {
+        return Err(format!("\"{existing}\" is already in Quick Launch with this target."));
+    }
     let created = launch::create_launch_entry(&conn, &entry).map_err(|e| e.to_string())?;
     drop(conn);
     let _ = app.emit("quick-launch-changed", ());
@@ -596,6 +582,11 @@ fn update_launch_entry(
 ) -> Result<(), String> {
     launch::validate_launch_entry(&entry.entry)?;
     let conn = lock(&state)?;
+    if let Some(existing) =
+        launch::colliding_entry(&conn, &entry.entry, Some(entry.id)).map_err(|e| e.to_string())?
+    {
+        return Err(format!("\"{existing}\" is already in Quick Launch with this target."));
+    }
     launch::update_launch_entry(&conn, &entry).map_err(|e| e.to_string())?;
     drop(conn);
     let _ = app.emit("quick-launch-changed", ());
@@ -699,13 +690,9 @@ fn launch_entries(
     {
         return Err("A Quick Launch run is already in progress — wait for it to finish.".into());
     }
-    let (cap, honor_desktops) = {
+    let cap = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
-        let settings = settings::load(&conn);
-        (
-            settings.launch_concurrency as usize,
-            settings.honor_desktop_assignments(),
-        )
+        settings::load(&conn).launch_concurrency as usize
     };
     let engine = Arc::clone(&state.launcher);
     let running = Arc::clone(&state.launch_in_progress);
@@ -719,9 +706,10 @@ fn launch_entries(
         if let Some(path) = &log_path {
             launch::write_launch_run_header(path, entries.len(), cap);
         }
-        // The assignments flag is read per run (ticket 88): toggling grouping
-        // off makes the very next Start dormant — no desktop moves, no notes.
-        let report = launch::run_launch_queue(engine.as_ref(), &entries, cap, honor_desktops);
+        // Stored assignments are always honored (ADR-0015): there is no
+        // master switch anymore, and below the 24H2 gate the engine's empty
+        // desktop list makes every entry behave as unassigned.
+        let report = launch::run_launch_queue(engine.as_ref(), &entries, cap);
         if let Some(path) = &log_path {
             launch::write_launch_run_summary(path, &report);
         }
@@ -845,6 +833,11 @@ fn create_quick_action(
 ) -> Result<quick_actions::QuickAction, String> {
     quick_actions::validate_quick_action(&action)?;
     let conn = lock(&state)?;
+    if let Some(existing) =
+        quick_actions::colliding_action(&conn, &action, None).map_err(|e| e.to_string())?
+    {
+        return Err(format!("\"{existing}\" already runs this exact command."));
+    }
     let created = quick_actions::create_quick_action(&conn, &action).map_err(|e| e.to_string())?;
     drop(conn);
     let _ = app.emit("quick-launch-changed", ());
@@ -862,6 +855,12 @@ fn update_quick_action(
 ) -> Result<(), String> {
     quick_actions::validate_quick_action(&action.action)?;
     let conn = lock(&state)?;
+    if let Some(existing) =
+        quick_actions::colliding_action(&conn, &action.action, Some(action.id))
+            .map_err(|e| e.to_string())?
+    {
+        return Err(format!("\"{existing}\" already runs this exact command."));
+    }
     quick_actions::update_quick_action(&conn, &action).map_err(|e| e.to_string())?;
     drop(conn);
     let _ = app.emit("quick-launch-changed", ());
@@ -918,6 +917,13 @@ fn create_clip(
 ) -> Result<clips::Clip, String> {
     clips::validate_clip(&clip)?;
     let conn = lock(&state)?;
+    if let Some(existing) = clips::colliding_clip(&conn, &clip.content, None).map_err(|e| e.to_string())? {
+        return Err(if existing.is_empty() {
+            "A clip with this text already exists.".into()
+        } else {
+            format!("This text is already saved as \"{existing}\".")
+        });
+    }
     let created = clips::create_clip(&conn, &clip).map_err(|e| e.to_string())?;
     drop(conn);
     let _ = app.emit("quick-launch-changed", ());
@@ -934,6 +940,15 @@ fn update_clip(
 ) -> Result<(), String> {
     clips::validate_clip(&clip.clip)?;
     let conn = lock(&state)?;
+    if let Some(existing) =
+        clips::colliding_clip(&conn, &clip.clip.content, Some(clip.id)).map_err(|e| e.to_string())?
+    {
+        return Err(if existing.is_empty() {
+            "A clip with this text already exists.".into()
+        } else {
+            format!("This text is already saved as \"{existing}\".")
+        });
+    }
     clips::update_clip(&conn, &clip).map_err(|e| e.to_string())?;
     drop(conn);
     let _ = app.emit("quick-launch-changed", ());
@@ -1008,9 +1023,8 @@ fn create_group(
     collection: groups::Collection,
     name: String,
 ) -> Result<groups::Group, String> {
-    groups::validate_group_name(&name)?;
     let conn = lock(&state)?;
-    let created = groups::create_group(&conn, collection, &name).map_err(|e| e.to_string())?;
+    let created = groups::create_group(&conn, collection, &name)?;
     drop(conn);
     let _ = app.emit("quick-launch-changed", ());
     Ok(created)
@@ -1018,15 +1032,9 @@ fn create_group(
 
 /// Renames a Group in place; order and membership are untouched (ticket 89).
 #[tauri::command]
-fn rename_group(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    id: i64,
-    name: String,
-) -> Result<(), String> {
-    groups::validate_group_name(&name)?;
+fn rename_group(app: AppHandle, state: State<'_, AppState>, id: i64, name: String) -> Result<(), String> {
     let conn = lock(&state)?;
-    groups::rename_group(&conn, id, &name).map_err(|e| e.to_string())?;
+    groups::rename_group(&conn, id, &name)?;
     drop(conn);
     let _ = app.emit("quick-launch-changed", ());
     Ok(())
@@ -1699,7 +1707,7 @@ pub fn run() {
             update_settings,
             update_theme,
             update_autostart,
-            update_desktop_assignments,
+            update_groups_enabled,
             check_for_update,
             install_update,
             list_logs,

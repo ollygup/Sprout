@@ -135,6 +135,8 @@
         },
         { label: "Edit", icon: "pencil", onselect: () => openEdit(product) },
         { label: "More info", icon: "info", onselect: () => (details = product) },
+        // Ticket 106's ordering standard: destruction last, separated.
+        { label: "", separator: true, onselect: () => {} },
         {
           label: "Remove",
           icon: "trash",

@@ -205,6 +205,8 @@
       onselect: () => openFork(record),
     });
     items.push({ label: "Export", icon: "download", onselect: () => exportViaDialog(record) });
+    // Ticket 106's ordering standard: destruction last, separated.
+    items.push({ label: "", separator: true, onselect: () => {} });
     items.push({
       label: "Remove",
       icon: "trash",

@@ -48,6 +48,25 @@ pub fn validate_clip(clip: &ClipInput) -> std::result::Result<(), String> {
     Ok(())
 }
 
+/// The name of an existing clip whose payload matches this one exactly after
+/// trim — the duplicate test is byte equality (content is data, not an
+/// identifier, so case differences mean different clips). `except_id`
+/// excludes the clip being edited. Kept out of [`validate_clip`] because the
+/// backup import validates every record and must keep its skip semantics;
+/// only the create/update commands consult this. Ticket 103.
+pub fn colliding_clip(
+    conn: &Connection,
+    content: &str,
+    except_id: Option<i64>,
+) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT name FROM clips WHERE content = ?1 AND id != ?2 ORDER BY position, id LIMIT 1",
+        params![content.trim(), except_id.unwrap_or(-1)],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
 fn clip_from_row(row: &rusqlite::Row) -> Result<Clip> {
     Ok(Clip {
         id: row.get(0)?,
@@ -139,6 +158,29 @@ mod tests {
             name: name.into(),
             content: content.into(),
         }
+    }
+
+    #[test]
+    fn duplicate_content_detected_trimmed_and_case_sensitively() {
+        let c = conn();
+        create_clip(&c, &input("One", "copy me")).unwrap();
+
+        // Whitespace-trimmed payloads collide; the collider's name comes back.
+        assert_eq!(
+            colliding_clip(&c, "  copy me  ", None).unwrap().as_deref(),
+            Some("One")
+        );
+
+        // Content is data: case differences are different clips.
+        assert_eq!(colliding_clip(&c, "Copy Me", None).unwrap(), None);
+
+        // A second clip never trips over itself on edit, but another id finds it.
+        let two = create_clip(&c, &input("Two", "other text")).unwrap();
+        assert_eq!(colliding_clip(&c, "other text", Some(two.id)).unwrap(), None);
+        assert_eq!(
+            colliding_clip(&c, "other text", Some(two.id + 500)).unwrap().as_deref(),
+            Some("Two")
+        );
     }
 
     #[test]

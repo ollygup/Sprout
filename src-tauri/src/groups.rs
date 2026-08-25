@@ -9,7 +9,9 @@
 //! group accepts only Quick Actions, and likewise for Clips and Launch
 //! entries (spec decision, ticket 85). Items hold a nullable `group_id`
 //! column — at most one group per item — and deleting a group returns its
-//! members to ungrouped instead of deleting them.
+//! members to ungrouped instead of deleting them. Names are exclusive
+//! within their collection, and a group exists only while at least one
+//! member belongs to it: the last member leaving dissolves it (ticket 106).
 //!
 //! Groups are machine-local structure like desktop assignments (ticket 88):
 //! never part of Presets, Plan, Run, or exports.
@@ -136,35 +138,108 @@ pub fn validate_group_name(name: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
+/// Whether a sibling in the same collection already carries this name,
+/// compared trimmed and case-insensitively (ticket 106). `except_id` excludes
+/// the group being renamed. Uniqueness binds to live rows only — a deleted or
+/// dissolved group frees its name immediately.
+fn colliding_group(
+    conn: &Connection,
+    collection: Collection,
+    name: &str,
+    except_id: Option<i64>,
+) -> Result<bool> {
+    let needle = name.trim().to_lowercase();
+    let mut stmt = conn.prepare(&format!(
+        "{SELECT_GROUP_SQL} WHERE collection = ?1"
+    ))?;
+    let rows = stmt.query_map(params![collection.as_str()], group_from_row)?;
+    for sibling in rows {
+        let sibling = sibling?;
+        if Some(sibling.id) != except_id && sibling.name.trim().to_lowercase() == needle {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn collision_error(collection: Collection, name: &str) -> String {
+    format!(
+        "A group named '{}' already exists in {} — pick another name.",
+        name.trim(),
+        collection.label()
+    )
+}
+
 /// Appends a Group at the end of its collection's order (the next free
 /// position among that collection's groups only — namespaces never share an
-/// ordering).
-pub fn create_group(conn: &Connection, collection: Collection, name: &str) -> Result<Group> {
-    let tx = conn.unchecked_transaction()?;
-    let position: i64 = tx.query_row(
-        "SELECT COALESCE(MAX(position), -1) + 1 FROM groups WHERE collection = ?1",
-        params![collection.as_str()],
-        |row| row.get(0),
-    )?;
+/// ordering). The trimmed name must be unique within the collection,
+/// case-insensitively (ticket 106).
+pub fn create_group(
+    conn: &Connection,
+    collection: Collection,
+    name: &str,
+) -> std::result::Result<Group, String> {
+    validate_group_name(name)?;
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    if colliding_group(&tx, collection, name, None).map_err(|e| e.to_string())? {
+        return Err(collision_error(collection, name));
+    }
+    let position: i64 = tx
+        .query_row(
+            "SELECT COALESCE(MAX(position), -1) + 1 FROM groups WHERE collection = ?1",
+            params![collection.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
     tx.execute(
         "INSERT INTO groups (collection, name, position) VALUES (?1, ?2, ?3)",
         params![collection.as_str(), name.trim(), position],
-    )?;
+    )
+    .map_err(|e| e.to_string())?;
     let id = tx.last_insert_rowid();
-    tx.commit()?;
-    Ok(get_group(conn, id)?.expect("just inserted"))
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(get_group(conn, id)
+        .map_err(|e| e.to_string())?
+        .expect("just inserted"))
 }
 
-/// Renames a Group in place; position and membership are untouched.
-pub fn rename_group(conn: &Connection, id: i64, name: &str) -> Result<()> {
-    let changed = conn.execute(
+/// Renames a Group in place; position and membership are untouched. The
+/// trimmed name must stay unique within the collection, case-insensitively,
+/// excluding the group itself (ticket 106).
+pub fn rename_group(conn: &Connection, id: i64, name: &str) -> std::result::Result<(), String> {
+    validate_group_name(name)?;
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    let group = get_group(&tx, id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "This group no longer exists — refresh and try again.".to_string())?;
+    if colliding_group(&tx, group.collection, name, Some(id)).map_err(|e| e.to_string())? {
+        return Err(collision_error(group.collection, name));
+    }
+    tx.execute(
         "UPDATE groups SET name = ?1 WHERE id = ?2",
         params![name.trim(), id],
-    )?;
-    if changed == 0 {
-        return Err(rusqlite::Error::QueryReturnedNoRows);
-    }
-    Ok(())
+    )
+    .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())
+}
+
+/// Dissolves every group across all three collections that no item belongs
+/// to anymore (ticket 106): a group exists only while it has members. Runs
+/// inside the caller's transaction; survivor positions are untouched, so the
+/// user's order is preserved (gaps are harmless — lists order by position).
+/// Explicitly created empty groups dissolve on the next unassign/delete
+/// transaction, never mid-create.
+pub(crate) fn sweep_empty_groups(conn: &Connection) -> Result<usize> {
+    conn.execute(
+        "DELETE FROM groups WHERE NOT EXISTS (
+            SELECT 1 FROM launch_entries WHERE launch_entries.group_id = groups.id
+         ) AND NOT EXISTS (
+            SELECT 1 FROM quick_actions WHERE quick_actions.group_id = groups.id
+         ) AND NOT EXISTS (
+            SELECT 1 FROM clips WHERE clips.group_id = groups.id
+         )",
+        [],
+    )
 }
 
 /// Removes a Group: its members go back to ungrouped (their `group_id` is
@@ -190,6 +265,7 @@ pub fn delete_group(conn: &Connection, id: i64) -> Result<()> {
          WHERE collection = ?1 AND position > ?2",
         params![group.collection.as_str(), position],
     )?;
+    sweep_empty_groups(&tx)?;
     tx.commit()
 }
 
@@ -269,13 +345,14 @@ pub fn assign_item(
     item_id: i64,
     group_id: i64,
 ) -> std::result::Result<(), AssignError> {
-    let group = get_group(conn, group_id)?.ok_or(AssignError::Missing)?;
+    let tx = conn.unchecked_transaction()?;
+    let group = get_group(&tx, group_id)?.ok_or(AssignError::Missing)?;
     if group.collection != collection {
         return Err(AssignError::CrossCollection {
             group_label: group.collection.label(),
         });
     }
-    let changed = conn.execute(
+    let changed = tx.execute(
         &format!(
             "UPDATE {} SET group_id = ?1 WHERE id = ?2",
             collection.table()
@@ -285,23 +362,32 @@ pub fn assign_item(
     if changed == 0 {
         return Err(AssignError::Missing);
     }
+    // The item may have left its previous group for the last time — that
+    // group dissolves with this same transaction (ticket 106).
+    sweep_empty_groups(&tx)?;
+    tx.commit()?;
     Ok(())
 }
 
 /// Clears an item's group reference — back to ungrouped. Unassigning an
 /// already-ungrouped item succeeds; an item that no longer exists errors.
+/// The group it left, if now empty, dissolves in the same transaction
+/// (ticket 106).
 pub fn unassign_item(
     conn: &Connection,
     collection: Collection,
     item_id: i64,
 ) -> std::result::Result<(), AssignError> {
-    let changed = conn.execute(
+    let tx = conn.unchecked_transaction()?;
+    let changed = tx.execute(
         &format!("UPDATE {} SET group_id = NULL WHERE id = ?1", collection.table()),
         params![item_id],
     )?;
     if changed == 0 {
         return Err(AssignError::Missing);
     }
+    sweep_empty_groups(&tx)?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -453,10 +539,12 @@ mod tests {
     fn item_holds_at_most_one_group_and_unassign_clears_it() {
         let conn = conn();
         let g1 = create_group(&conn, Collection::Action, "One").unwrap();
-        let g2 = create_group(&conn, Collection::Action, "Two").unwrap();
         let item = quick_actions::create_quick_action(&conn, &action("Backup")).unwrap();
-
         assign_item(&conn, Collection::Action, item.id, g1.id).unwrap();
+
+        // g2 is born only after g1 is populated: an empty group does not
+        // survive an intervening assign/unassign/delete (ticket 106).
+        let g2 = create_group(&conn, Collection::Action, "Two").unwrap();
         assign_item(&conn, Collection::Action, item.id, g2.id).unwrap();
         let stored = quick_actions::list_quick_actions(&conn).unwrap();
         assert_eq!(stored[0].group_id, Some(g2.id), "the later assignment replaces the earlier one");
@@ -470,19 +558,24 @@ mod tests {
     fn deleting_a_group_returns_members_ungrouped_without_deleting_them() {
         let conn = conn();
         let g1 = create_group(&conn, Collection::Clip, "Work").unwrap();
-        let g2 = create_group(&conn, Collection::Clip, "Play").unwrap();
         let kept = clips::create_clip(&conn, &clip("token")).unwrap();
         assign_item(&conn, Collection::Clip, kept.id, g1.id).unwrap();
+        // Populated first — see the dissolve rule (ticket 106).
+        let g2 = create_group(&conn, Collection::Clip, "Play").unwrap();
+        let survivor = clips::create_clip(&conn, &clip("spare")).unwrap();
+        assign_item(&conn, Collection::Clip, survivor.id, g2.id).unwrap();
 
         delete_group(&conn, g1.id).unwrap();
 
-        // The member survives, ungrouped.
+        // The member survives, ungrouped; the populated sibling survives.
         let stored = clips::list_clips(&conn).unwrap();
-        assert_eq!(stored.len(), 1);
-        assert_eq!(stored[0].id, kept.id);
-        assert_eq!(stored[0].group_id, None);
+        assert_eq!(stored.len(), 2);
+        assert_eq!(
+            stored.iter().find(|c| c.id == kept.id).unwrap().group_id,
+            None
+        );
 
-        // The other collection's group is untouched and closes ranks.
+        // The remaining group closed ranks.
         let remaining = list_groups(&conn, Collection::Clip).unwrap();
         assert_eq!(remaining.iter().map(|g| g.id).collect::<Vec<_>>(), vec![g2.id]);
         move_group(&conn, remaining[0].id, 3).unwrap(); // still reorderable
@@ -494,12 +587,13 @@ mod tests {
     fn order_by_group_lists_ungrouped_first_then_groups_in_user_order() {
         let conn = conn();
         let g1 = create_group(&conn, Collection::Action, "First").unwrap();
+        let in_g1 = quick_actions::create_quick_action(&conn, &action("c")).unwrap();
+        assign_item(&conn, Collection::Action, in_g1.id, g1.id).unwrap();
+        // Populated before the next group is born — the dissolve rule.
         let g2 = create_group(&conn, Collection::Action, "Second").unwrap();
         let in_g2 = quick_actions::create_quick_action(&conn, &action("a")).unwrap();
-        let free = quick_actions::create_quick_action(&conn, &action("b")).unwrap();
-        let in_g1 = quick_actions::create_quick_action(&conn, &action("c")).unwrap();
         assign_item(&conn, Collection::Action, in_g2.id, g2.id).unwrap();
-        assign_item(&conn, Collection::Action, in_g1.id, g1.id).unwrap();
+        let free = quick_actions::create_quick_action(&conn, &action("b")).unwrap();
 
         // Reorder: Second now comes before First.
         move_group(&conn, g2.id, 0).unwrap();
@@ -531,5 +625,127 @@ mod tests {
         // A dangling group reference never hides an item.
         let sections = order_by_group(vec![1, 2], vec![g1], |i| if *i == 1 { Some(404) } else { None });
         assert_eq!(sections.ungrouped, vec![1, 2]);
+    }
+
+    #[test]
+    fn group_names_are_exclusive_within_their_collection_case_insensitively() {
+        let conn = conn();
+        let builds = create_group(&conn, Collection::Action, "Builds").unwrap();
+        // Populated immediately — an empty group does not survive an
+        // intervening transaction (ticket 106).
+        let first = quick_actions::create_quick_action(&conn, &action("a")).unwrap();
+        assign_item(&conn, Collection::Action, first.id, builds.id).unwrap();
+
+        // Same name, different case or padding, same collection → refused.
+        let err = create_group(&conn, Collection::Action, "  builds  ").unwrap_err();
+        assert!(err.contains("already exists"), "got: {err}");
+        create_group(&conn, Collection::Clip, "Builds").unwrap(); // other namespace: fine
+
+        // Renaming onto a sibling is refused; renaming to your own name is
+        // not (self excluded).
+        let other = create_group(&conn, Collection::Action, "Other").unwrap();
+        let second = quick_actions::create_quick_action(&conn, &action("Deploy")).unwrap();
+        assign_item(&conn, Collection::Action, second.id, other.id).unwrap();
+        let err = rename_group(&conn, builds.id, "other").unwrap_err();
+        assert!(err.contains("already exists"), "got: {err}");
+        rename_group(&conn, builds.id, "BUILDS").unwrap();
+
+        // Uniqueness binds to live rows only: deleting both frees the name
+        // for immediate reuse.
+        delete_group(&conn, builds.id).unwrap();
+        delete_group(&conn, other.id).unwrap();
+        let reused = create_group(&conn, Collection::Action, "Builds").unwrap();
+        assert_eq!(reused.name, "Builds");
+    }
+
+    #[test]
+    fn the_last_member_leaving_dissolves_its_group_on_every_path() {
+        let conn = conn();
+        let a = quick_actions::create_quick_action(&conn, &action("a")).unwrap();
+
+        // Path 1 — explicit unassign. (Each group is filled as soon as it
+        // exists: an empty group does not survive an intervening mutation,
+        // ticket 106.)
+        let g1 = create_group(&conn, Collection::Action, "One").unwrap();
+        assign_item(&conn, Collection::Action, a.id, g1.id).unwrap();
+        unassign_item(&conn, Collection::Action, a.id).unwrap();
+        assert!(list_groups(&conn, Collection::Action).unwrap().is_empty());
+
+        // Path 2 — reassignment (the old group loses its last member).
+        let g2 = create_group(&conn, Collection::Action, "Two").unwrap();
+        assign_item(&conn, Collection::Action, a.id, g2.id).unwrap();
+        let g3 = create_group(&conn, Collection::Action, "Three").unwrap();
+        assign_item(&conn, Collection::Action, a.id, g3.id).unwrap();
+        let remaining = list_groups(&conn, Collection::Action).unwrap();
+        assert_eq!(
+            remaining.iter().map(|g| g.name.clone()).collect::<Vec<_>>(),
+            vec!["Three"]
+        );
+
+        // Path 3 — the member itself is deleted.
+        let c = clips::create_clip(&conn, &clip("token")).unwrap();
+        let g4 = create_group(&conn, Collection::Clip, "Solo").unwrap();
+        assign_item(&conn, Collection::Clip, c.id, g4.id).unwrap();
+        clips::delete_clip(&conn, c.id).unwrap();
+        assert!(list_groups(&conn, Collection::Clip).unwrap().is_empty());
+
+        // A populated group survives an unrelated collection's sweep trigger.
+        let e = launch::create_launch_entry(&conn, &entry("Editor")).unwrap();
+        let launch_g = create_group(&conn, Collection::Launch, "Kept").unwrap();
+        assign_item(&conn, Collection::Launch, e.id, launch_g.id).unwrap();
+        unassign_item(&conn, Collection::Action, a.id).unwrap(); // trigger elsewhere
+        assert_eq!(list_groups(&conn, Collection::Launch).unwrap()[0].id, launch_g.id);
+    }
+
+    #[test]
+    fn sweeps_across_all_three_collections_preserve_survivor_order() {
+        let conn = conn();
+
+        // Every group is populated the moment it exists (the dissolve rule);
+        // Launch gets a second populated group to prove relative order, and
+        // one always-empty sibling per collection waits for the sweep.
+        let e = launch::create_launch_entry(&conn, &entry("Editor")).unwrap();
+        let first_l = create_group(&conn, Collection::Launch, "L first").unwrap();
+        assign_item(&conn, Collection::Launch, e.id, first_l.id).unwrap();
+        let drop_l = create_group(&conn, Collection::Launch, "L drop").unwrap();
+        let e2 = launch::create_launch_entry(&conn, &entry("Browser")).unwrap();
+        let second_l = create_group(&conn, Collection::Launch, "L second").unwrap();
+        assign_item(&conn, Collection::Launch, e2.id, second_l.id).unwrap();
+        let a = quick_actions::create_quick_action(&conn, &action("Deploy")).unwrap();
+        let keep_a = create_group(&conn, Collection::Action, "A keep").unwrap();
+        assign_item(&conn, Collection::Action, a.id, keep_a.id).unwrap();
+        let drop_a = create_group(&conn, Collection::Action, "A drop").unwrap();
+        let c = clips::create_clip(&conn, &clip("token")).unwrap();
+        let keep_c = create_group(&conn, Collection::Clip, "C keep").unwrap();
+        assign_item(&conn, Collection::Clip, c.id, keep_c.id).unwrap();
+        let drop_c = create_group(&conn, Collection::Clip, "C drop").unwrap();
+
+        // One unrelated transaction (unassigning an already-ungrouped item
+        // succeeds) sweeps every memberless group in every collection.
+        unassign_item(&conn, Collection::Clip, clips::create_clip(&conn, &clip("x")).unwrap().id).unwrap();
+
+        let launches = list_groups(&conn, Collection::Launch).unwrap();
+        assert_eq!(
+            launches.iter().map(|g| g.name.clone()).collect::<Vec<_>>(),
+            vec!["L first", "L second"],
+            "survivors keep their user order"
+        );
+        assert_eq!(
+            list_groups(&conn, Collection::Action)
+                .unwrap()
+                .iter()
+                .map(|g| g.name.clone())
+                .collect::<Vec<_>>(),
+            vec!["A keep"]
+        );
+        assert_eq!(
+            list_groups(&conn, Collection::Clip)
+                .unwrap()
+                .iter()
+                .map(|g| g.name.clone())
+                .collect::<Vec<_>>(),
+            vec!["C keep"]
+        );
+        let _ = (drop_l, drop_a, drop_c);
     }
 }

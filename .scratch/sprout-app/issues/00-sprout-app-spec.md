@@ -1,10 +1,16 @@
 ---
 title: Sprout — Preset-Driven Windows Installer Desktop App
-status: ready
-labels: [ready-for-agent]
+status: done
+labels: [historical]
 ---
 
-# Sprout — Preset-Driven Windows Installer Desktop App
+# 00 — Sprout app: the v1 spec (historical)
+
+**What to build:** The original whole-app v1 spec, kept for the record only.
+
+**Blocked by:** none.
+
+**Status:** done — historical v1 record (moved out of `docs/specs/` so every spec lives as a ticket; round specs start at 55 and continue past 100).
 
 > Spec synthesized from the grilling session (Rust + Tauri, domain-modeling glossary in `docs/CONTEXT.md`, decisions in `docs/adr/`).
 > Historical record of the v1 spec — implemented through v0.4.x (parity gate passed 2026-08-15). Post-v1 scope (tray residency, Quick Launch window/dock, self-update, auto-start, Quick Clips) is decided in `docs/adr/`; this document is not kept current.

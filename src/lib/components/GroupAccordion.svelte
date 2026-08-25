@@ -58,6 +58,10 @@
     flex-direction: column;
     gap: var(--space-2);
     margin-top: var(--space-5);
+    /* One source for the caret column: the head's icon box and the body
+       indent both read it, so rows land exactly at the title-text start
+       (Notion toggle anatomy — research 0006, pattern 9). */
+    --caret-column: 14px;
   }
 
   /* The Quick Launch window's strip: its scroll container already spaces
@@ -94,8 +98,19 @@
     padding-right: var(--space-2);
   }
 
+  /* The caret box gets a fixed column width, so the label always starts at
+     caret-column + gap no matter the glyph's intrinsic size. */
+  .group__head :global(.disclosure__chevron) {
+    display: inline-flex;
+    flex: none;
+    width: var(--caret-column);
+    justify-content: center;
+  }
+
+  /* Body content aligns with the title text's start — caret column plus the
+     labeled-mode gap. */
   .group__rows {
-    padding-left: var(--space-5);
+    padding-left: calc(var(--caret-column) + var(--space-1));
   }
 
   .group--flush .group__rows {
