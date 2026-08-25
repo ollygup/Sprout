@@ -7,6 +7,7 @@
     actions,
     subtitle,
     toolbar,
+    features,
   }: {
     title: string;
     /** The h1's id — pages pass their own so section[aria-labelledby] keeps
@@ -20,6 +21,10 @@
     /** Full-width row below the header — the list filter's home. Search
      *  lives here, never inline in the actions row (research 0005). */
     toolbar?: Snippet;
+    /** Optional page-features zone pinned to the toolbar lane's right end
+     *  (research 0008): the shared PageFeaturesButton's only home, so its
+     *  placement is decided once here instead of per page. */
+    features?: Snippet;
   } = $props();
 </script>
 
@@ -33,8 +38,13 @@
   {#if subtitle}
     <p class="page-header__sub">{@render subtitle()}</p>
   {/if}
-  {#if toolbar}
-    <div class="page-header__toolbar">{@render toolbar()}</div>
+  {#if toolbar || features}
+    <div class="page-header__toolbar">
+      {@render toolbar?.()}
+      {#if features}
+        <div class="page-header__features">{@render features()}</div>
+      {/if}
+    </div>
   {/if}
 </header>
 
@@ -74,6 +84,15 @@
 
   .page-header__toolbar {
     display: flex;
+    align-items: center;
     margin-top: var(--space-5);
+  }
+
+  /* The features zone hugs the lane's far edge; the toolbar snippet (the
+   * filter) keeps its natural width beside it. */
+  .page-header__features {
+    display: inline-flex;
+    flex: none;
+    margin-left: auto;
   }
 </style>

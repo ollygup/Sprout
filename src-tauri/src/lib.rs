@@ -496,6 +496,23 @@ fn update_autostart(
     autostart::sync_registration(&app, enabled)
 }
 
+/// The desktop-assignments toggle (ticket 88): persists only that knob —
+/// turning it on restores every stored assignment, turning it off makes the
+/// runner ignore them again. `quick-launch-changed` tells a live Quick
+/// Launch window to re-read what it renders.
+#[tauri::command]
+fn update_desktop_assignments(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<(), String> {
+    let conn = lock(&state)?;
+    settings::save_desktop_assignments(&conn, if enabled { "on" } else { "off" })?;
+    drop(conn);
+    let _ = app.emit("quick-launch-changed", ());
+    Ok(())
+}
+
 /// The Logs screen's picture of where logs live and how big they are — no
 /// content, ever.
 #[tauri::command]
@@ -664,9 +681,13 @@ fn launch_entries(
     {
         return Err("A Quick Launch run is already in progress — wait for it to finish.".into());
     }
-    let cap = {
+    let (cap, honor_desktops) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
-        settings::load(&conn).launch_concurrency as usize
+        let settings = settings::load(&conn);
+        (
+            settings.launch_concurrency as usize,
+            settings.honor_desktop_assignments(),
+        )
     };
     let engine = Arc::clone(&state.launcher);
     let running = Arc::clone(&state.launch_in_progress);
@@ -680,7 +701,9 @@ fn launch_entries(
         if let Some(path) = &log_path {
             launch::write_launch_run_header(path, entries.len(), cap);
         }
-        let report = launch::run_launch_queue(engine.as_ref(), &entries, cap);
+        // The assignments flag is read per run (ticket 88): toggling grouping
+        // off makes the very next Start dormant — no desktop moves, no notes.
+        let report = launch::run_launch_queue(engine.as_ref(), &entries, cap, honor_desktops);
         if let Some(path) = &log_path {
             launch::write_launch_run_summary(path, &report);
         }
@@ -1519,6 +1542,7 @@ pub fn run() {
             update_settings,
             update_theme,
             update_autostart,
+            update_desktop_assignments,
             check_for_update,
             install_update,
             list_logs,

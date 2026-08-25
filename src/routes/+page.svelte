@@ -11,17 +11,18 @@
     createLaunchEntry,
     createVirtualDesktop,
     deleteLaunchEntry,
+    getSettings,
     listLaunchCandidates,
     listLaunchEntries,
     listVirtualDesktops,
     moveLaunchEntry,
     startQuickLaunch,
+    updateDesktopAssignments,
     updateLaunchEntry,
   } from "$lib/api";
   import { listen } from "@tauri-apps/api/event";
   import { open } from "@tauri-apps/plugin-dialog";
   import Button from "$lib/components/Button.svelte";
-  import Disclosure from "$lib/components/Disclosure.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import IconButton from "$lib/components/IconButton.svelte";
   import PageHeader from "$lib/components/PageHeader.svelte";
@@ -34,6 +35,7 @@
   } from "$lib/components/ContextMenu.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
   import Notice from "$lib/components/Notice.svelte";
+  import PageFeaturesButton from "$lib/components/PageFeaturesButton.svelte";
 
   let entries = $state<LaunchEntry[]>([]);
   let loading = $state(true);
@@ -61,20 +63,20 @@
   let candidatesFailed = $state(false);
   let searchInput = $state<HTMLInputElement>();
 
-  // Virtual-desktop grouping (ticket 44/46): the whole surface — the row
-  // menus, the group accordions, "New desktop…" — is hidden below Windows
-  // 11 24H2.
+  // Virtual-desktop assignments (tickets 44/88): an opt-in feature — the
+  // page-features gear menu is its only switch (research 0008), default off
+  // and fully dormant when off. The desktop list itself still loads so
+  // turning the switch on works without a reload; below Windows 11 24H2
+  // (`desktopSupported` false) the whole menu disappears regardless.
   let desktops = $state<VirtualDesktop[]>([]);
   let desktopSupported = $state(false);
+  let desktopGrouping = $state(false);
   let menu: (ContextMenuState & { entryId: number }) | null = $state(null);
-
-  // Accordion collapse state (ticket 46): only user-collapsed group keys;
-  // everything else — including newly appearing groups — defaults open.
-  let collapsed = $state<Set<string>>(new Set());
 
   onMount(() => {
     load();
     loadVirtualDesktops();
+    loadGroupingSetting();
     // Ticket 42: the run finishes on the backend's background thread; the
     // summary lands as a system notification, and this event clears the
     // button and mirrors the summary in-page.
@@ -100,6 +102,15 @@
       console.error(e);
       desktops = [];
       desktopSupported = false;
+    }
+  }
+
+  async function loadGroupingSetting() {
+    try {
+      const s = await getSettings();
+      desktopGrouping = s.desktop_assignments === "on";
+    } catch (e) {
+      console.error(e);
     }
   }
 
@@ -317,98 +328,71 @@
       : entries
   );
 
-  // ------------------- virtual-desktop grouping (ticket 46) --------------
+  // ------------------- desktop assignments (tickets 44 & 88) -------------
 
-  /** The label shown for an assignment: the desktop's name, or "Current
-   * desktop" for no assignment. An id the list no longer knows (the desktop
-   * was deleted) reads as "Desktop ?" — the launch falls back with a note. */
+  /** The label shown for an assignment: the desktop's name. An id the list
+   *  no longer knows (the desktop was deleted) reads as "Desktop ?" — the
+   *  launch falls back with a note when grouping is on. */
   function desktopName(id: string | null): string {
     if (!id) return "Current desktop";
     return desktops.find((d) => d.id === id)?.name ?? "Desktop ?";
   }
 
-  interface LaunchGroup {
-    key: string;
-    label: string;
-    entries: LaunchEntry[];
-  }
-
-  /** The rack grouped by desktop assignment (ticket 44/46): unassigned
-   * entries under "Current desktop" first, then one group per desktop in Task
-   * View order, then stale assignments (desktop no longer exists) in list
-   * order — each labelled "Desktop ?". Empty groups never render, and the
-   * whole grouping surface is hidden below Windows 11 24H2. */
-  const groups = $derived(buildGroups());
-
-  function buildGroups(): LaunchGroup[] {
-    if (!desktopSupported) return [];
-    const out: LaunchGroup[] = [];
-    const unassigned = visible.filter((e) => e.desktop_id === null);
-    if (unassigned.length > 0) {
-      out.push({ key: "current", label: "Current desktop", entries: unassigned });
+  /** The feature switch behind the page-features menu (ticket 88): persisted
+   *  through the settings store so the runner and any live window obey the
+   *  same value. Optimistic — reverted when the save fails. */
+  async function toggleDesktopAssignments() {
+    const next = !desktopGrouping;
+    desktopGrouping = next;
+    try {
+      await updateDesktopAssignments(next);
+      flash(
+        next
+          ? "Desktop grouping on — stored assignments apply again."
+          : "Desktop grouping off — assignments are kept but ignored."
+      );
+    } catch (e) {
+      console.error(e);
+      desktopGrouping = !next;
+      error = "Couldn't save the desktop grouping setting — try again.";
     }
-    for (const d of desktops) {
-      const list = visible.filter((e) => e.desktop_id === d.id);
-      if (list.length > 0) {
-        out.push({ key: d.id, label: d.name, entries: list });
-      }
-    }
-    for (const e of visible) {
-      if (
-        e.desktop_id &&
-        !desktops.some((d) => d.id === e.desktop_id) &&
-        !out.some((g) => g.key === e.desktop_id)
-      ) {
-        out.push({
-          key: e.desktop_id,
-          label: "Desktop ?",
-          entries: visible.filter((x) => x.desktop_id === e.desktop_id),
-        });
-      }
-    }
-    return out;
   }
 
-  function toggleGroup(key: string) {
-    const next = new Set(collapsed);
-    if (next.has(key)) next.delete(key);
-    else next.add(key);
-    collapsed = next;
-  }
+  // One item below the 24H2 gate, none above it — an empty list makes the
+  // whole gear disappear (research 0004 rule 2: no chrome for a dead
+  // feature). The description is the only explanation the surface carries.
+  const featureItems = $derived(
+    desktopSupported
+      ? [
+          {
+            label: "Desktop grouping",
+            description:
+              "Assigned entries launch on their virtual desktop. Assignments are kept while grouping is off.",
+            value: desktopGrouping,
+            onchange: () => toggleDesktopAssignments(),
+          },
+        ]
+      : []
+  );
 
-  function isOpen(key: string): boolean {
-    return !collapsed.has(key);
-  }
-
-  function groupOf(key: string | null): LaunchGroup | null {
-    if (key === null) {
-      const list = visible;
-      return list.length > 0 ? { key: "", label: "", entries: list } : null;
-    }
-    return groups.find((g) => g.key === key) ?? null;
-  }
-
-  /** One ⋯ menu per row (ticket 46): the desktop assignment list with a check
-   * on the current assignment, then Move up / Move down / Remove. Move runs
-   * within the row's own group — a desktop group stays put while its order
-   * changes. */
+  /** One ⋯ menu per row: the desktop assignment list only while the feature
+   *  is on (ticket 88's dormancy — nothing about assignments exists in the
+   *  menu when it is off), then Move up / Move down / Remove over the flat
+   *  list order. */
   function openRowMenu(
     entry: LaunchEntry,
     anchor: HTMLButtonElement,
-    groupKey: string | null,
     viaKeyboard: boolean
   ) {
     if (menu?.entryId === entry.id) {
       menu = null;
       return;
     }
-    const group = groupOf(groupKey);
-    const groupEntries = group?.entries ?? visible;
-    const gi = groupEntries.indexOf(entry);
-    const upDisabled = gi <= 0;
-    const downDisabled = gi >= groupEntries.length - 1;
+    const index = visible.indexOf(entry);
+    const upDisabled = index <= 0;
+    const downDisabled = index >= visible.length - 1;
     const items: ContextMenuItem[] = [];
-    if (desktopSupported) {
+    if (desktopSupported && desktopGrouping) {
       items.push(
         {
           label: "Current desktop",
@@ -433,13 +417,13 @@
         label: "Move up",
         icon: "chevron-up",
         disabled: upDisabled,
-        onselect: () => move(entry.id, entries.indexOf(groupEntries[gi - 1])),
+        onselect: () => move(entry.id, entries.indexOf(visible[index - 1])),
       },
       {
         label: "Move down",
         icon: "chevron-down",
         disabled: downDisabled,
-        onselect: () => move(entry.id, entries.indexOf(groupEntries[gi + 1])),
+        onselect: () => move(entry.id, entries.indexOf(visible[index + 1])),
       },
       {
         label: "Remove",
@@ -542,6 +526,9 @@
         ariaLabel="Filter Quick Launch"
         onchange={(v) => (filter = v)}
       />
+    {/snippet}
+    {#snippet features()}
+      <PageFeaturesButton label="Quick Launch features" items={featureItems} />
     {/snippet}
   </PageHeader>
 
@@ -675,58 +662,6 @@
         </Button>
       </div>
     </EmptyState>
-  {:else if desktopSupported}
-    {#each groups as group (group.key)}
-      <section class="group" aria-label={group.label}>
-        <header class="group__head">
-          <Disclosure
-            open={isOpen(group.key)}
-            controls={`group-${group.key}`}
-            ariaLabel={`Toggle the ${group.label} group`}
-            onclick={() => toggleGroup(group.key)}
-          />
-          <h2 class="group__name">{group.label}</h2>
-          <span class="group__count">
-            {group.entries.length} {group.entries.length === 1 ? "entry" : "entries"}
-          </span>
-        </header>
-        {#if isOpen(group.key)}
-          <ul id={`group-${group.key}`} class="rack">
-            {#each group.entries as entry (entry.id)}
-              <li class="rack__row">
-                <span class="rack__badge" aria-hidden="true">
-                  <Icon
-                    name={entry.kind === "app" ? "rocket" : "terminal"}
-                    size={14}
-                  />
-                </span>
-                <span class="rack__name">{entry.name}</span>
-                <span class="rack__kind">
-                  {entry.kind}
-                  {#if entry.kind === "command" && entry.shell}
-                    · {entry.shell}
-                  {/if}
-                </span>
-                <span class="rack__target" title={entry.target}>{entry.target}</span>
-                <IconButton
-                  icon="dots"
-                  label={`Actions for ${entry.name}`}
-                  quiet
-                  data-ctx-trigger
-                  onclick={(e) =>
-                    openRowMenu(
-                      entry,
-                      e.currentTarget as HTMLButtonElement,
-                      group.key,
-                      e.detail === 0
-                    )}
-                />
-              </li>
-            {/each}
-          </ul>
-        {/if}
-      </section>
-    {/each}
   {:else}
     <ul class="rack">
       {#each visible as entry (entry.id)}
@@ -744,6 +679,16 @@
               · {entry.shell}
             {/if}
           </span>
+          {#if desktopGrouping && desktopSupported && entry.desktop_id}
+            <span
+              class="rack__desk"
+              title={`Opens on ${desktopName(entry.desktop_id)}`}
+            >
+              {desktopName(entry.desktop_id)}
+            </span>
+          {:else if desktopGrouping && desktopSupported && !entry.desktop_id}
+            <span class="rack__desk rack__desk--empty" aria-hidden="true"></span>
+          {/if}
           <span class="rack__target" title={entry.target}>{entry.target}</span>
           <IconButton
             icon="dots"
@@ -754,7 +699,6 @@
               openRowMenu(
                 entry,
                 e.currentTarget as HTMLButtonElement,
-                null,
                 e.detail === 0
               )}
           />
@@ -972,36 +916,6 @@
     color: var(--accent);
   }
 
-  .group {
-    margin-bottom: var(--space-5);
-  }
-
-  .group__head {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    margin-bottom: var(--space-2);
-  }
-
-  .group__name {
-    margin: 0;
-    font-family: var(--font-display);
-    font-size: var(--text-base);
-    font-weight: 600;
-    color: var(--text);
-  }
-
-  .group__count {
-    padding: 2px 8px;
-    border-radius: 999px;
-    background: var(--bg-surface);
-    border: 1px solid var(--border);
-    font-family: var(--font-mono);
-    font-size: var(--text-2xs);
-    letter-spacing: var(--tracking-mono);
-    color: var(--text-muted);
-  }
-
   .rack {
     list-style: none;
     margin: 0;
@@ -1044,6 +958,27 @@
     border-radius: 999px;
     background: var(--accent-tint);
     color: var(--accent);
+  }
+
+  /* The desktop-assignment badge (ticket 88): a quiet mono pill, same
+   * language as the kind pill but muted — it names, it doesn't accent. The
+   * empty twin reserves the column for unassigned rows while grouping is on,
+   * so targets stay aligned; when grouping is off neither span renders. */
+  .rack__desk {
+    flex-shrink: 0;
+    min-width: 88px;
+    text-align: center;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    letter-spacing: var(--tracking-mono);
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .rack__target {

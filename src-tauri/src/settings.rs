@@ -29,7 +29,12 @@
 //! - `autostart` — whether Sprout registers itself to start with Windows
 //!   (ADR-0013, ticket 75): "on" (default) or "off". The registration itself
 //!   is reconciled with this value by the autostart module at startup and on
-//!   every toggle.
+//!   every toggle;
+//! - `desktop_assignments` — whether Quick Launch honors Launch entries'
+//!   desktop assignments and shows their surface (ticket 88): "off" (default)
+//!   or "on". Dormant means fully dormant: no assignment menu or badge, and
+//!   the runner treats every entry as unassigned — while stored assignments
+//!   survive untouched, so re-enabling restores them.
 
 use rusqlite::{params, Connection};
 
@@ -56,12 +61,17 @@ pub const DEFAULT_DOCK_STATE: &str = "floating";
 /// Auto-start is on by default in installed builds (ADR-0013): the user opts
 /// out with the Settings toggle, not in.
 pub const DEFAULT_AUTOSTART: &str = "on";
+/// Desktop assignments are opt-in (ticket 88, research 0006 patterns 2–3):
+/// the list stays flat and assignments stay dormant until the user turns
+/// grouping on.
+pub const DEFAULT_DESKTOP_ASSIGNMENTS: &str = "off";
 
 const KEY_TIMEOUT: &str = "settings.timeout_minutes";
 const KEY_RETENTION: &str = "settings.log_retention_days";
 const KEY_THEME: &str = "settings.theme";
 const KEY_INSTALL_DIR: &str = "settings.install_dir";
 const KEY_LAUNCH_CONCURRENCY: &str = "launch.concurrency";
+const KEY_DESKTOP_ASSIGNMENTS: &str = "launch.desktop_assignments";
 const KEY_DOCK_MODE: &str = "dock.mode";
 const KEY_DOCK_EDGE: &str = "dock.edge";
 const KEY_DOCK_STATE: &str = "dock.state";
@@ -95,6 +105,11 @@ pub struct Settings {
     /// "off". The Run-key registration is reconciled with this value by the
     /// autostart module; the setting itself only records the preference.
     pub autostart: String,
+    /// Whether Quick Launch honors desktop assignments and shows their
+    /// surface (ticket 88): "on" or "off". Off is fully dormant — the list
+    /// renders flat, and the runner treats every entry as unassigned — but
+    /// stored assignments are never deleted.
+    pub desktop_assignments: String,
 }
 
 impl Default for Settings {
@@ -109,6 +124,7 @@ impl Default for Settings {
             dock_edge: DEFAULT_DOCK_EDGE.to_string(),
             dock_state: DEFAULT_DOCK_STATE.to_string(),
             autostart: DEFAULT_AUTOSTART.to_string(),
+            desktop_assignments: DEFAULT_DESKTOP_ASSIGNMENTS.to_string(),
         }
     }
 }
@@ -172,6 +188,14 @@ pub fn validate_autostart(value: &str) -> std::result::Result<(), String> {
     }
 }
 
+/// Accepts only the two desktop-assignment states (ticket 88).
+pub fn validate_desktop_assignments(value: &str) -> std::result::Result<(), String> {
+    match value {
+        "on" | "off" => Ok(()),
+        _ => Err("Desktop assignments must be \"on\" or \"off\"".into()),
+    }
+}
+
 impl Settings {
     /// Rejects values that would break a run or empty the log archive.
     /// Timeouts must be at least 1 minute and at most a day; retention at
@@ -194,7 +218,15 @@ impl Settings {
         validate_dock_edge(&self.dock_edge)?;
         validate_dock_state(&self.dock_state)?;
         validate_autostart(&self.autostart)?;
+        validate_desktop_assignments(&self.desktop_assignments)?;
         Ok(())
+    }
+
+    /// Whether the launch runner must honor stored desktop assignments
+    /// (ticket 88). The one place the "on" string is interpreted, so the
+    /// dormant default stays a single decision.
+    pub fn honor_desktop_assignments(&self) -> bool {
+        self.desktop_assignments == "on"
     }
 }
 
@@ -239,6 +271,8 @@ pub fn load(conn: &Connection) -> Settings {
             .unwrap_or_else(|| DEFAULT_DOCK_STATE.to_string()),
         autostart: validated(conn, KEY_AUTOSTART, validate_autostart)
             .unwrap_or_else(|| DEFAULT_AUTOSTART.to_string()),
+        desktop_assignments: validated(conn, KEY_DESKTOP_ASSIGNMENTS, validate_desktop_assignments)
+            .unwrap_or_else(|| DEFAULT_DESKTOP_ASSIGNMENTS.to_string()),
     }
 }
 
@@ -259,6 +293,8 @@ pub fn save(conn: &Connection, settings: &Settings) -> std::result::Result<(), S
     upsert_meta(&tx, KEY_DOCK_EDGE, &settings.dock_edge).map_err(|e| e.to_string())?;
     upsert_meta(&tx, KEY_DOCK_STATE, &settings.dock_state).map_err(|e| e.to_string())?;
     upsert_meta(&tx, KEY_AUTOSTART, &settings.autostart).map_err(|e| e.to_string())?;
+    upsert_meta(&tx, KEY_DESKTOP_ASSIGNMENTS, &settings.desktop_assignments)
+        .map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())
 }
 
@@ -291,6 +327,13 @@ pub fn save_dock_edge(conn: &Connection, edge: &str) -> std::result::Result<(), 
 pub fn save_autostart(conn: &Connection, value: &str) -> std::result::Result<(), String> {
     validate_autostart(value)?;
     upsert_meta(conn, KEY_AUTOSTART, value).map_err(|e| e.to_string())
+}
+
+/// Persists only the desktop-assignments toggle (ticket 88) — the Quick
+/// Launch toolbar writes it without touching the other knobs.
+pub fn save_desktop_assignments(conn: &Connection, value: &str) -> std::result::Result<(), String> {
+    validate_desktop_assignments(value)?;
+    upsert_meta(conn, KEY_DESKTOP_ASSIGNMENTS, value).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -328,6 +371,10 @@ mod tests {
         assert_eq!(load(&conn).dock_edge, DEFAULT_DOCK_EDGE);
         assert_eq!(load(&conn).dock_state, DEFAULT_DOCK_STATE);
         assert_eq!(load(&conn).autostart, DEFAULT_AUTOSTART);
+        assert_eq!(
+            load(&conn).desktop_assignments,
+            DEFAULT_DESKTOP_ASSIGNMENTS
+        );
     }
 
     #[test]
@@ -343,6 +390,7 @@ mod tests {
             dock_edge: "right".to_string(),
             dock_state: "docked".to_string(),
             autostart: "off".to_string(),
+            desktop_assignments: "on".to_string(),
         };
         {
             let conn = crate::db::init_at(&dir).unwrap();
@@ -398,6 +446,12 @@ mod tests {
         assert!(s.validate().is_ok());
         s.autostart = "off".to_string();
         assert!(s.validate().is_ok());
+        s.desktop_assignments = "maybe".to_string();
+        assert!(s.validate().is_err());
+        s.desktop_assignments = DEFAULT_DESKTOP_ASSIGNMENTS.to_string();
+        assert!(s.validate().is_ok());
+        s.desktop_assignments = "on".to_string();
+        assert!(s.validate().is_ok());
     }
 
     #[test]
@@ -431,6 +485,47 @@ mod tests {
         // registration — it reads back as the default (on).
         upsert_meta(&conn, KEY_AUTOSTART, "maybe").unwrap();
         assert_eq!(load(&conn).autostart, DEFAULT_AUTOSTART);
+    }
+
+    #[test]
+    fn invalid_stored_desktop_assignments_fall_back_to_default() {
+        let conn = conn();
+        // A broken value written by an older build must never surface the
+        // grouping UI — it reads back as the default (off, dormant).
+        upsert_meta(&conn, KEY_DESKTOP_ASSIGNMENTS, "maybe").unwrap();
+        assert_eq!(
+            load(&conn).desktop_assignments,
+            DEFAULT_DESKTOP_ASSIGNMENTS
+        );
+        assert!(!load(&conn).honor_desktop_assignments());
+    }
+
+    #[test]
+    fn desktop_assignments_roundtrip_on_their_own() {
+        let dir = clean_dir();
+        {
+            let conn = crate::db::init_at(&dir).unwrap();
+            save_desktop_assignments(&conn, "on").unwrap();
+            assert_eq!(load(&conn).desktop_assignments, "on");
+            assert!(load(&conn).honor_desktop_assignments());
+        }
+        // Re-open: the toggle survives the connection.
+        let conn = crate::db::init_at(&dir).unwrap();
+        assert_eq!(load(&conn).desktop_assignments, "on");
+        // And turning it back off persists on its own too.
+        save_desktop_assignments(&conn, "off").unwrap();
+        assert!(!load(&conn).honor_desktop_assignments());
+    }
+
+    #[test]
+    fn save_desktop_assignments_rejects_unknown_values_and_keeps_the_old_one() {
+        let conn = conn();
+        assert!(save_desktop_assignments(&conn, "dormant").is_err());
+        // Nothing was persisted.
+        assert_eq!(
+            load(&conn).desktop_assignments,
+            DEFAULT_DESKTOP_ASSIGNMENTS
+        );
     }
 
     #[test]
@@ -573,6 +668,7 @@ mod tests {
             dock_edge: DEFAULT_DOCK_EDGE.to_string(),
             dock_state: DEFAULT_DOCK_STATE.to_string(),
             autostart: DEFAULT_AUTOSTART.to_string(),
+            desktop_assignments: DEFAULT_DESKTOP_ASSIGNMENTS.to_string(),
         };
         assert!(save(&conn, &bad).is_err());
         // Nothing was persisted.

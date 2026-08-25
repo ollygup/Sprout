@@ -63,7 +63,7 @@ _Avoid_: Post-install check
 ## Quick access (tray, window, dock)
 
 **Launch entry**:
-A single item in the Quick Launch list — either a picked app (`.lnk`/`.exe`, launched as-is) or a user-written command (PowerShell/cmd/no-shell, optional show-window) — optionally assigned to a virtual-desktop group. Machine-local; never part of Presets or exports.
+A single item in the Quick Launch list — either a picked app (`.lnk`/`.exe`, launched as-is) or a user-written command (PowerShell/cmd/no-shell, optional show-window) — optionally assigned to a virtual desktop. Assignments are opt-in (the page-features gear menu on Quick Launch, default off, ticket 88): on, the launched window moves to its desktop and assigned rows carry a badge; off, the feature is fully dormant — stored assignments are never shown or applied, but also never deleted. Assignments never structure the list itself. Machine-local; never part of Presets or exports.
 _Avoid_: App entry, shortcut
 
 **Quick Launch**:

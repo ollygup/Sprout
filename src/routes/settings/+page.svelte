@@ -182,6 +182,9 @@
         dock_edge: dockEdge,
         dock_state: dockState,
         autostart,
+        // Not this screen's knob — the Quick Launch toolbar owns it (ticket
+        // 88); the loaded value passes through untouched.
+        desktop_assignments: settings.desktop_assignments,
       });
       saved = "Saved — the next run honors these.";
       // Reflect any clamping back into the fields.

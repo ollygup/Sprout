@@ -182,6 +182,13 @@ export function updateAutostart(enabled: boolean): Promise<void> {
   return invoke<void>("update_autostart", { enabled });
 }
 
+/** Persists the desktop-assignments toggle (ticket 88) on its own — the next
+ *  Quick Launch run obeys it, and a live window is told via
+ *  `quick-launch-changed`. */
+export function updateDesktopAssignments(enabled: boolean): Promise<void> {
+  return invoke<void>("update_desktop_assignments", { enabled });
+}
+
 /** The Logs screen's picture of where logs live and how big they are. */
 export function listLogs(): Promise<LogLocations> {
   return invoke<LogLocations>("list_logs");

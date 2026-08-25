@@ -15,7 +15,7 @@ widely-learned interface that solves the same problems.
   https://theorganizednotebook.com/blogs/blog/notion-new-ui-design-update-june-2025
 - Brainfeed, *Notion's New UI Design Update: What's Changed* (June 2025;
   independent corroboration of the same redesign) —
-  https://brainfeed.ai/pages/notions-new-ui-design-update-whats-changed-tips-and-more-june-2025-6i4aT.html
+  https://brainfeed.ai/pages/notions-new-ui-design-update-whats-changed-tips-and-tips-and-what-changed-tips-and-more-june-2025-6i4aT.html
 - getdesign.md, *Design System Analysis: Notion* (warm minimalism, serif
   headings, soft surfaces) — https://getdesign.md/notion/design-md
 - shade-solutions/notion-design-system (community-token reference: `#FFFFFF`
@@ -23,6 +23,11 @@ widely-learned interface that solves the same problems.
   https://github.com/shade-solutions/notion-design-system
 - notion-kit UI reference (toggles documented as accessible collapsible
   sections that keep layouts clean) — https://notion-ui.vercel.app/
+- **Primary, verified first-hand 2026-08:** Notion Help Center, *List view*
+  and database-view docs — https://www.notion.com/help/lists — "Open the
+  settings menu at the top right of your database → `Property visibility`";
+  view-scoped toggles ("Wrap column", layout options) flip state shown by an
+  accent-colored switch and the panel dismisses on outside click.
 
 ## The patterns
 
@@ -52,6 +57,18 @@ widely-learned interface that solves the same problems.
 7. **Collapsible sections over page splits.** Toggles/disclosure sections keep
    long layouts scannable without fragmenting into new pages — organization
    stays inline and reversible.
+8. **View-scoped switches live on the surface; global concerns centralize**
+   *(verified first-hand against notion.com/help, 2026-08)*. A database's
+   optional features — property visibility, wrapping, layout behaviors — are
+   toggles inside an on-surface settings/view-options popover anchored to the
+   top right of the surface they govern ("Open the settings menu at the top
+   right of your database"); state reads from the switch's accent color and
+   the panel dismisses on outside click. Only account/global concerns
+   (workspace, account, appearance app-wide) centralize in Settings &
+   preferences. This is the direct precedent for Sprout's page-features gear
+   menu (`PageFeaturesButton`, research 0008): object-scoped feature switches
+   never leave their object's surface, and never migrate into the app's
+   Settings screen.
 
 ## Applied case study (2026-08, ticket 85 round)
 
@@ -63,3 +80,8 @@ row menu follows pattern 4; the Run-accent/Stop-danger mapping spends color
 exactly per pattern 6; dock/window accordions reuse the Disclosure primitive
 per pattern 7. Pattern 5 is the standing caution behind keeping the rail's
 item labels stable while only their order changes.
+
+*(Supersession, 2026-08: the "toolbar-row toggles" control idiom in this case
+study was revised after review into a page-features gear menu — research 0008
+records why and what changed. Patterns 1–8 stand unchanged; only that one
+idiom moved.)*

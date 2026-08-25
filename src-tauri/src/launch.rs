@@ -421,20 +421,22 @@ struct PendingMove {
 /// windowless apps free theirs at spawn; a failure never aborts the rest.
 /// The 15 s window timeout counts as started, so the queue always drains.
 /// The skip rule (ticket 48) is per-window-per-desktop: an app entry skips
-/// only when a window of its image already sits on the target desktop — the
-/// assigned one, or the current desktop when unassigned — and the reason is
-/// reported, never silent. Every launch snapshots the app's windows before
+/// only when a window of its image already sits on the target desktop —
+/// the assigned one, or the current desktop when unassigned — and the reason
+/// is reported, never silent. Every launch snapshots the app's windows before
 /// it starts, so the window the queue waits on and moves is the one that
 /// appeared after the launch — never one the user already has open — and an
 /// entry whose target vanished from disk fails fast with a clear message,
-/// no silent 15 s stall. Pure logic — driven by the [`LauncherEngine`] seam
-/// and proven against a fake in tests.
+/// no silent 15 s stall. With `honor_assignments` false (ticket 88's dormant
+/// mode) every entry behaves exactly as if it were unassigned. Pure logic —
+/// driven by the [`LauncherEngine`] seam and proven against a fake in tests.
 pub fn run_launch_queue(
     engine: &dyn LauncherEngine,
     entries: &[LaunchEntry],
     cap: usize,
+    honor_assignments: bool,
 ) -> LaunchReport {
-    run_launch_queue_until(engine, entries, cap, WINDOW_TIMEOUT)
+    run_launch_queue_until(engine, entries, cap, WINDOW_TIMEOUT, honor_assignments)
 }
 
 /// The parameterized core behind [`run_launch_queue`] — the window timeout is
@@ -445,8 +447,28 @@ fn run_launch_queue_until(
     entries: &[LaunchEntry],
     cap: usize,
     window_timeout: Duration,
+    honor_assignments: bool,
 ) -> LaunchReport {
     let cap = cap.max(1);
+    // Ticket 88: dormancy is decided once, before the loop — a dormant run
+    // sees every entry with its assignment erased, so the skip rule checks
+    // the current desktop, no move is ever queued, no fallback note ever
+    // fires, and nothing in the report mentions desktops. The stored rows
+    // are untouched; re-enabling restores the assignments verbatim.
+    let dormant;
+    let entries: &[LaunchEntry] = if honor_assignments {
+        entries
+    } else {
+        dormant = entries
+            .iter()
+            .map(|entry| {
+                let mut entry = entry.clone();
+                entry.entry.desktop_id = None;
+                entry
+            })
+            .collect::<Vec<_>>();
+        &dormant
+    };
     let mut report = LaunchReport::default();
     let mut in_flight: Vec<(Spawned, Vec<usize>, Instant)> = Vec::new();
     // Ticket 44 & 47: spawned launches whose main window still has to move to
@@ -1369,7 +1391,7 @@ mod tests {
             app_entry("D", 4),
             app_entry("E", 5),
         ];
-        let report = run_launch_queue_until(&engine, &entries, 2, SHORT_WINDOW);
+        let report = run_launch_queue_until(&engine, &entries, 2, SHORT_WINDOW, true);
         assert_eq!(report.started, vec!["A", "B", "C", "D", "E"]);
         assert!(report.skipped.is_empty());
         assert!(report.failed.is_empty());
@@ -1387,7 +1409,7 @@ mod tests {
             command_entry("Y", 2),
             command_entry("Z", 3),
         ];
-        let report = run_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW);
+        let report = run_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW, true);
         assert_eq!(report.started, vec!["X", "Y", "Z"]);
         // Commands never hold a slot: everything spawned before any window
         // wait, so the engine never freed a slot.
@@ -1401,7 +1423,7 @@ mod tests {
             .windowless(r"C:\Apps\B.exe")
             .windowless(r"C:\Apps\C.exe");
         let entries = vec![app_entry("A", 1), app_entry("B", 2), app_entry("C", 3)];
-        let report = run_launch_queue_until(&engine, &entries, 2, SHORT_WINDOW);
+        let report = run_launch_queue_until(&engine, &entries, 2, SHORT_WINDOW, true);
         // Windowless apps still count as started — a timeout is not a
         // failure and must not stall the queue behind them.
         assert_eq!(report.started, vec!["A", "B", "C"]);
@@ -1414,7 +1436,7 @@ mod tests {
         // only then, and the skip carries the reason.
         let engine = FakeLauncher::new().window(r"C:\Apps\A.exe", 100, None, true);
         let entries = vec![app_entry("A", 1), app_entry("B", 2), app_entry("C", 3)];
-        let report = run_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW);
+        let report = run_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW, true);
         assert_eq!(report.started, vec!["B", "C"]);
         assert_eq!(
             report.skipped,
@@ -1435,7 +1457,7 @@ mod tests {
             .failing(r"C:\Apps\A.exe")
             .failing(r"C:\Apps\C.exe");
         let entries = vec![app_entry("A", 1), app_entry("B", 2), app_entry("C", 3), app_entry("D", 4)];
-        let report = run_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW);
+        let report = run_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW, true);
         assert_eq!(report.started, vec!["B", "D"]);
         assert_eq!(report.failed, vec!["A", "C"]);
         assert!(report.skipped.is_empty());
@@ -1454,7 +1476,7 @@ mod tests {
             command_entry("B", 2),
             desktop_app_entry("C", 3, guid_c),
         ];
-        let report = run_launch_queue_until(&engine, &entries, 2, SHORT_WINDOW);
+        let report = run_launch_queue_until(&engine, &entries, 2, SHORT_WINDOW, true);
         assert_eq!(report.started.len(), 3);
         assert!(report.notes.is_empty(), "known desktops never note");
         // The moves carry the windows the queue waited for — fresh handles
@@ -1475,7 +1497,7 @@ mod tests {
             .desktops(&[guid])
             .window_after(r"C:\Apps\A.exe", Duration::from_millis(30));
         let entries = vec![desktop_app_entry("A", 1, guid)];
-        let report = run_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW);
+        let report = run_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW, true);
         assert_eq!(report.started, vec!["A"]);
         // The move is ordered after the window appeared — never at spawn.
         let events: Vec<Event> = engine
@@ -1517,7 +1539,7 @@ mod tests {
             .window(r"C:\Apps\File Explorer.exe", 100, None, true)
             .handed_off(r"C:\Apps\File Explorer.exe");
         let entries = vec![desktop_app_entry("File Explorer", 1, guid)];
-        let report = run_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW);
+        let report = run_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW, true);
         assert_eq!(report.started, vec!["File Explorer"]);
         assert!(report.failed.is_empty(), "no pid is not a failure");
         assert!(report.notes.is_empty(), "known desktops never note");
@@ -1542,7 +1564,7 @@ mod tests {
             .window(r"C:\Apps\Discord.exe", 100, None, true)
             .window_after(r"C:\Apps\Discord.exe", Duration::from_millis(20));
         let entries = vec![desktop_app_entry("Discord", 1, guid)];
-        let report = run_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW);
+        let report = run_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW, true);
         assert_eq!(report.started, vec!["Discord"]);
         assert!(report.failed.is_empty());
         assert!(report.notes.is_empty());
@@ -1559,7 +1581,7 @@ mod tests {
             .desktops(&[guid])
             .move_failing(guid);
         let entries = vec![desktop_app_entry("A", 1, guid)];
-        let report = run_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW);
+        let report = run_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW, true);
         // The launch itself succeeded — a refused move is never a failure.
         assert_eq!(report.started, vec!["A"]);
         assert!(report.failed.is_empty());
@@ -1581,7 +1603,7 @@ mod tests {
             .desktops(&[guid])
             .windowless(r"C:\Apps\A.exe");
         let entries = vec![desktop_app_entry("A", 1, guid)];
-        let report = run_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW);
+        let report = run_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW, true);
         // The 15 s timeout rule is preserved: the entry counts as started.
         assert_eq!(report.started, vec!["A"]);
         assert!(report.failed.is_empty());
@@ -1603,7 +1625,7 @@ mod tests {
             1,
             "550fe0a1-3d41-4e5f-9a2b-c8d0e1f2a3b4",
         )];
-        let report = run_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW);
+        let report = run_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW, true);
         // The entry still launches — on the current desktop.
         assert_eq!(report.started, vec!["A"]);
         assert!(engine.moved().is_empty(), "nothing to move");
@@ -1620,11 +1642,11 @@ mod tests {
     #[test]
     fn empty_list_and_zero_cap_are_safe() {
         let engine = FakeLauncher::new();
-        let report = run_launch_queue_until(&engine, &[], 2, SHORT_WINDOW);
+        let report = run_launch_queue_until(&engine, &[], 2, SHORT_WINDOW, true);
         assert_eq!(report, LaunchReport::default());
 
         let entries = vec![app_entry("A", 1)];
-        let report = run_launch_queue_until(&engine, &entries, 0, SHORT_WINDOW);
+        let report = run_launch_queue_until(&engine, &entries, 0, SHORT_WINDOW, true);
         // A zero cap is clamped to 1 — one entry still launches.
         assert_eq!(report.started, vec!["A"]);
     }
@@ -1672,7 +1694,7 @@ mod tests {
             desktop_app_entry("C", 3, guid_one),
             app_entry("D", 4),
         ];
-        let report = run_launch_queue_until(&engine, &entries, 2, SHORT_WINDOW);
+        let report = run_launch_queue_until(&engine, &entries, 2, SHORT_WINDOW, true);
         assert_eq!(report.started, vec!["A", "B"]);
         assert_eq!(
             report.skipped,
@@ -1706,7 +1728,7 @@ mod tests {
             .desktops(&[guid])
             .window(unversioned, 100, Some(guid), false);
         let entries = vec![desktop_app_entry_at("Edge", 1, versioned, guid)];
-        let report = run_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW);
+        let report = run_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW, true);
         assert_eq!(
             report.skipped,
             vec!["Edge — already open on this desktop".to_string()]
@@ -1715,7 +1737,7 @@ mod tests {
         // The same versioned entry with no window anywhere launches and its
         // new window is moved to the assigned desktop.
         let engine = FakeLauncher::new().desktops(&[guid]);
-        let report = run_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW);
+        let report = run_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW, true);
         assert_eq!(report.started, vec!["Edge"]);
         assert!(report.skipped.is_empty());
         assert_eq!(engine.moved(), vec![(1, guid.to_string())]);
@@ -1728,7 +1750,7 @@ mod tests {
         // and the rest of the list still runs.
         let engine = FakeLauncher::new().missing(r"C:\Apps\A.exe");
         let entries = vec![app_entry("A", 1), app_entry("B", 2)];
-        let report = run_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW);
+        let report = run_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW, true);
         assert_eq!(
             report.failed,
             vec!["A — target no longer exists — update this entry".to_string()]
@@ -1757,7 +1779,7 @@ mod tests {
             )
             .missing(versioned);
         let entries = vec![desktop_app_entry_at("Edge", 1, versioned, guid)];
-        let report = run_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW);
+        let report = run_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW, true);
         assert_eq!(
             report.skipped,
             vec!["Edge — already open on this desktop".to_string()]
@@ -1775,12 +1797,12 @@ mod tests {
         // reason, nothing disturbed — true idempotency.
         let engine = FakeLauncher::new().desktops(&[guid]);
         let entries = vec![desktop_app_entry("Edge", 1, guid)];
-        let first = run_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW);
+        let first = run_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW, true);
         assert_eq!(first.started, vec!["Edge"]);
         assert!(first.skipped.is_empty());
         assert!(first.failed.is_empty());
 
-        let second = run_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW);
+        let second = run_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW, true);
         assert!(second.started.is_empty());
         assert_eq!(
             second.skipped,
@@ -1792,6 +1814,83 @@ mod tests {
         // run spawned and moved nothing.
         assert_eq!(engine.spawned_targets(), vec!["Edge"]);
         assert_eq!(engine.moved(), vec![(1, guid.to_string())]);
+    }
+
+    // ------------------- ticket 88: the dormant runner --------------------
+
+    #[test]
+    fn dormant_runner_treats_assigned_entries_as_unassigned() {
+        let guid = "550fe0a1-3d41-4e5f-9a2b-c8d0e1f2a3b4";
+        let entries = vec![desktop_app_entry("A", 1, guid)];
+
+        // Honoring: a window already on the assigned desktop skips the run.
+        let engine = FakeLauncher::new()
+            .desktops(&[guid])
+            .window(r"C:\Apps\A.exe", 100, Some(guid), false);
+        let report = run_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW, true);
+        assert_eq!(
+            report.skipped,
+            vec!["A — already open on this desktop".to_string()]
+        );
+
+        // Dormant, same machine state: the stored assignment is invisible —
+        // no skip over it, no move, and no desktop word anywhere in the
+        // report (AC: no trace of assignment).
+        let report = run_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW, false);
+        assert_eq!(report.started, vec!["A"]);
+        assert!(report.skipped.is_empty());
+        assert!(report.notes.is_empty());
+        assert!(engine.moved().is_empty());
+        assert!(engine.frees() > 0, "the app entry held and freed its slot");
+    }
+
+    #[test]
+    fn dormant_runner_stays_silent_about_stale_assignments() {
+        let entries = vec![desktop_app_entry(
+            "A",
+            1,
+            "550fe0a1-3d41-4e5f-9a2b-c8d0e1f2a3b4",
+        )];
+
+        // Honoring: the stale assignment produces the fallback note.
+        let engine = FakeLauncher::new(); // no desktops at all
+        let honoring = run_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW, true);
+        assert!(
+            honoring.notes.iter().any(|n| n.contains("no longer exists")),
+            "got: {:?}",
+            honoring.notes
+        );
+
+        // Dormant: the same stale assignment never surfaces — the entry is
+        // just an unassigned one launching on the current desktop.
+        let engine = FakeLauncher::new();
+        let dormant = run_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW, false);
+        assert_eq!(dormant.started, vec!["A"]);
+        assert!(dormant.notes.is_empty());
+    }
+
+    #[test]
+    fn re_enabling_honors_the_preserved_assignment_again() {
+        let guid = "550fe0a1-3d41-4e5f-9a2b-c8d0e1f2a3b4";
+        let engine = FakeLauncher::new().desktops(&[guid]);
+        let entries = vec![desktop_app_entry("Edge", 1, guid)];
+
+        // Dormant run: launches on the current desktop, nothing moves, and
+        // the stored assignment survives untouched (nothing is deleted).
+        let dormant = run_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW, false);
+        assert_eq!(dormant.started, vec!["Edge"]);
+        assert!(engine.moved().is_empty());
+
+        // Re-enabled: the same stored assignment is effective again. The
+        // window from the dormant run sits on the current desktop, which is
+        // not the assigned one — so the honoring run launches and moves its
+        // NEW window to the assigned desktop.
+        let again = run_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW, true);
+        assert_eq!(again.started, vec!["Edge"]);
+        assert!(again.notes.is_empty());
+        let moved = engine.moved();
+        assert_eq!(moved.len(), 1);
+        assert_eq!(moved[0].1, guid);
     }
 }
 
@@ -1847,7 +1946,7 @@ mod live_probe {
         // State A: Edge closed → a fresh window lands on Desktop 2.
         kill_edge();
         wait_for_no_edge_windows(&engine, &edge, Duration::from_secs(10));
-        let report = run_launch_queue(&engine, &[entry.clone()], 1);
+        let report = run_launch_queue(&engine, &[entry.clone()], 1, true);
         assert!(report.started.iter().any(|name| name == "Edge"), "{report:?}");
         assert!(report.skipped.is_empty(), "{report:?}");
         assert!(report.failed.is_empty(), "{report:?}");
@@ -1867,7 +1966,7 @@ mod live_probe {
             "Edge must be open on the current desktop first, got {:?}",
             engine.app_windows(&edge)
         );
-        let report = run_launch_queue(&engine, &[entry.clone()], 1);
+        let report = run_launch_queue(&engine, &[entry.clone()], 1, true);
         assert!(report.started.iter().any(|name| name == "Edge"), "{report:?}");
         assert!(report.skipped.is_empty(), "{report:?}");
         assert!(report.failed.is_empty(), "{report:?}");
@@ -1889,7 +1988,7 @@ mod live_probe {
             "state C: Edge should be settled on Desktop 2, got {:?}",
             engine.app_windows(&edge)
         );
-        let report = run_launch_queue(&engine, &[entry.clone()], 1);
+        let report = run_launch_queue(&engine, &[entry.clone()], 1, true);
         assert_eq!(
             report.skipped,
             vec!["Edge — already open on this desktop".to_string()],

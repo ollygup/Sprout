@@ -282,6 +282,11 @@ export interface Settings {
   /** Whether Sprout starts with Windows (ticket 75): "on" or "off" — the
    *  Run-key registration is reconciled beside every toggle. */
   autostart: string;
+  /** Whether Quick Launch honors desktop assignments and shows their
+   *  surface (ticket 88): "on" or "off", default off. Off is fully dormant —
+   *  flat list, no assignment menu or badge, runner ignores assignments —
+   *  while stored assignments survive for re-enabling. */
+  desktop_assignments: string;
 }
 
 /** What a Launch entry starts: a picked app (shortcut or exe) or a command

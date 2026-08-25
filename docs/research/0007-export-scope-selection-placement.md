@@ -5,6 +5,13 @@ action carries a rare customization. Written after ticket 87 first shipped
 its five collection checkboxes permanently inline beside the Export button;
 this note settles the correction with evidence instead of taste.
 
+*Boundary with research 0008:* this note governs **per-use scope choices** —
+options that apply once, to the artifact being produced right now, so they
+live in a moment-of-use dialog and leave no chrome behind. A *durable
+preference* that reshapes its own surface persistently (opt-in feature
+switches) is the opposite case and belongs to 0008's page-features menu.
+Classify the knob before choosing either home.
+
 ## Sources
 
 - Jakob Nielsen, *Progressive Disclosure*, NN/g (2006) — https://www.nngroup.com/articles/progressive-disclosure/
