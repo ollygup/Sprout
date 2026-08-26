@@ -264,12 +264,12 @@ export function createCollectionGroups(options: {
       return [
         {
           label: "Ungrouped",
-          icon: item.group_id === null ? "check" : undefined,
+          checked: item.group_id === null,
           onselect: () => this.assign(item, label, null),
         },
         ...list.map((g) => ({
           label: g.name,
-          icon: item.group_id === g.id ? "check" : undefined,
+          checked: item.group_id === g.id,
           onselect: () => this.assign(item, label, g.id),
         })),
         {

@@ -14,6 +14,10 @@
      *  children — organizational destinations, not verbs — instead of
      *  selecting. Children never nest further. */
     children?: Omit<ContextMenuItem, "children">[];
+    /** Current-state mark for organizational destinations (ticket 106):
+     *  defined → the row announces as `menuitemradio` with `aria-checked`,
+     *  and true draws the check glyph even without an explicit icon. */
+    checked?: boolean;
     onselect?: () => void;
   }
 
@@ -321,7 +325,8 @@
           class="ctx-item"
           class:active={activeIndex === i}
           class:danger={item.danger}
-          role="menuitem"
+          role={item.checked === undefined ? "menuitem" : "menuitemradio"}
+          aria-checked={item.checked}
           tabindex={activeIndex === i ? 0 : -1}
           disabled={item.disabled}
           aria-haspopup={item.children ? "true" : undefined}
@@ -354,8 +359,10 @@
             if (item.children && openIndex === i) scheduleFlyoutClose();
           }}
         >
-          {#if item.icon}
-            <span class="ctx-item__icon" aria-hidden="true"><Icon name={item.icon} size={14} /></span>
+          {#if item.icon || item.checked}
+            <span class="ctx-item__icon" aria-hidden="true">
+              <Icon name={item.icon ?? "check"} size={14} />
+            </span>
           {/if}
           <span>{item.label}</span>
           {#if item.children}
@@ -383,7 +390,8 @@
                   class="ctx-item"
                   class:active={childActiveIndex === ci}
                   class:danger={child.danger}
-                  role="menuitem"
+                  role={child.checked === undefined ? "menuitem" : "menuitemradio"}
+                  aria-checked={child.checked}
                   tabindex={childActiveIndex === ci ? 0 : -1}
                   disabled={child.disabled}
                   onclick={() => select(child)}
@@ -391,8 +399,10 @@
                     if (!child.disabled) setActiveChild(ci);
                   }}
                 >
-                  {#if child.icon}
-                    <span class="ctx-item__icon" aria-hidden="true"><Icon name={child.icon} size={14} /></span>
+                  {#if child.icon || child.checked}
+                    <span class="ctx-item__icon" aria-hidden="true">
+                      <Icon name={child.icon ?? "check"} size={14} />
+                    </span>
                   {/if}
                   <span>{child.label}</span>
                 </button>

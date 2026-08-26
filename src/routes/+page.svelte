@@ -463,14 +463,14 @@
         children: [
           {
             label: "No assignment",
-            icon: entry.desktop_id === null ? "check" : undefined,
+            checked: entry.desktop_id === null,
             onselect: () => assignDesktop(entry, null),
           },
           ...(currentId
             ? [
                 {
                   label: "Current desktop",
-                  icon: entry.desktop_id === currentId ? "check" : undefined,
+                  checked: entry.desktop_id === currentId,
                   onselect: () => assignDesktop(entry, currentId),
                 },
               ]
@@ -479,7 +479,7 @@
             .filter((d) => d.id !== currentId)
             .map((d) => ({
               label: d.name,
-              icon: entry.desktop_id === d.id ? "check" : undefined,
+              checked: entry.desktop_id === d.id,
               onselect: () => assignDesktop(entry, d.id),
             })),
           {
