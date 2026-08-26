@@ -36,7 +36,13 @@
 use std::mem::size_of;
 use std::sync::OnceLock;
 
-use windows_sys::Win32::Foundation::{HWND, RECT};
+use windows_sys::Win32::Devices::Display::{
+    DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QueryDisplayConfig,
+    DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
+    DISPLAYCONFIG_DEVICE_INFO_HEADER, DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO,
+    DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME, QDC_ONLY_ACTIVE_PATHS,
+};
+use windows_sys::Win32::Foundation::{HWND, LUID, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromWindow, MONITORINFOEXW, MONITOR_DEFAULTTONEAREST,
 };
@@ -135,6 +141,119 @@ pub fn monitor_key(hwnd: HWND) -> Option<String> {
     } else {
         Some(name)
     }
+}
+
+/// The dock memory identity for the monitor `hwnd` sits on (ticket 110): the
+/// panel's EDID make+product code, which follows the physical display across
+/// replugs and slot renumbering where the device-name key does not. `None`
+/// means no usable identity — virtual/remote displays with empty EDID data,
+/// or a shell query failure — and the caller falls back to [`monitor_key`].
+pub fn monitor_identity(hwnd: HWND) -> Option<String> {
+    let device = {
+        let info = monitor_info(hwnd)?;
+        let name = String::from_utf16_lossy(&info.szDevice);
+        let name = name.trim_end_matches('\0').to_string();
+        if name.is_empty() {
+            return None;
+        }
+        name
+    };
+    display_identity(&device)
+}
+
+/// The EDID make+product of the active display-config path whose source GDI
+/// device name is `device`. Syscall-side by module convention; the pieces it
+/// composes ([`edid_identity`], [`wide_matches`]) are pure and tested below.
+fn display_identity(device: &str) -> Option<String> {
+    unsafe {
+        let mut num_paths = 0u32;
+        let mut num_modes = 0u32;
+        if GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut num_paths, &mut num_modes) != 0 {
+            return None;
+        }
+        if num_paths == 0 {
+            return None;
+        }
+        let mut paths: Vec<DISPLAYCONFIG_PATH_INFO> = vec![std::mem::zeroed(); num_paths as usize];
+        let mut modes: Vec<DISPLAYCONFIG_MODE_INFO> = vec![std::mem::zeroed(); num_modes as usize];
+        if QueryDisplayConfig(
+            QDC_ONLY_ACTIVE_PATHS,
+            &mut num_paths,
+            paths.as_mut_ptr(),
+            &mut num_modes,
+            modes.as_mut_ptr(),
+            std::ptr::null_mut(),
+        ) != 0
+        {
+            return None;
+        }
+        paths.truncate(num_paths as usize);
+        for path in &paths {
+            let mut source: DISPLAYCONFIG_SOURCE_DEVICE_NAME = std::mem::zeroed();
+            source.header = device_info_header(
+                DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+                path.sourceInfo.adapterId,
+                path.sourceInfo.id,
+                size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32,
+            );
+            if DisplayConfigGetDeviceInfo(&mut source.header) != 0 {
+                continue;
+            }
+            if !wide_matches(&source.viewGdiDeviceName, device) {
+                continue;
+            }
+            let mut target: DISPLAYCONFIG_TARGET_DEVICE_NAME = std::mem::zeroed();
+            target.header = device_info_header(
+                DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
+                path.targetInfo.adapterId,
+                path.targetInfo.id,
+                size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32,
+            );
+            if DisplayConfigGetDeviceInfo(&mut target.header) != 0 {
+                continue;
+            }
+            // An all-zero EDID pair carries no identity — two different
+            // virtual displays would collide on one key — so treat it as
+            // "no usable identity" rather than a shared bucket.
+            if target.edidManufactureId == 0 && target.edidProductCodeId == 0 {
+                return None;
+            }
+            return Some(edid_identity(
+                target.edidManufactureId.into(),
+                target.edidProductCodeId.into(),
+            ));
+        }
+        None
+    }
+}
+
+/// The request header [`DisplayConfigGetDeviceInfo`] keys on.
+fn device_info_header(
+    kind: i32,
+    adapter_id: LUID,
+    id: u32,
+    size: u32,
+) -> DISPLAYCONFIG_DEVICE_INFO_HEADER {
+    DISPLAYCONFIG_DEVICE_INFO_HEADER {
+        r#type: kind,
+        size,
+        adapterId: adapter_id,
+        id,
+    }
+}
+
+/// The storage-suffix form of an EDID make+product pair: deterministic hex so
+/// the same physical panel always yields the same string.
+fn edid_identity(manufacture_id: u32, product_code: u32) -> String {
+    format!("edid-{manufacture_id:04X}-{product_code:04X}")
+}
+
+/// Whether a NUL-terminated wide string equals `expected`, case-insensitively
+/// (GDI device names compare without case in practice).
+fn wide_matches(raw: &[u16], expected: &str) -> bool {
+    let len = raw.iter().position(|&c| c == 0).unwrap_or(raw.len());
+    let text = String::from_utf16_lossy(&raw[..len]);
+    text.eq_ignore_ascii_case(expected)
 }
 
 /// The rect to re-assert a docked bar at (ticket 61): the shell recomputes
@@ -341,19 +460,107 @@ pub fn sliver_rect(strip: RECT, edge: u32, sliver: i32) -> RECT {
     }
 }
 
-/// Whether the cursor (`x`, `y`) is inside the edge trigger band (ticket 63):
-/// within `trigger` physical pixels of the strip's docked edge and inside its
-/// vertical extent — touching the screen edge reveals a hidden strip. The
-/// vertical bound keeps a cursor on an adjacent monitor (or in the corner
-/// past the strip) from triggering.
-pub fn edge_hit(x: i32, y: i32, strip: RECT, edge: u32, trigger: i32) -> bool {
-    let in_band = match edge {
-        ABE_LEFT => x <= strip.left + trigger,
-        ABE_RIGHT => x >= strip.right - trigger,
-        _ => false,
-    };
-    let in_height = y >= strip.top && y <= strip.bottom;
-    in_band && in_height
+/// Whether the cursor (`x`, `y`) is inside the edge trigger band (ticket 112):
+/// within [`AUTOHIDE_SLIVER_PX`] of the strip's docked edge and inside its
+/// vertical extent — the reserved invisible zone itself, not an interior band
+/// (single size source). The vertical bound keeps a cursor on an adjacent
+/// monitor from triggering.
+#[allow(dead_code)]
+pub fn edge_hit(x: i32, y: i32, strip: RECT, edge: u32) -> bool {
+    in_reveal_band(x, y, strip, edge)
+}
+
+/// Whether the cursor is inside the reveal band (ticket 112): the sliver
+/// itself — the only trigger zone. Within [`AUTOHIDE_SLIVER_PX`] of the
+/// docked edge and inside the strip's vertical extent.
+pub fn in_reveal_band(x: i32, y: i32, strip: RECT, edge: u32) -> bool {
+    use crate::constants::window::AUTOHIDE_SLIVER_PX;
+    let band = sliver_rect(strip, edge, AUTOHIDE_SLIVER_PX);
+    x >= band.left && x <= band.right && y >= band.top && y <= band.bottom
+}
+
+/// The reveal gate's poll-loop memory (ticket 112): accumulated toward-edge
+/// travel, dwell timer start, and previous cursor position. Pure — the driver
+/// threads it through each tick, tests drive it with injected timestamps.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RevealGate {
+    pub accumulated: i32,
+    pub dwell_start_ms: Option<u64>,
+    pub prev: Option<(i32, i32)>,
+}
+
+/// One reveal-gate step (ticket 112): pure decision logic behind the layered
+/// gate. Returns the updated gate and whether the dock should reveal.
+///
+/// Layers:
+/// 1. Trigger zone — cursor must be inside the sliver band itself.
+/// 2. Direction gating — samples dominated by along-edge motion (dy > dx_toward
+///    or moving away) accumulate nothing; toward-edge travel accumulates,
+///    capped per sample to [`REVEAL_MAX_STEP_PX`], until
+///    `sensitivity` is reached.
+/// 3. Dwell — once sensitivity is reached, the cursor must stay inside the band
+///    for `dwell_ms` (any exit cancels instantly and resets accumulation).
+///
+/// Cross-monitor transit through the band never reveals because it exits
+/// within a frame or two, aborting the dwell before it elapses — no per-topology
+/// special case is needed.
+pub fn reveal_gate_step(
+    mut state: RevealGate,
+    x: i32,
+    y: i32,
+    now_ms: u64,
+    full: RECT,
+    edge: u32,
+    sensitivity: i32,
+    dwell_ms: u64,
+) -> (RevealGate, bool) {
+    use crate::constants::window::REVEAL_MAX_STEP_PX;
+    if !in_reveal_band(x, y, full, edge) {
+        state.accumulated = 0;
+        state.dwell_start_ms = None;
+        state.prev = Some((x, y));
+        return (state, false);
+    }
+    if let Some((px, py)) = state.prev {
+        let toward = match edge {
+            ABE_LEFT => px - x,
+            ABE_RIGHT => x - px,
+            _ => 0,
+        };
+        let dy = (y - py).abs();
+        let dominated = toward <= 0 || dy > toward;
+        if !dominated {
+            let inc = toward.min(REVEAL_MAX_STEP_PX).max(0);
+            state.accumulated = (state.accumulated + inc).min(sensitivity + REVEAL_MAX_STEP_PX);
+        }
+        if state.accumulated >= sensitivity {
+            if state.dwell_start_ms.is_none() {
+                state.dwell_start_ms = Some(now_ms);
+            }
+            if let Some(start) = state.dwell_start_ms {
+                if now_ms.saturating_sub(start) >= dwell_ms {
+                    state.prev = Some((x, y));
+                    return (state, true);
+                }
+            }
+        }
+    }
+    state.prev = Some((x, y));
+    (state, false)
+}
+
+/// Convenience wrapper using the shipped constants (ticket 112).
+#[allow(dead_code)]
+pub fn reveal_gate_step_default(
+    state: RevealGate,
+    x: i32,
+    y: i32,
+    now_ms: u64,
+    full: RECT,
+    edge: u32,
+) -> (RevealGate, bool) {
+    use crate::constants::window::{REVEAL_DWELL_MS, REVEAL_SENSITIVITY_PX};
+    reveal_gate_step(state, x, y, now_ms, full, edge, REVEAL_SENSITIVITY_PX, REVEAL_DWELL_MS)
 }
 
 /// Whether the cursor (`x`, `y`) is inside the strip's bounding rectangle
@@ -690,18 +897,18 @@ mod tests {
 
     #[test]
     fn edge_hit_requires_the_band_and_the_strip_height() {
-        // Ticket 63: within EDGE_TRIGGER_PX of the docked edge and inside the
-        // strip's vertical extent reveals; anywhere else does not.
+        // Ticket 112: trigger zone is the sliver itself (single size source) — within
+        // AUTOHIDE_SLIVER_PX of the docked edge and inside vertical extent.
         let strip = RECT { left: 0, top: 40, right: 340, bottom: 1040 };
-        assert!(edge_hit(0, 500, strip, ABE_LEFT, 8));
-        assert!(edge_hit(8, 40, strip, ABE_LEFT, 8)); // band edge inclusive
-        assert!(!edge_hit(9, 500, strip, ABE_LEFT, 8));
-        assert!(!edge_hit(4, 39, strip, ABE_LEFT, 8)); // above the strip
-        assert!(!edge_hit(4, 1041, strip, ABE_LEFT, 8)); // below the strip
+        assert!(edge_hit(0, 500, strip, ABE_LEFT));
+        assert!(edge_hit(2, 40, strip, ABE_LEFT)); // sliver edge inclusive
+        assert!(!edge_hit(3, 500, strip, ABE_LEFT));
+        assert!(!edge_hit(1, 39, strip, ABE_LEFT)); // above the strip
+        assert!(!edge_hit(1, 1041, strip, ABE_LEFT)); // below the strip
         let right = RECT { left: 2220, top: 0, right: 2560, bottom: 1848 };
-        assert!(edge_hit(2560, 900, right, ABE_RIGHT, 8));
-        assert!(edge_hit(2552, 900, right, ABE_RIGHT, 8));
-        assert!(!edge_hit(2551, 900, right, ABE_RIGHT, 8));
+        assert!(edge_hit(2560, 900, right, ABE_RIGHT));
+        assert!(edge_hit(2558, 900, right, ABE_RIGHT));
+        assert!(!edge_hit(2557, 900, right, ABE_RIGHT));
     }
 
     #[test]
@@ -752,5 +959,203 @@ mod tests {
         // The hide direction mirrors it.
         let back = slide_rect(to, from, 0.5);
         assert_eq!(back.left, 298); // 340*0.875 = 297.5 → rounds away from zero
+    }
+
+    #[test]
+    fn edid_identity_is_deterministic_hex() {
+        // Ticket 110: the storage suffix is stable across calls and machines —
+        // fixed-width uppercase hex so the same panel always yields the same
+        // string.
+        assert_eq!(edid_identity(0x1234, 0x5678), "edid-1234-5678");
+        assert_eq!(edid_identity(0xA, 0xB), "edid-000A-000B");
+        assert_eq!(edid_identity(1, 2), edid_identity(1, 2));
+        assert_ne!(edid_identity(1, 2), edid_identity(2, 1));
+    }
+
+    #[test]
+    fn wide_matches_compares_nul_terminated_wide_strings_without_case() {
+        let mut raw: Vec<u16> = r"\\.\DISPLAY1".encode_utf16().collect();
+        raw.push(0);
+        assert!(wide_matches(&raw, r"\\.\DISPLAY1"));
+        // Windows device names compare without case in practice.
+        assert!(wide_matches(&raw, r"\\.\display1"));
+        assert!(!wide_matches(&raw, r"\\.\DISPLAY2"));
+        // A buffer with no terminator compares up to its full length.
+        let unterminated: Vec<u16> = "DISPLAY".encode_utf16().collect();
+        assert!(wide_matches(&unterminated, "display"));
+    }
+
+    #[test]
+    fn reveal_gate_graze_along_the_seam_never_reveals() {
+        // Ticket 112: graze — cursor slides along the seam inside the sliver band
+        // with dominant along-edge motion (dy >> dx_toward) accumulates nothing.
+        let full = RECT { left: 0, top: 0, right: 340, bottom: 1848 };
+        let mut gate = RevealGate::default();
+        let sensitivity = crate::constants::window::REVEAL_SENSITIVITY_PX;
+        let dwell = crate::constants::window::REVEAL_DWELL_MS;
+        // Enter the sliver at x=1 and slide vertically 200 px over many ticks
+        // with tiny toward jitter (1 px left, dy 10 px each tick).
+        let mut now = 0u64;
+        // First tick outside
+        let (g, shown) = reveal_gate_step(gate, 10, 100, now, full, ABE_LEFT, sensitivity, dwell);
+        gate = g; assert!(!shown);
+        // Enter sliver
+        now += 16; let (g, shown) = reveal_gate_step(gate, 1, 110, now, full, ABE_LEFT, sensitivity, dwell);
+        gate = g; assert!(!shown);
+        for i in 0..20 {
+            now += 16;
+            let y = 120 + i * 10;
+            // x jitter 0..1 (small toward)
+            let x = if i % 2 == 0 { 1 } else { 0 };
+            let (g, shown) = reveal_gate_step(gate.clone(), x, y, now, full, ABE_LEFT, sensitivity, dwell);
+            gate = g;
+            assert!(!shown, "graze tick {i} must not reveal");
+        }
+        // Even after dwell interval, still not revealed because sensitivity never reached
+        now += dwell;
+        let (g, shown) = reveal_gate_step(gate, 0, 320, now, full, ABE_LEFT, sensitivity, dwell);
+        assert!(!shown, "graze must never reveal — along-edge dominant motion accumulates nothing");
+        let _ = g;
+    }
+
+    #[test]
+    fn reveal_gate_fly_through_overshoot_and_rebound_never_reveals() {
+        // Ticket 112: fly-through — fast overshoot into the sliver and immediate rebound
+        // accumulates enough toward travel to start dwell, but exits before dwell elapses.
+        let full = RECT { left: 0, top: 0, right: 340, bottom: 1848 };
+        let mut gate = RevealGate::default();
+        let sensitivity = crate::constants::window::REVEAL_SENSITIVITY_PX;
+        let dwell = crate::constants::window::REVEAL_DWELL_MS;
+        let mut now = 0u64;
+        let (g, shown) = reveal_gate_step(gate, 40, 900, now, full, ABE_LEFT, sensitivity, dwell);
+        gate = g; assert!(!shown);
+        // Fast toward motion into sliver: 40 -> 1 (delta 39, capped 15) reaches sensitivity
+        now += 16; let (g, shown) = reveal_gate_step(gate, 1, 900, now, full, ABE_LEFT, sensitivity, dwell);
+        gate = g; assert!(!shown); // dwell started but not elapsed
+        // Hold briefly inside but not long enough
+        now += 50; let (g, shown) = reveal_gate_step(gate, 0, 900, now, full, ABE_LEFT, sensitivity, dwell);
+        gate = g; assert!(!shown);
+        // Rebound out of band before dwell completes
+        now += 16; let (g, shown) = reveal_gate_step(gate, 20, 900, now, full, ABE_LEFT, sensitivity, dwell);
+        gate = g; assert!(!shown);
+        // Even if we wait, the cancel-if-left has reset the gate
+        now += dwell; let (g, shown) = reveal_gate_step(gate, 20, 900, now, full, ABE_LEFT, sensitivity, dwell);
+        assert!(!shown, "fly-through must not reveal — dwell cancels on exit");
+        let _ = g;
+    }
+
+    #[test]
+    fn reveal_gate_deliberate_push_reveals_after_dwell() {
+        // Ticket 112: deliberate push — sufficient toward-edge travel + 200 ms hold reveals.
+        let full = RECT { left: 0, top: 0, right: 340, bottom: 1848 };
+        let mut gate = RevealGate::default();
+        let sensitivity = crate::constants::window::REVEAL_SENSITIVITY_PX;
+        let dwell = crate::constants::window::REVEAL_DWELL_MS;
+        let mut now = 0u64;
+        let (g, shown) = reveal_gate_step(gate, 30, 500, now, full, ABE_LEFT, sensitivity, dwell);
+        gate = g; assert!(!shown);
+        // Push into edge: 30 -> 1 delta 29 capped 15 accumulates past threshold (12)
+        now += 16; let (g, shown) = reveal_gate_step(gate, 1, 500, now, full, ABE_LEFT, sensitivity, dwell);
+        gate = g; assert!(!shown, "dwell not yet elapsed");
+        assert!(gate.accumulated >= sensitivity);
+        assert!(gate.dwell_start_ms.is_some());
+        let start = gate.dwell_start_ms.unwrap();
+        // Just before dwell
+        now = start + dwell - 1;
+        let (g2, shown) = reveal_gate_step(gate.clone(), 0, 500, now, full, ABE_LEFT, sensitivity, dwell);
+        assert!(!shown, "must not reveal before dwell");
+        // At dwell
+        now = start + dwell;
+        let (_g3, shown) = reveal_gate_step(g2, 0, 500, now, full, ABE_LEFT, sensitivity, dwell);
+        assert!(shown, "deliberate push must reveal after dwell");
+        // Right edge mirrors left
+        let full_right = RECT { left: 2220, top: 0, right: 2560, bottom: 1848 };
+        let mut gate = RevealGate::default();
+        now = 0;
+        let (g, _) = reveal_gate_step(gate, 2520, 500, now, full_right, ABE_RIGHT, sensitivity, dwell);
+        gate = g;
+        now += 16; let (g, _) = reveal_gate_step(gate, 2559, 500, now, full_right, ABE_RIGHT, sensitivity, dwell);
+        gate = g;
+        assert!(gate.accumulated >= sensitivity);
+        now = gate.dwell_start_ms.unwrap() + dwell;
+        let (_, shown) = reveal_gate_step(gate, 2560, 500, now, full_right, ABE_RIGHT, sensitivity, dwell);
+        assert!(shown, "right edge deliberate push must also reveal");
+    }
+
+    #[test]
+    fn reveal_gate_cross_monitor_transit_never_reveals() {
+        // Ticket 112: cross-monitor transit — cursor sweeps through the 2 px sliver
+        // while moving between monitors; exits within a frame or two, so dwell aborts.
+        let full = RECT { left: 0, top: 0, right: 340, bottom: 1848 };
+        let mut gate = RevealGate::default();
+        let sensitivity = crate::constants::window::REVEAL_SENSITIVITY_PX;
+        let dwell = crate::constants::window::REVEAL_DWELL_MS;
+        let mut now = 0u64;
+        // Transit from left monitor interior toward right monitor: x 2500 -> 2560+ across seam.
+        // Use left-edge dock case where monitor is the left one (full left 0), so sliver is [0,2].
+        // A transit across the seam at y inside strip that briefly hits the sliver:
+        // Simulate moving rightward across left edge? Actually left edge sliver is at x=0,
+        // a cross from right to left would hit it. Simulate leftward sweep 40->1-> -10 (outside)
+        // where -10 is beyond monitor (still in virtual desktop but outside band).
+        let (g, shown) = reveal_gate_step(gate, 40, 800, now, full, ABE_LEFT, sensitivity, dwell);
+        gate = g; assert!(!shown);
+        now += 16; let (g, shown) = reveal_gate_step(gate, 1, 800, now, full, ABE_LEFT, sensitivity, dwell);
+        gate = g; // entered sliver
+        assert!(!shown);
+        now += 16; let (g, shown) = reveal_gate_step(gate, 20, 800, now, full, ABE_LEFT, sensitivity, dwell);
+        gate = g; // exited within one tick (transit)
+        assert!(!shown);
+        now += dwell; let (g, shown) = reveal_gate_step(gate, 20, 800, now, full, ABE_LEFT, sensitivity, dwell);
+        assert!(!shown, "cross-monitor transit must never reveal — cancel-if-left aborts dwell");
+        let _ = g;
+        // Right-edge dock transit: sweep left-to-right through [2558,2560]
+        let full_right = RECT { left: 2220, top: 0, right: 2560, bottom: 1848 };
+        let mut gate = RevealGate::default();
+        now = 0;
+        let (g, _) = reveal_gate_step(gate, 2540, 800, now, full_right, ABE_RIGHT, sensitivity, dwell);
+        gate = g;
+        now += 16; let (g, _) = reveal_gate_step(gate, 2559, 800, now, full_right, ABE_RIGHT, sensitivity, dwell);
+        gate = g;
+        now += 16; let (g, shown) = reveal_gate_step(gate, 2580, 800, now, full_right, ABE_RIGHT, sensitivity, dwell);
+        assert!(!shown, "right-edge cross transit must also not reveal");
+        let _ = g;
+    }
+
+    #[test]
+    fn reveal_gate_trigger_zone_is_the_sliver_itself() {
+        // Single size source: trigger band is exactly the sliver width.
+        let full = RECT { left: 0, top: 0, right: 340, bottom: 1848 };
+        assert!(in_reveal_band(0, 900, full, ABE_LEFT));
+        assert!(in_reveal_band(2, 900, full, ABE_LEFT));
+        assert!(!in_reveal_band(3, 900, full, ABE_LEFT));
+        let right = RECT { left: 2220, top: 0, right: 2560, bottom: 1848 };
+        assert!(in_reveal_band(2560, 900, right, ABE_RIGHT));
+        assert!(!in_reveal_band(2557, 900, right, ABE_RIGHT));
+    }
+
+    #[test]
+    #[ignore = "touches the real display configuration — run manually on a real session"]
+    fn real_display_identity_resolves_or_falls_back_cleanly() {
+        // Manual smoke for ticket 110: on any live session this either yields
+        // an identity string or None (no usable EDID / query refusal) — never
+        // a panic and never a colliding all-zero identity.
+        let hwnd = unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
+        let hwnd = if hwnd.is_null() {
+            unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetDesktopWindow() }
+        } else {
+            hwnd
+        };
+        if hwnd.is_null() {
+            eprintln!("no window to probe");
+            return;
+        }
+        match monitor_identity(hwnd) {
+            Some(id) => println!("monitor identity: {id}"),
+            None => println!("no usable identity — fallback path engaged"),
+        }
+        match monitor_key(hwnd) {
+            Some(k) => println!("device-name key: {k}"),
+            None => println!("no device name"),
+        }
     }
 }

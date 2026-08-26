@@ -20,9 +20,21 @@ pub const DOCK_WIDTH: u32 = WINDOW_WIDTH;
 /// cursor can still reach, taskbar-style.
 pub const AUTOHIDE_SLIVER_PX: i32 = 2;
 
-/// The edge trigger band's width in physical pixels (ticket 63): how close
-/// to the docked screen edge the cursor must come to reveal a hidden strip.
-pub const EDGE_TRIGGER_PX: i32 = 8;
+/// The reveal dwell in milliseconds (ticket 112): how long the cursor must
+/// stay inside the sliver band after accumulating sufficient toward-edge
+/// travel before the dock reveals. Any exit cancels instantly.
+pub const REVEAL_DWELL_MS: u64 = 200;
+
+/// The toward-edge travel threshold in physical pixels (ticket 112):
+/// accumulated toward-edge motion inside the sliver must exceed this before
+/// the dwell starts. Samples dominated by along-edge motion (dy > dx_toward)
+/// accumulate nothing.
+pub const REVEAL_SENSITIVITY_PX: i32 = 12;
+
+/// Per-sample cap for toward-edge accumulation (ticket 112, GNOME
+/// PressureBarrier prior art): prevents a single huge jump from instantly
+/// crossing the sensitivity threshold.
+pub const REVEAL_MAX_STEP_PX: i32 = 15;
 
 /// The auto-hide driver's poll interval in milliseconds (ticket 63): cursor
 /// polling drives hover detection — the WebView2 child HWND swallows mouse

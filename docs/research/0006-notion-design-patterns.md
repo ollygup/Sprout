@@ -134,3 +134,46 @@ menu structure for every context menu, and relocated group creation into the
 "Move to group" submenu per pattern 10's create-and-place fusion. Pattern 5's
 caution applied and accepted: two learned affordances — the desktop toggle and
 the toolbar Add-group button — were relocated into moment-of-use menus.)*
+
+## Detail-surface round (2026-08): row-click peeks & existence glyphs
+
+**Primary, verified first-hand 2026-08:** Notion Help Center, *Views,
+filters & sorts* — https://www.notion.com/help/views-filters-and-sorts —
+"**Side peek:** Open pages on the right side of the database. The rest of the
+database view continues to be interactive on the left. **Center peek:** Open
+pages in a focused, centre modal. **Full page:** Open pages as full pages
+directly." Table/Board/List/Timeline default to side peek; Gallery/Calendar
+to center peek; the choice is one app-wide setting (Layout → "Open pages in").
+The release note introducing side peek frames its purpose as keeping "your
+database items visible and interactive"
+(https://www.notion.com/releases/2022-07-20).
+
+**Primary, verified first-hand 2026-08:** Notion Help Center, *Comments,
+mentions & reminders* — https://www.notion.com/help/comments-mentions-and-reminders —
+"If the page already has comments, you'll see 💬 associated with it in your
+database. Select 💬 to read the existing comments."
+
+### 13. Row click opens the item's detail surface — one grammar per surface class
+Every database row opens the same way into a peek sized to the layout's
+density (side for dense tables/lists, centered modal for visual grids), with
+one app-wide setting governing which. Users learn "click a row → details"
+once; only the surface varies.
+
+### 14. Existence glyphs are content-gated
+A tiny row-level 💬 appears **only when** attached content exists, and
+selecting it opens that content — annotation presence is signaled pre-open by
+a glyph, never by a permanent control (patterns 11–12 applied to metadata).
+Short metadata stays tooltip-grade (property descriptions); anything
+instructional lives in the item's detail surface.
+
+### Applied case study (2026-08, Quick Action Notes)
+
+Clicking a Quick Action row opens a centered details dialog — the grammar
+Products already use (pattern 13's one-grammar rule). NN/g's anti-modal
+guidance covers system-initiated interruptions, not user-requested views
+(nngroup.com/articles/modal-nonmodal-dialog/), and WAI-APG ships a mature
+dialog recipe while offering no popover equivalent — so the dialog wins for
+unbounded note content. Rows carrying a note show a small content-gated glyph
+(pattern 14), including in the Quick Launch window/dock lists where the glyph
+alone appears — level-1 signal only, content stays out per research 0004
+rule 3. Notes render read-only from authored markdown-lite text.

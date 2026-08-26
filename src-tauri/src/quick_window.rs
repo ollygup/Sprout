@@ -75,7 +75,7 @@ use crate::{
     appbar, db, settings,
     constants::window::{
         AUTOHIDE_ANIM_POLL_MS, AUTOHIDE_POLL_MS, AUTOHIDE_SLIDE_MS, AUTOHIDE_SLIVER_PX,
-        DOCK_WIDTH, EDGE_TRIGGER_PX, WINDOW_HEIGHT, WINDOW_WIDTH,
+        DOCK_WIDTH, REVEAL_DWELL_MS, REVEAL_SENSITIVITY_PX, WINDOW_HEIGHT, WINDOW_WIDTH,
     },
     AppState,
 };
@@ -89,14 +89,21 @@ pub const QUICK_LAUNCH_WINDOW: &str = "quick-launch";
 const ROUTE: &str = "quick-launch-window";
 
 /// The docked form's live state: which edge and visibility mode the window is
-/// currently docked with, which monitor it is attached to (its device name —
-/// the per-monitor memory key), and the rect the bar was last placed at (the
-/// `ABM_SETPOS`-granted rect — the drift check's expected rect, ticket 61).
+/// currently docked with, which monitor it is attached to, and the rect the
+/// bar was last placed at (the `ABM_SETPOS`-granted rect — the drift check's
+/// expected rect, ticket 61).
 #[derive(Clone)]
 pub struct DockState {
     pub edge: String,
     pub mode: String,
+    /// The monitor's device name (`\\.\DISPLAY1`) — its live identity for
+    /// geometry probes.
     pub monitor: String,
+    /// The monitor's hardware-identity storage key when one resolved at dock
+    /// time (ticket 110) — EDID-derived, so per-monitor memory follows the
+    /// physical panel across replugs and slot renumbering. `None` falls back
+    /// to `monitor` as the storage suffix everywhere memory is written.
+    pub identity: Option<String>,
     pub last_rect: Option<RECT>,
     /// Why auto-hide is currently refused by the shell (ticket 63) — "another
     /// auto-hide bar already owns this edge". Transient by design: live-state
@@ -471,13 +478,35 @@ pub fn docked_state(app: &AppHandle) -> Option<DockState> {
 fn resolve_dock_prefs(
     conn: &Connection,
     settings: &settings::Settings,
+    identity: Option<&str>,
     monitor: &str,
 ) -> Result<(String, String), String> {
-    let edge = db::load_dock_edge(conn, monitor).unwrap_or_else(|| settings.dock_edge.clone());
-    let mode = db::load_dock_mode(conn, monitor).unwrap_or_else(|| settings.dock_mode.clone());
+    let edge = db::load_dock_edge_identified(conn, identity, monitor)
+        .unwrap_or_else(|| settings.dock_edge.clone());
+    let mode = db::load_dock_mode_identified(conn, identity, monitor)
+        .unwrap_or_else(|| settings.dock_mode.clone());
     settings::validate_dock_edge(&edge)?;
     settings::validate_dock_mode(&mode)?;
     Ok((edge, mode))
+}
+
+/// The storage suffix a display's dock memory uses (ticket 110): the EDID
+/// identity when one resolved, else the device name. Pure — the seam the
+/// fallback rule is tested through.
+fn memory_key<'a>(identity: Option<&'a str>, device_name: &'a str) -> &'a str {
+    match identity {
+        Some(id) if !id.is_empty() => id,
+        _ => device_name,
+    }
+}
+
+/// The device-name + identity pair for the monitor `hwnd` sits on; the
+/// identity may be absent while the device name never is on a real window.
+fn monitor_refs(hwnd: HWND) -> Result<(String, Option<String>), String> {
+    let device = appbar::monitor_key(hwnd)
+        .ok_or_else(|| "cannot identify the current monitor".to_string())?;
+    let identity = appbar::monitor_identity(hwnd);
+    Ok((device, identity))
 }
 
 /// The dock the window's toggle would produce right now (ticket 59): while
@@ -493,9 +522,8 @@ pub fn pending_dock(app: &AppHandle) -> Result<(String, String), String> {
     let state = app.state::<AppState>();
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     let settings = settings::load(&conn);
-    let monitor = appbar::monitor_key(hwnd.0)
-        .ok_or_else(|| "cannot identify the current monitor".to_string())?;
-    resolve_dock_prefs(&conn, &settings, &monitor)
+    let (monitor, identity) = monitor_refs(hwnd.0)?;
+    resolve_dock_prefs(&conn, &settings, identity.as_deref(), &monitor)
 }
 
 /// Docks the window to the current monitor's remembered (or Settings-default)
@@ -512,18 +540,22 @@ pub fn dock(app: &AppHandle, edge: Option<&str>) -> Result<(), String> {
         .ok_or_else(|| "Quick Launch window is not open".to_string())?;
     let hwnd = window.hwnd().map_err(|e| e.to_string())?;
     let state = app.state::<AppState>();
-    let (edge, mode, monitor) = {
+    let (edge, mode, monitor, identity) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         let settings = settings::load(&conn);
-        let monitor = appbar::monitor_key(hwnd.0)
-            .ok_or_else(|| "cannot identify the current monitor".to_string())?;
-        let (resolved_edge, resolved_mode) = resolve_dock_prefs(&conn, &settings, &monitor)?;
+        let (monitor, identity) = monitor_refs(hwnd.0)?;
+        let (resolved_edge, resolved_mode) =
+            resolve_dock_prefs(&conn, &settings, identity.as_deref(), &monitor)?;
         let edge = edge.map(str::to_string).unwrap_or(resolved_edge);
         settings::validate_dock_edge(&edge)?;
         let mode = resolved_mode;
-        let _ = db::save_dock_edge(&conn, &monitor, &edge);
-        let _ = db::save_dock_mode(&conn, &monitor, &mode);
-        (edge, mode, monitor)
+        // Memory is written under the hardware-identity key when one
+        // resolved, so replugging the panel elsewhere keeps its preference
+        // (ticket 110).
+        let key = memory_key(identity.as_deref(), &monitor);
+        let _ = db::save_dock_edge(&conn, key, &edge);
+        let _ = db::save_dock_mode(&conn, key, &mode);
+        (edge, mode, monitor, identity)
     };
     // The dock state is recorded BEFORE the OS calls: auto-hide can hide the
     // window the moment it is enabled (losing focus), and the blur handler
@@ -532,7 +564,8 @@ pub fn dock(app: &AppHandle, edge: Option<&str>) -> Result<(), String> {
     *state.dock.lock().map_err(|e| e.to_string())? = Some(DockState {
         edge: edge.clone(),
         mode: mode.clone(),
-        monitor: monitor.clone(),
+        monitor,
+        identity,
         last_rect: None,
         blocked: None,
         // The dock() sequence below places the initial rect itself; the
@@ -623,7 +656,8 @@ fn reposition(app: &AppHandle, edge: Option<&str>) -> Result<(), String> {
         apply_dock_mode(app, hwnd.0, &edge, &current.mode);
         {
             let conn = state.db.lock().map_err(|e| e.to_string())?;
-            let _ = db::save_dock_edge(&conn, &current.monitor, &edge);
+            let key = memory_key(current.identity.as_deref(), &current.monitor);
+            let _ = db::save_dock_edge(&conn, key, &edge);
         }
         if let Ok(mut dock) = state.dock.lock() {
             if let Some(d) = dock.as_mut() {
@@ -669,7 +703,8 @@ fn reposition(app: &AppHandle, edge: Option<&str>) -> Result<(), String> {
     apply_dock_mode(app, hwnd.0, &edge, &current.mode);
     {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
-        let _ = db::save_dock_edge(&conn, &current.monitor, &edge);
+        let key = memory_key(current.identity.as_deref(), &current.monitor);
+        let _ = db::save_dock_edge(&conn, key, &edge);
     }
     // The edge and rect are updated in place — rebuilding the DockState here
     // would clobber the transient blocked state apply_dock_mode just settled
@@ -783,7 +818,8 @@ pub fn set_dock_mode(app: &AppHandle, mode: &str) -> Result<(), String> {
     {
         let state = app.state::<AppState>();
         let conn = state.db.lock().map_err(|e| e.to_string())?;
-        let _ = db::save_dock_mode(&conn, &current.monitor, mode);
+        let key = memory_key(current.identity.as_deref(), &current.monitor);
+        let _ = db::save_dock_mode(&conn, key, mode);
     }
     Ok(())
 }
@@ -976,6 +1012,11 @@ pub fn start_autohide_driver(app: AppHandle) {
         let mut anim: Option<(RECT, Instant)> = None;
         // Which state the driver wants (Some) once it has seen the dock.
         let mut shown: Option<bool> = None;
+        // Ticket 112: layered reveal gate — direction + dwell. Threaded through
+        // each tick, reset on hide-side or mode changes. Cost is a few integer
+        // ops per poll, same order of magnitude as before.
+        let mut reveal_gate = appbar::RevealGate::default();
+        let boot = Instant::now();
         // Whether the process timer resolution is raised to 1 ms (ticket 63):
         // Sleep quantizes to ~15.6 ms otherwise, which stutters the slide.
         let mut raised = false;
@@ -985,7 +1026,7 @@ pub fn start_autohide_driver(app: AppHandle) {
             } else {
                 AUTOHIDE_POLL_MS
             }));
-            if let Err(e) = autohide_tick(&app, &mut anim, &mut shown) {
+            if let Err(e) = autohide_tick(&app, &mut anim, &mut shown, &mut reveal_gate, boot) {
                 eprintln!("auto-hide: {e}");
             }
             match (anim.is_some(), raised) {
@@ -1125,6 +1166,8 @@ fn autohide_tick(
     app: &AppHandle,
     anim: &mut Option<(RECT, Instant)>,
     shown: &mut Option<bool>,
+    reveal_gate: &mut appbar::RevealGate,
+    boot: Instant,
 ) -> Result<(), String> {
     // Ticket 66: this thread is the primary geometry writer. It re-reads the
     // dock state immediately before acting, so an undock/close that lands
@@ -1135,6 +1178,7 @@ fn autohide_tick(
     let Some(current) = docked_state(app) else {
         *anim = None;
         *shown = None;
+        *reveal_gate = appbar::RevealGate::default();
         return Ok(());
     };
     if current.settled.as_deref() != Some(current.mode.as_str()) {
@@ -1147,6 +1191,7 @@ fn autohide_tick(
         // slide state.
         *anim = None;
         *shown = None;
+        *reveal_gate = appbar::RevealGate::default();
         return Ok(());
     }
     let Some(window) = app.get_webview_window(QUICK_LAUNCH_WINDOW) else {
@@ -1165,17 +1210,38 @@ fn autohide_tick(
         return Ok(());
     };
     let sliver = appbar::sliver_rect(full, edge_u32, AUTOHIDE_SLIVER_PX);
-    // Hysteresis (ticket 63): a hidden strip is revealed ONLY by a touch at
-    // the very screen edge (the EDGE_TRIGGER_PX band) — mere proximity within
-    // the area the strip would occupy must not pop it out, or it shadows the
-    // overlaid app's own chrome (close/minimize buttons). Once out, it stays
-    // out while the cursor is anywhere over the strip, and hides when the
-    // cursor leaves it.
+    // Ticket 112: layered reveal gate — trigger zone is the sliver itself
+    // (single size source), direction-gated accumulation, and a dwell that
+    // cancels the instant the cursor leaves the band. Hide-side hysteresis
+    // (strip_contains) is unchanged. Cross-monitor transit never reveals
+    // because it exits the 2 px band within a frame, aborting the dwell.
     let want_shown = match cursor_pos() {
-        None => false,
+        None => {
+            reveal_gate.accumulated = 0;
+            reveal_gate.dwell_start_ms = None;
+            reveal_gate.prev = None;
+            false
+        }
         Some((x, y)) => match *shown {
-            Some(true) => appbar::strip_contains(x, y, full),
-            _ => appbar::edge_hit(x, y, full, edge_u32, EDGE_TRIGGER_PX),
+            Some(true) => {
+                *reveal_gate = appbar::RevealGate::default();
+                appbar::strip_contains(x, y, full)
+            }
+            _ => {
+                let now_ms = boot.elapsed().as_millis() as u64;
+                let (new_state, should_show) = appbar::reveal_gate_step(
+                    std::mem::take(reveal_gate),
+                    x,
+                    y,
+                    now_ms,
+                    full,
+                    edge_u32,
+                    REVEAL_SENSITIVITY_PX,
+                    REVEAL_DWELL_MS,
+                );
+                *reveal_gate = new_state;
+                should_show
+            }
         },
     };
     if *shown != Some(want_shown) {
@@ -1242,7 +1308,8 @@ mod tests {
         let conn = db::init_at(&dir).unwrap();
         let settings = settings::Settings::default();
         // A fresh database remembers nothing — the Settings defaults win.
-        let (edge, mode) = resolve_dock_prefs(&conn, &settings, r"\\.\DISPLAY1").unwrap();
+        let (edge, mode) =
+            resolve_dock_prefs(&conn, &settings, None, r"\\.\DISPLAY1").unwrap();
         assert_eq!(edge, settings::DEFAULT_DOCK_EDGE);
         assert_eq!(mode, settings::DEFAULT_DOCK_MODE);
     }
@@ -1255,11 +1322,13 @@ mod tests {
         db::save_dock_mode(&conn, r"\\.\DISPLAY1", "fixed").unwrap();
         let settings = settings::Settings::default();
         // The monitor's own memory overrides the Settings defaults…
-        let (edge, mode) = resolve_dock_prefs(&conn, &settings, r"\\.\DISPLAY1").unwrap();
+        let (edge, mode) =
+            resolve_dock_prefs(&conn, &settings, None, r"\\.\DISPLAY1").unwrap();
         assert_eq!(edge, "right");
         assert_eq!(mode, "fixed");
         // …and a different monitor still gets the defaults.
-        let (edge, mode) = resolve_dock_prefs(&conn, &settings, r"\\.\DISPLAY2").unwrap();
+        let (edge, mode) =
+            resolve_dock_prefs(&conn, &settings, None, r"\\.\DISPLAY2").unwrap();
         assert_eq!(edge, settings::DEFAULT_DOCK_EDGE);
         assert_eq!(mode, settings::DEFAULT_DOCK_MODE);
     }
@@ -1272,9 +1341,39 @@ mod tests {
         // None — the Settings default wins, never an invalid edge.
         db::save_dock_edge(&conn, r"\\.\DISPLAY1", "top").unwrap();
         let settings = settings::Settings::default();
-        let (edge, mode) = resolve_dock_prefs(&conn, &settings, r"\\.\DISPLAY1").unwrap();
+        let (edge, mode) =
+            resolve_dock_prefs(&conn, &settings, None, r"\\.\DISPLAY1").unwrap();
         assert_eq!(edge, settings::DEFAULT_DOCK_EDGE);
         assert_eq!(mode, settings::DEFAULT_DOCK_MODE);
+    }
+
+    #[test]
+    fn dock_prefs_prefer_the_identity_memory_over_the_device_name_memory() {
+        // Ticket 110: a panel re-keyed by its hardware identity reads its own
+        // row even when a stale device-name row lingers beside it — and a
+        // device with no identity keeps reading the device-name row.
+        let dir = test_dir();
+        let conn = db::init_at(&dir).unwrap();
+        let settings = settings::Settings::default();
+        db::save_dock_edge(&conn, "edid-1234-5678", "left").unwrap();
+        db::save_dock_edge(&conn, r"\\.\DISPLAY1", "right").unwrap();
+
+        let (edge, _) =
+            resolve_dock_prefs(&conn, &settings, Some("edid-1234-5678"), r"\\.\DISPLAY1")
+                .unwrap();
+        assert_eq!(edge, "left");
+
+        let (edge, _) =
+            resolve_dock_prefs(&conn, &settings, None, r"\\.\DISPLAY1").unwrap();
+        assert_eq!(edge, "right");
+    }
+
+    #[test]
+    fn memory_key_prefers_identity_and_never_uses_an_empty_one() {
+        assert_eq!(memory_key(Some("edid-00AA-BB01"), r"\\.\DISPLAY1"), "edid-00AA-BB01");
+        assert_eq!(memory_key(None, r"\\.\DISPLAY1"), r"\\.\DISPLAY1");
+        // A degenerate empty identity (a probe bug) must not blank the key.
+        assert_eq!(memory_key(Some(""), r"\\.\DISPLAY1"), r"\\.\DISPLAY1");
     }
 
     /// The settle geometry the driver derives when entering fixed (ticket
@@ -1379,11 +1478,12 @@ mod tests {
         // driver's record_settled marks it established — and never for a
         // mode that raced past it.
         let dir = test_dir();
-        let conn = db::init_at(&dir).unwrap();
+        let _conn = db::init_at(&dir).unwrap();
         let mut d = DockState {
             edge: "left".into(),
             mode: "fixed".into(),
             monitor: r"\\.\DISPLAY1".into(),
+            identity: Some("edid-1234-5678".into()),
             last_rect: None,
             blocked: None,
             settled: Some("fixed".into()),

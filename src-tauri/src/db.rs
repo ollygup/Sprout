@@ -879,6 +879,32 @@ pub fn load_dock_mode(conn: &Connection, monitor: &str) -> Option<String> {
         .filter(|v| crate::settings::validate_dock_mode(v).is_ok())
 }
 
+/// The remembered edge for a display, preferring its hardware-identity row
+/// over the legacy device-name row (ticket 110): identity-keyed values win,
+/// and a display with no resolvable identity — or no row under its identity —
+/// reads the device-name key, so pre-upgrade memories survive.
+pub fn load_dock_edge_identified(
+    conn: &Connection,
+    identity: Option<&str>,
+    device_name: &str,
+) -> Option<String> {
+    identity
+        .and_then(|id| load_dock_edge(conn, id))
+        .or_else(|| load_dock_edge(conn, device_name))
+}
+
+/// The identified-shape twin of [`load_dock_edge_identified`] for the
+/// visibility mode.
+pub fn load_dock_mode_identified(
+    conn: &Connection,
+    identity: Option<&str>,
+    device_name: &str,
+) -> Option<String> {
+    identity
+        .and_then(|id| load_dock_mode(conn, id))
+        .or_else(|| load_dock_mode(conn, device_name))
+}
+
 fn read_meta(conn: &Connection, key: &str) -> Option<String> {
     conn.query_row(
         "SELECT value FROM meta WHERE key = ?1",
@@ -2298,6 +2324,79 @@ mod tests {
         assert_eq!(load_dock_edge(&conn, monitor), None);
         upsert_meta(&conn, &dock_key(KEY_DOCK_MODE_PREFIX, monitor), "overlay").unwrap();
         assert_eq!(load_dock_mode(&conn, monitor), None);
+    }
+
+    #[test]
+    fn identified_reads_prefer_the_identity_row_over_the_legacy_row() {
+        let dir = test_dir();
+        let conn = init_at(&dir).unwrap();
+        let identity = "edid-1234-5678";
+        let device = r"\\.\DISPLAY1";
+        save_dock_edge(&conn, identity, "left").unwrap();
+        save_dock_mode(&conn, identity, "auto-hide").unwrap();
+        save_dock_edge(&conn, device, "right").unwrap();
+        save_dock_mode(&conn, device, "fixed").unwrap();
+        // The identity row wins when one exists.
+        assert_eq!(
+            load_dock_edge_identified(&conn, Some(identity), device),
+            Some("left".into())
+        );
+        assert_eq!(
+            load_dock_mode_identified(&conn, Some(identity), device),
+            Some("auto-hide".into())
+        );
+    }
+
+    #[test]
+    fn identified_reads_fall_back_to_the_legacy_device_name_row() {
+        let dir = test_dir();
+        let conn = init_at(&dir).unwrap();
+        let device = r"\\.\DISPLAY1";
+        // A memory saved before ticket 110 lives under the device name only.
+        save_dock_edge(&conn, device, "right").unwrap();
+        save_dock_mode(&conn, device, "fixed").unwrap();
+        assert_eq!(
+            load_dock_edge_identified(&conn, Some("edid-AAAA-0001"), device),
+            Some("right".into())
+        );
+        assert_eq!(
+            load_dock_mode_identified(&conn, Some("edid-AAAA-0001"), device),
+            Some("fixed".into())
+        );
+        // No resolvable identity at all reads the legacy row directly.
+        assert_eq!(load_dock_edge_identified(&conn, None, device), Some("right".into()));
+        assert_eq!(load_dock_mode_identified(&conn, None, device), Some("fixed".into()));
+    }
+
+    #[test]
+    fn identified_reads_return_none_when_neither_row_exists() {
+        let dir = test_dir();
+        let conn = init_at(&dir).unwrap();
+        assert_eq!(
+            load_dock_edge_identified(&conn, Some("edid-1234-5678"), r"\\.\DISPLAY9"),
+            None
+        );
+        assert_eq!(
+            load_dock_mode_identified(&conn, None, r"\\.\DISPLAY9"),
+            None
+        );
+    }
+
+    #[test]
+    fn identified_reads_treat_a_broken_identity_row_as_absent_and_fall_back() {
+        let dir = test_dir();
+        let conn = init_at(&dir).unwrap();
+        let identity = "edid-DEAD-BEEF";
+        let device = r"\\.\DISPLAY1";
+        // A corrupted row under the identity key must not shadow the valid
+        // legacy value — the validation filter drops it and the read falls
+        // through.
+        upsert_meta(&conn, &dock_key(KEY_DOCK_EDGE_PREFIX, identity), "top").unwrap();
+        save_dock_edge(&conn, device, "left").unwrap();
+        assert_eq!(
+            load_dock_edge_identified(&conn, Some(identity), device),
+            Some("left".into())
+        );
     }
 }
 
