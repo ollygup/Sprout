@@ -745,7 +745,7 @@ pub(crate) fn open_main_window(app: &AppHandle) -> tauri::Result<tauri::WebviewW
         window.set_focus()?;
         Ok(window)
     } else {
-        tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
+        let window = tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
             .title("Sprout")
             .inner_size(
                 constants::window::MAIN_WINDOW_WIDTH,
@@ -755,7 +755,15 @@ pub(crate) fn open_main_window(app: &AppHandle) -> tauri::Result<tauri::WebviewW
                 constants::window::MAIN_WINDOW_MIN_WIDTH,
                 constants::window::MAIN_WINDOW_MIN_HEIGHT,
             )
-            .build()
+            .build()?;
+        // Ticket 111: WM_DISPLAYCHANGE for the main window so Settings' per-
+        // monitor list re-renders when screens move while the Quick Launch
+        // window is closed (tray-only). Reuses the Quick Launch subclass
+        // proc — both windows share the same cache invalidation.
+        if let Ok(hwnd) = window.hwnd() {
+            quick_window::install_display_change_hook(app, hwnd.0);
+        }
+        Ok(window)
     }
 }
 
@@ -1319,6 +1327,8 @@ pub struct DockStateView {
     pub mode: String,
     pub docked: bool,
     pub blocked: Option<String>,
+    pub left_eligible: bool,
+    pub right_eligible: bool,
 }
 
 /// The dock/undock toggle (ticket 53): docks the window to its current
@@ -1368,6 +1378,108 @@ fn persist_dock_setting(app: &AppHandle, key: &str, value: &str) -> Result<(), S
     }
 }
 
+/// The per-monitor display enumeration plus per-display dock memory (ticket
+/// 111): label, resolution, identity, and wall eligibility via the single
+/// geometry source.
+#[tauri::command]
+fn list_displays() -> Result<Vec<appbar::DisplayInfo>, String> {
+    Ok(appbar::cached_displays())
+}
+
+#[tauri::command]
+fn get_display_dock_edge(
+    state: State<'_, AppState>,
+    display: String,
+) -> Result<Option<String>, String> {
+    let conn = lock(&state)?;
+    // Resolve identity for the device so the fallback (ticket 110) is honored:
+    // read tries identity then legacy device-name.
+    let displays = appbar::cached_displays();
+    let (device_name, identity) = resolve_display_keys(&display, &displays);
+    Ok(db::load_dock_edge_identified(&conn, identity.as_deref(), &device_name))
+}
+
+#[tauri::command]
+fn set_display_dock_edge(
+    state: State<'_, AppState>,
+    display: String,
+    edge: String,
+) -> Result<(), String> {
+    settings::validate_dock_edge(&edge)?;
+    let displays = appbar::cached_displays();
+    let (device_name, identity) = resolve_display_keys(&display, &displays);
+    // Seam check (ticket 111 Study A) — refused with the identical inline
+    // string Settings shows.
+    match appbar::edge_eligible_for_device(&device_name, &edge) {
+        Ok(false) => return Err(appbar::SEAM_REASON.to_string()),
+        Ok(true) => {}
+        Err(e) => return Err(e),
+    }
+    let conn = lock(&state)?;
+    // Write through the EDID-keyed helper (ticket 110) — virtual displays fall
+    // back to the device name with no visible difference.
+    let key = per_display_key(identity.as_deref(), &device_name);
+    db::save_dock_edge(&conn, &key, &edge).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_display_dock_mode(
+    state: State<'_, AppState>,
+    display: String,
+) -> Result<Option<String>, String> {
+    let conn = lock(&state)?;
+    let displays = appbar::cached_displays();
+    let (device_name, identity) = resolve_display_keys(&display, &displays);
+    Ok(db::load_dock_mode_identified(&conn, identity.as_deref(), &device_name))
+}
+
+#[tauri::command]
+fn set_display_dock_mode(
+    state: State<'_, AppState>,
+    display: String,
+    mode: String,
+) -> Result<(), String> {
+    settings::validate_dock_mode(&mode)?;
+    let conn = lock(&state)?;
+    let displays = appbar::cached_displays();
+    let (device_name, identity) = resolve_display_keys(&display, &displays);
+    let key = per_display_key(identity.as_deref(), &device_name);
+    db::save_dock_mode(&conn, &key, &mode).map_err(|e| e.to_string())
+}
+
+fn resolve_display_keys(
+    display: &str,
+    displays: &[appbar::DisplayInfo],
+) -> (String, Option<String>) {
+    // `display` may be the storage `id` (edid-... or device_name) or the raw
+    // device name — match either.
+    for d in displays {
+        if d.device_name.eq_ignore_ascii_case(display) || d.id.eq_ignore_ascii_case(display) {
+            return (d.device_name.clone(), d.identity.clone());
+        }
+    }
+    // Unknown display (e.g. stored key for a now-unplugged monitor) — treat
+    // the string as both device and identity attempt; the eligibility check
+    // will treat it as eligible so the save still lands.
+    let as_identity = if display.starts_with("edid-") {
+        Some(display.to_string())
+    } else {
+        None
+    };
+    if as_identity.is_some() {
+        (display.to_string(), as_identity)
+    } else {
+        (display.to_string(), None)
+    }
+}
+
+fn per_display_key<'a>(identity: Option<&'a str>, device: &'a str) -> String {
+    match identity {
+        Some(id) if !id.is_empty() => id.to_string(),
+        _ => device.to_string(),
+    }
+}
+
 /// The dock chrome's state query (tickets 53 & 59): the current edge and mode
 /// when docked, or — while the window floats — the target edge/mode the
 /// toggle would dock to; `docked` tells the two apart. The header renders its
@@ -1375,14 +1487,55 @@ fn persist_dock_setting(app: &AppHandle, key: &str, value: &str) -> Result<(), S
 #[tauri::command]
 fn get_quick_launch_dock_state(app: AppHandle) -> Result<DockStateView, String> {
     Ok(match quick_window::docked_state(&app) {
-        Some(d) => DockStateView {
-            edge: d.edge,
-            mode: d.mode,
-            docked: true,
-            blocked: d.blocked,
+        Some(d) => {
+            // Eligibility for the live monitor so the header arrows can share
+            // the same wall rule as Settings (ticket 111).
+            let displays = appbar::cached_displays();
+            let all_rects: Vec<windows_sys::Win32::Foundation::RECT> = displays
+                .iter()
+                .map(|di| windows_sys::Win32::Foundation::RECT {
+                    left: di.x,
+                    top: di.y,
+                    right: di.x + di.width,
+                    bottom: di.y + di.height,
+                })
+                .collect();
+            let (left_eligible, right_eligible) = {
+                // Find current monitor's rect.
+                let mut found: Option<windows_sys::Win32::Foundation::RECT> = None;
+                for di in &displays {
+                    if di.device_name == d.monitor {
+                        found = Some(windows_sys::Win32::Foundation::RECT {
+                            left: di.x,
+                            top: di.y,
+                            right: di.x + di.width,
+                            bottom: di.y + di.height,
+                        });
+                        break;
+                    }
+                }
+                if let Some(rect) = found {
+                    (appbar::is_edge_eligible(rect, &all_rects, "left"), appbar::is_edge_eligible(rect, &all_rects, "right"))
+                } else {
+                    (true, true)
+                }
+            };
+            DockStateView {
+                edge: d.edge,
+                mode: d.mode,
+                docked: true,
+                blocked: d.blocked,
+                left_eligible,
+                right_eligible,
+            }
         },
         None => {
             let (edge, mode) = quick_window::pending_dock(&app)?;
+            // While floating, report eligibility for the monitor the window
+            // sits on (or would sit on) so the toggle icon/arrow disable
+            // matches the docked case. Best-effort: if pending_dock cannot
+            // resolve a monitor, assume eligible.
+            let (left_eligible, right_eligible) = pending_eligibility(&app).unwrap_or((true, true));
             DockStateView {
                 edge,
                 mode,
@@ -1390,9 +1543,43 @@ fn get_quick_launch_dock_state(app: AppHandle) -> Result<DockStateView, String> 
                 // A block is a property of a live dock only — floating has
                 // nothing to be blocked (ticket 63).
                 blocked: None,
+                left_eligible,
+                right_eligible,
             }
         }
     })
+}
+
+fn pending_eligibility(app: &AppHandle) -> Result<(bool, bool), String> {
+    let window = app
+        .get_webview_window(quick_window::QUICK_LAUNCH_WINDOW)
+        .ok_or_else(|| "Quick Launch window is not open".to_string())?;
+    let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+    let device = appbar::monitor_key(hwnd.0)
+        .ok_or_else(|| "cannot identify the current monitor".to_string())?;
+    let displays = appbar::cached_displays();
+    if displays.is_empty() {
+        return Ok((true, true));
+    }
+    let all_rects: Vec<windows_sys::Win32::Foundation::RECT> = displays
+        .iter()
+        .map(|di| windows_sys::Win32::Foundation::RECT {
+            left: di.x,
+            top: di.y,
+            right: di.x + di.width,
+            bottom: di.y + di.height,
+        })
+        .collect();
+    for (idx, di) in displays.iter().enumerate() {
+        if di.device_name.eq_ignore_ascii_case(&device) {
+            let rect = all_rects[idx];
+            return Ok((
+                appbar::is_edge_eligible(rect, &all_rects, "left"),
+                appbar::is_edge_eligible(rect, &all_rects, "right"),
+            ));
+        }
+    }
+    Ok((true, true))
 }
 
 /// [DEBUG-66] Temporary stress driver for ticket 66's repro loop: rapid
@@ -1750,7 +1937,12 @@ pub fn run() {
             close_quick_launch_window,
             toggle_quick_launch_dock,
             switch_quick_launch_dock_edge,
-            get_quick_launch_dock_state
+            get_quick_launch_dock_state,
+            list_displays,
+            get_display_dock_edge,
+            set_display_dock_edge,
+            get_display_dock_mode,
+            set_display_dock_mode
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

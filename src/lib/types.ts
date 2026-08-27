@@ -477,6 +477,25 @@ export interface QuickLaunchDockState {
   mode: "auto-hide" | "fixed";
   docked: boolean;
   blocked: string | null;
+  left_eligible: boolean;
+  right_eligible: boolean;
+}
+
+/** One connected display (ticket 111): label, resolution, EDID identity
+ * (when resolvable), and wall eligibility per edge via the single geometry
+ * source. */
+export interface DisplayInfo {
+  device_name: string;
+  identity: string | null;
+  id: string;
+  label: string;
+  width: number;
+  height: number;
+  resolution: string;
+  x: number;
+  y: number;
+  left_eligible: boolean;
+  right_eligible: boolean;
 }
 
 /** A newer Sprout release (ADR-0012): the display version (tag stripped of

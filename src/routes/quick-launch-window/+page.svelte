@@ -90,6 +90,8 @@
   let runNoticeTimer: ReturnType<typeof setTimeout> | undefined;
   let error = $state("");
   let tab = $state("launch");
+  const SEAM_REASON = "Borders another display — cursor can't stop there";
+
   // Ticket 59: the dock state is never null — while the window floats it
   // carries the target edge/mode the toggle would dock to (`docked: false`),
   // so the toggle's icon tells the truth before the first dock. Ticket 63:
@@ -100,7 +102,17 @@
     mode: "auto-hide",
     docked: false,
     blocked: null,
+    left_eligible: true,
+    right_eligible: true,
   });
+  // Ticket 119 Study A: already-docked middle line (seam) reuses the blocked
+  // banner — same wall rule and same reason line as Settings.
+  const seamBlocked = $derived(
+    dock.docked &&
+      ((dock.edge === "left" && !dock.left_eligible) ||
+        (dock.edge === "right" && !dock.right_eligible))
+  );
+  const showBlocked = $derived(dock.docked && (dock.blocked !== null || seamBlocked));
   // Ticket 79: one-click copy feedback — the copied row flashes "Copied"
   // for ~1.2 s and a polite live region announces it; silence reads as
   // breakage (research 0004 rule 5).
@@ -130,6 +142,9 @@
     }).then((fn) => unlisteners.push(fn));
     listen("quick-launch-changed", () => {
       load();
+      refreshDock();
+    }).then((fn) => unlisteners.push(fn));
+    listen("displays-changed", () => {
       refreshDock();
     }).then((fn) => unlisteners.push(fn));
     // Ticket 61: a background dock failure — a shell-initiated re-assert
@@ -444,16 +459,16 @@
       </span>
       <IconButton
         icon="chevron-left"
-        label="Dock to the left edge"
+        label={dock.left_eligible ? "Dock to the left edge" : SEAM_REASON}
         quiet
-        disabled={dock.edge === "left"}
+        disabled={dock.edge === "left" || !dock.left_eligible}
         onclick={() => switchEdge("left")}
       />
       <IconButton
         icon="chevron-right"
-        label="Dock to the right edge"
+        label={dock.right_eligible ? "Dock to the right edge" : SEAM_REASON}
         quiet
-        disabled={dock.edge === "right"}
+        disabled={dock.edge === "right" || !dock.right_eligible}
         onclick={() => switchEdge("right")}
       />
     {/if}
@@ -474,22 +489,31 @@
     <IconButton icon="x" label="Close window" onclick={close} />
   </header>
 
-  {#if dock.docked && dock.blocked}
+  {#if showBlocked}
     <!-- Ticket 63: auto-hide was refused by the shell — say why and offer the
-         free edge instead of silently pinning the strip forever. -->
+         free edge instead of silently pinning the strip forever.
+         Ticket 119 reuses the same banner for a seam-docked strip. -->
     <div class="qlw__blocked" role="status">
       <span class="qlw__blocked-icon" aria-hidden="true">
         <Icon name="warn" size={15} />
       </span>
       <p class="qlw__blocked-text">
-        {dock.blocked}. The strip stays pinned until that edge frees up —
-        hiding resumes on its own.
+        {#if seamBlocked}
+          {SEAM_REASON}
+        {:else}
+          {dock.blocked}. The strip stays pinned until that edge frees up —
+          hiding resumes on its own.
+        {/if}
       </p>
       <Button
         variant="ghost"
         onclick={() => switchEdge(dock.edge === "left" ? "right" : "left")}
       >
-        Move to the {dock.edge === "left" ? "right" : "left"} edge
+        {#if seamBlocked}
+          Move to outer edge
+        {:else}
+          Move to the {dock.edge === "left" ? "right" : "left"} edge
+        {/if}
       </Button>
     </div>
   {/if}

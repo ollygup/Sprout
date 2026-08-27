@@ -15,9 +15,9 @@ pub const WINDOW_HEIGHT: u32 = 460;
 /// smaller" bug: there is only one width source now.
 pub const DOCK_WIDTH: u32 = WINDOW_WIDTH;
 
-/// The auto-hide sliver's width in physical pixels (ticket 63): how much of
-/// the docked strip remains on-screen while hidden — the grab handle the
-/// cursor can still reach, taskbar-style.
+/// The auto-hide sliver's width in physical pixels (ticket 63 — kept only
+/// for the integer trigger-band math; ticket 119 hides off-screen with no
+/// handle, so this is the band width at the wall, not a visible strip).
 pub const AUTOHIDE_SLIVER_PX: i32 = 2;
 
 /// The reveal dwell in milliseconds (ticket 112): how long the cursor must

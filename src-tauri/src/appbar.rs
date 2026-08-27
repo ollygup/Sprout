@@ -33,8 +33,9 @@
 //! The syscall surface (`SHAppBarMessage`) is not unit-testable on CI; the
 //! geometry math is factored into pure functions tested below.
 
+use std::collections::HashMap;
 use std::mem::size_of;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use windows_sys::Win32::Devices::Display::{
     DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QueryDisplayConfig,
@@ -42,9 +43,10 @@ use windows_sys::Win32::Devices::Display::{
     DISPLAYCONFIG_DEVICE_INFO_HEADER, DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO,
     DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME, QDC_ONLY_ACTIVE_PATHS,
 };
-use windows_sys::Win32::Foundation::{HWND, LUID, RECT};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LUID, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MonitorFromWindow, MONITORINFOEXW, MONITOR_DEFAULTTONEAREST,
+    EnumDisplayDevicesW, EnumDisplayMonitors, GetMonitorInfoW, MonitorFromWindow, DISPLAY_DEVICEW,
+    HDC, HMONITOR, MONITORINFOEXW, MONITOR_DEFAULTTONEAREST,
 };
 use windows_sys::Win32::UI::Shell::{
     SHAppBarMessage, ABE_LEFT, ABE_RIGHT, ABM_GETAUTOHIDEBAR, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE,
@@ -78,6 +80,330 @@ pub fn edge_constant(edge: &str) -> Option<u32> {
         "right" => Some(ABE_RIGHT),
         _ => None,
     }
+}
+
+/// The inline reason shown when a seam edge is disabled (ticket 111, shared
+/// with the Quick Launch window arrows and the `get`/`set` edge commands).
+pub const SEAM_REASON: &str = "Borders another display — cursor can't stop there";
+
+/// The monitor seam threshold: overlap >1 px on the touching side makes the
+/// edge a middle line [Study A — KDE #351175].
+const SEAM_OVERLAP_PX: i32 = 1;
+
+/// Opposite outer edge for the auto-migration (ticket 111): a seam edge
+/// silently moves to the other wall of the same screen.
+pub fn opposite_edge(edge: &str) -> &str {
+    match edge {
+        "left" => "right",
+        "right" => "left",
+        _ => "left",
+    }
+}
+
+/// Whether `edge` on `target` is a wall [eligible — cursor-stop] given the
+/// live arrangement `all` (ticket 111 Study A). Only `left | right` are
+/// offered; a middle line touching another display by >1 px is not a wall.
+/// Vertical seams do not affect left/right (top/bottom independent).
+pub fn is_edge_eligible(target: RECT, all: &[RECT], edge: &str) -> bool {
+    match edge {
+        "left" => is_left_eligible(target, all),
+        "right" => is_right_eligible(target, all),
+        _ => false,
+    }
+}
+
+fn is_left_eligible(target: RECT, all: &[RECT]) -> bool {
+    for other in all {
+        if other.left == target.left && other.top == target.top && other.right == target.right && other.bottom == target.bottom {
+            continue;
+        }
+        if other.right == target.left {
+            let overlap = (other.bottom.min(target.bottom) - other.top.max(target.top)).max(0);
+            if overlap > SEAM_OVERLAP_PX {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn is_right_eligible(target: RECT, all: &[RECT]) -> bool {
+    for other in all {
+        if other.left == target.left && other.top == target.top && other.right == target.right && other.bottom == target.bottom {
+            continue;
+        }
+        if other.left == target.right {
+            let overlap = (other.bottom.min(target.bottom) - other.top.max(target.top)).max(0);
+            if overlap > SEAM_OVERLAP_PX {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Convenience for the per-monitor enumeration: both edges' eligibility for
+/// each rect in `all` in order.
+pub fn eligibility_for_all(all: &[RECT]) -> Vec<(bool, bool)> {
+    all.iter()
+        .map(|r| (is_left_eligible(*r, all), is_right_eligible(*r, all)))
+        .collect()
+}
+
+/// Serializable display descriptor (ticket 111): label, resolution, and
+/// identity plus wall eligibility so Settings and the Quick Launch bar share
+/// one probe.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DisplayInfo {
+    /// The GDI device name (`\\.\DISPLAY1`) — the live window probe key.
+    pub device_name: String,
+    /// The EDID-derived storage suffix when resolvable (`edid-XXXX-YYYY`),
+    /// otherwise `None` and `id` falls back to `device_name`.
+    pub identity: Option<String>,
+    /// The storage key the dock memory uses (`identity` or `device_name`).
+    pub id: String,
+    /// A short friendly label (`Display 1` or the monitor's friendly name).
+    pub label: String,
+    /// Pixel dimensions of `rcMonitor`.
+    pub width: i32,
+    pub height: i32,
+    /// Human resolution string (`1920 × 1080`).
+    pub resolution: String,
+    /// `rcMonitor` origin.
+    pub x: i32,
+    pub y: i32,
+    /// Wall eligibility (Study A).
+    pub left_eligible: bool,
+    pub right_eligible: bool,
+}
+
+/// Cached enumeration for WM_DISPLAYCHANGE (ticket 111): `None` means
+/// recompute on next demand.
+static DISPLAY_CACHE: Mutex<Option<Vec<DisplayInfo>>> = Mutex::new(None);
+
+pub fn invalidate_display_cache() {
+    if let Ok(mut cache) = DISPLAY_CACHE.lock() {
+        *cache = None;
+    }
+}
+
+pub fn cached_displays() -> Vec<DisplayInfo> {
+    if let Ok(cache) = DISPLAY_CACHE.lock() {
+        if let Some(cached) = cache.as_ref() {
+            return cached.clone();
+        }
+    }
+    let displays = enumerate_displays();
+    if let Ok(mut cache) = DISPLAY_CACHE.lock() {
+        *cache = Some(displays.clone());
+    }
+    displays
+}
+
+/// Single geometry + identity source (ticket 111): one atomic snapshot that
+/// yields both `rcMonitor` rectangles and EDID identities, so eligibility and
+/// storage keys never drift.
+pub fn enumerate_displays() -> Vec<DisplayInfo> {
+    let identity_map = query_display_map();
+    let monitors = collect_monitor_rects();
+    if monitors.is_empty() {
+        return Vec::new();
+    }
+    let rects: Vec<RECT> = monitors.iter().map(|(_, r, _)| *r).collect();
+    let elig = eligibility_for_all(&rects);
+    let mut out = Vec::new();
+    for (idx, (device, rect, _hmon)) in monitors.into_iter().enumerate() {
+        let (left_eligible, right_eligible) = elig[idx];
+        let key_lower = device.to_ascii_lowercase();
+        let (identity, friendly) = identity_map.get(&key_lower).cloned().unwrap_or((None, String::new()));
+        let id = identity.clone().unwrap_or_else(|| device.clone());
+        let label = if !friendly.trim().is_empty() {
+            friendly.trim().to_string()
+        } else {
+            friendly_label(&device)
+        };
+        let width = rect.right - rect.left;
+        let height = rect.bottom - rect.top;
+        out.push(DisplayInfo {
+            device_name: device,
+            identity,
+            id,
+            label,
+            width,
+            height,
+            resolution: format!("{width} × {height}"),
+            x: rect.left,
+            y: rect.top,
+            left_eligible,
+            right_eligible,
+        });
+    }
+    // Stable order: by device_name numeric suffix.
+    out.sort_by(|a, b| a.device_name.cmp(&b.device_name));
+    out
+}
+
+fn friendly_label(device: &str) -> String {
+    // Try EnumDisplayDevicesW for DeviceString (adapter description) as
+    // fallback; true monitor friendly name is already captured via
+    // QueryDisplayConfig when available.
+    unsafe {
+        let mut dd: DISPLAY_DEVICEW = std::mem::zeroed();
+        dd.cb = size_of::<DISPLAY_DEVICEW>() as u32;
+        let wide: Vec<u16> = device.encode_utf16().chain(std::iter::once(0)).collect();
+        if EnumDisplayDevicesW(wide.as_ptr(), 0, &mut dd as *mut _, 0) != 0 {
+            let len = dd.DeviceString.iter().position(|&c| c == 0).unwrap_or(dd.DeviceString.len());
+            let s = String::from_utf16_lossy(&dd.DeviceString[..len]);
+            let s = s.trim().to_string();
+            if !s.is_empty() && s.to_ascii_lowercase() != device.to_ascii_lowercase() {
+                // Prefer "Display N" when DeviceString is just a generic
+                // adapter string? Keep it but prefix with Display N for
+                // clarity when two displays share same string.
+                let num = device
+                    .trim_start_matches(r"\\.\DISPLAY")
+                    .trim_start_matches(r"\\.\DISPLAY")
+                    .parse::<u32>()
+                    .unwrap_or(0);
+                // Use DeviceString when it looks like a monitor model,
+                // otherwise Display N.
+                if s.to_ascii_lowercase().contains("display") || s.len() < 3 {
+                    if num > 0 {
+                        return format!("Display {num}");
+                    }
+                } else {
+                    return s;
+                }
+            }
+        }
+    }
+    let num_part = device.rsplit("DISPLAY").next().unwrap_or("");
+    if let Ok(n) = num_part.parse::<u32>() {
+        if n > 0 {
+            return format!("Display {n}");
+        }
+    }
+    // Fallback to raw device name trimmed.
+    device.trim_start_matches(r"\\.\").to_string()
+}
+
+fn collect_monitor_rects() -> Vec<(String, RECT, HMONITOR)> {
+    struct Ctx {
+        items: Vec<(String, RECT, HMONITOR)>,
+    }
+    unsafe extern "system" fn cb(hmon: HMONITOR, _hdc: HDC, _rect: *mut RECT, data: LPARAM) -> i32 {
+        let ctx = &mut *(data as *mut Ctx);
+        let mut info: MONITORINFOEXW = std::mem::zeroed();
+        info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
+        if GetMonitorInfoW(hmon, &mut info.monitorInfo as *mut _ as *mut _) != 0 {
+            let name = String::from_utf16_lossy(&info.szDevice);
+            let name = name.trim_end_matches('\0').to_string();
+            let rc = info.monitorInfo.rcMonitor;
+            if !name.is_empty() {
+                ctx.items.push((name, rc, hmon));
+            }
+        }
+        1
+    }
+    let mut ctx = Ctx { items: Vec::new() };
+    unsafe {
+        EnumDisplayMonitors(std::ptr::null_mut(), std::ptr::null(), Some(cb), &mut ctx as *mut _ as LPARAM);
+    }
+    ctx.items
+}
+
+/// The identity + friendly-name map from a single QueryDisplayConfig
+/// snapshot (ticket 110 & 111 single source).
+fn query_display_map() -> HashMap<String, (Option<String>, String)> {
+    let mut map: HashMap<String, (Option<String>, String)> = HashMap::new();
+    unsafe {
+        let mut num_paths = 0u32;
+        let mut num_modes = 0u32;
+        if GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut num_paths, &mut num_modes) != 0 {
+            return map;
+        }
+        if num_paths == 0 {
+            return map;
+        }
+        let mut paths: Vec<DISPLAYCONFIG_PATH_INFO> = vec![std::mem::zeroed(); num_paths as usize];
+        let mut modes: Vec<DISPLAYCONFIG_MODE_INFO> = vec![std::mem::zeroed(); num_modes as usize];
+        if QueryDisplayConfig(
+            QDC_ONLY_ACTIVE_PATHS,
+            &mut num_paths,
+            paths.as_mut_ptr(),
+            &mut num_modes,
+            modes.as_mut_ptr(),
+            std::ptr::null_mut(),
+        ) != 0
+        {
+            return map;
+        }
+        paths.truncate(num_paths as usize);
+        for path in &paths {
+            let mut source: DISPLAYCONFIG_SOURCE_DEVICE_NAME = std::mem::zeroed();
+            source.header = device_info_header(
+                DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+                path.sourceInfo.adapterId,
+                path.sourceInfo.id,
+                size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32,
+            );
+            if DisplayConfigGetDeviceInfo(&mut source.header) != 0 {
+                continue;
+            }
+            let s_len = source.viewGdiDeviceName.iter().position(|&c| c == 0).unwrap_or(source.viewGdiDeviceName.len());
+            let source_name = String::from_utf16_lossy(&source.viewGdiDeviceName[..s_len]);
+            if source_name.is_empty() {
+                continue;
+            }
+            let mut target: DISPLAYCONFIG_TARGET_DEVICE_NAME = std::mem::zeroed();
+            target.header = device_info_header(
+                DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
+                path.targetInfo.adapterId,
+                path.targetInfo.id,
+                size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32,
+            );
+            if DisplayConfigGetDeviceInfo(&mut target.header) != 0 {
+                // No target info — still insert with no identity/friendly.
+                map.entry(source_name.to_ascii_lowercase()).or_insert((None, String::new()));
+                continue;
+            }
+            let identity = if target.edidManufactureId == 0 && target.edidProductCodeId == 0 {
+                None
+            } else {
+                Some(edid_identity(target.edidManufactureId.into(), target.edidProductCodeId.into()))
+            };
+            let f_len = target.monitorFriendlyDeviceName.iter().position(|&c| c == 0).unwrap_or(target.monitorFriendlyDeviceName.len());
+            let friendly = String::from_utf16_lossy(&target.monitorFriendlyDeviceName[..f_len]).trim().to_string();
+            map.insert(source_name.to_ascii_lowercase(), (identity, friendly));
+        }
+    }
+    map
+}
+
+/// Returns the eligibility for `device_name` + `edge` from the live
+/// snapshot, or `Ok(true)` when the display cannot be found (single
+/// monitor fallback — treat as eligible so validation never blocks fresh
+/// installs).
+pub fn edge_eligible_for_device(device_name: &str, edge: &str) -> Result<bool, String> {
+    crate::appbar::edge_constant(edge).ok_or_else(|| "Dock edge must be \"left\" or \"right\"".to_string())?;
+    let displays = cached_displays();
+    if displays.is_empty() {
+        return Ok(true);
+    }
+    // Find the target display's rect via enumeration (single source).
+    let all_rects: Vec<RECT> = displays
+        .iter()
+        .map(|d| RECT { left: d.x, top: d.y, right: d.x + d.width, bottom: d.y + d.height })
+        .collect();
+    for (idx, d) in displays.iter().enumerate() {
+        if d.device_name.eq_ignore_ascii_case(device_name) || d.id.eq_ignore_ascii_case(device_name) {
+            let rect = all_rects[idx];
+            return Ok(is_edge_eligible(rect, &all_rects, edge));
+        }
+    }
+    // Device not found — maybe a stale stored key from a removed monitor;
+    // treat as eligible so the auto-migrate can clear it later without
+    // blocking.
+    Ok(true)
 }
 
 /// The AppBar's desired rectangle: a full-height strip of `width` physical
@@ -446,6 +772,9 @@ pub fn mostly_overlapping(actual: RECT, expected: RECT, min_fraction: f64) -> bo
 /// The auto-hide sliver for a docked strip (ticket 63): the strip collapsed
 /// to `sliver` physical pixels against its docked edge — the only part left
 /// on-screen while hidden. Top/bottom (the strip's height) are unchanged.
+/// Ticket 119: the sliver is kept only for the integer band math
+/// (`in_reveal_band`'s 2 px trigger zone source); the hidden window itself is
+/// off-screen (see [`hidden_rect`]) — no handle.
 pub fn sliver_rect(strip: RECT, edge: u32, sliver: i32) -> RECT {
     match edge {
         ABE_LEFT => RECT {
@@ -457,6 +786,52 @@ pub fn sliver_rect(strip: RECT, edge: u32, sliver: i32) -> RECT {
             ..strip
         },
         _ => strip,
+    }
+}
+
+/// The hidden position for an auto-hide strip (ticket 119 Study B):
+/// completely off-screen — no handle, no click box on any edge. The wall
+/// itself is the target, so a hidden strip leaves the 2 px artifact gone on
+/// both left and right. Top/bottom are unchanged; the strip slides between
+/// `full` and `hidden_rect(full, edge)` with the 180 ms ease-out.
+pub fn hidden_rect(full: RECT, edge: u32) -> RECT {
+    let width = full.right - full.left;
+    match edge {
+        ABE_LEFT => RECT {
+            left: full.left - width,
+            top: full.top,
+            right: full.left,
+            bottom: full.bottom,
+        },
+        ABE_RIGHT => RECT {
+            left: full.right,
+            top: full.top,
+            right: full.right + width,
+            bottom: full.bottom,
+        },
+        _ => full,
+    }
+}
+
+/// The reservation the shell keeps while auto-hide is hidden (ticket 119):
+/// zero width at the monitor's edge — the 2 px sliver artifact is gone, other
+/// windows keep their full size hidden or revealed. Pure — the caller supplies
+/// the monitor's own `rcMonitor`.
+pub fn autohide_reservation(monitor: RECT, edge: u32) -> RECT {
+    match edge {
+        ABE_LEFT => RECT {
+            left: monitor.left,
+            top: monitor.top,
+            right: monitor.left,
+            bottom: monitor.bottom,
+        },
+        ABE_RIGHT => RECT {
+            left: monitor.right,
+            top: monitor.top,
+            right: monitor.right,
+            bottom: monitor.bottom,
+        },
+        _ => monitor,
     }
 }
 
@@ -1157,5 +1532,122 @@ mod tests {
             Some(k) => println!("device-name key: {k}"),
             None => println!("no device name"),
         }
+    }
+
+    // ── Ticket 111: seam / wall eligibility (pure, shared for 111 + 119) ──
+
+    #[test]
+    fn seam_side_by_side_same_size_middle_line_off() {
+        // Two identical screens side-by-side: the meeting line has full-height
+        // overlap → both interior edges are seams, outer walls stay.
+        let left = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
+        let right = RECT { left: 1920, top: 0, right: 3840, bottom: 1080 };
+        let all = vec![left, right];
+        assert!(!is_edge_eligible(left, &all, "right"), "left screen's right is a seam");
+        assert!(!is_edge_eligible(right, &all, "left"), "right screen's left is a seam");
+        assert!(is_edge_eligible(left, &all, "left"), "outer left wall");
+        assert!(is_edge_eligible(right, &all, "right"), "outer right wall");
+    }
+
+    #[test]
+    fn seam_side_by_side_offset_only_thirty_percent_touch_still_off() {
+        // Only 30% vertical touch (540 of 1080) — still >1 px, so the whole
+        // middle line is off (ticket 111: whole side, not just overlapped slice).
+        let left = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
+        let right = RECT { left: 1920, top: 700, right: 3840, bottom: 1780 };
+        let all = vec![left, right];
+        assert!(!is_edge_eligible(left, &all, "right"));
+        assert!(!is_edge_eligible(right, &all, "left"));
+        // Outer walls remain.
+        assert!(is_edge_eligible(left, &all, "left"));
+        assert!(is_edge_eligible(right, &all, "right"));
+    }
+
+    #[test]
+    fn seam_diagonal_corner_only_one_px_is_still_a_wall() {
+        // Screens touch only at a single corner pixel (1 px overlap) — not a
+        // seam, the corner stays a wall.
+        let a = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
+        let b = RECT { left: 1920, top: 1080, right: 3840, bottom: 2160 };
+        let all = vec![a, b];
+        // Overlap for a.right vs b.left is 0 (b.top == a.bottom, no interior
+        // overlap); 0 ≤1 so not a seam.
+        assert!(is_edge_eligible(a, &all, "right"));
+        assert!(is_edge_eligible(b, &all, "left"));
+        // Also the 1 px exact case: bottom of a at 1081, top of b at 1080 →
+        // overlap 1 → still eligible.
+        let a2 = RECT { left: 0, top: 0, right: 1920, bottom: 1081 };
+        let b2 = RECT { left: 1920, top: 1080, right: 3840, bottom: 2160 };
+        let all2 = vec![a2, b2];
+        assert!(is_edge_eligible(a2, &all2, "right"));
+        assert!(is_edge_eligible(b2, &all2, "left"));
+    }
+
+    #[test]
+    fn seam_vertical_stack_left_and_right_independent() {
+        // Two screens stacked top/bottom: vertical seam must not make left/right
+        // a seam. Each screen's left/right stays independent.
+        let top = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
+        let bottom = RECT { left: 0, top: 1080, right: 1920, bottom: 2160 };
+        let all = vec![top, bottom];
+        for r in &[top, bottom] {
+            assert!(is_edge_eligible(*r, &all, "left"), "stacked left should be wall");
+            assert!(is_edge_eligible(*r, &all, "right"), "stacked right should be wall");
+        }
+    }
+
+    #[test]
+    fn seam_single_screen_both_walls() {
+        let single = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
+        let all = vec![single];
+        assert!(is_edge_eligible(single, &all, "left"));
+        assert!(is_edge_eligible(single, &all, "right"));
+    }
+
+    #[test]
+    fn seam_opposite_edge_is_the_other_wall() {
+        assert_eq!(opposite_edge("left"), "right");
+        assert_eq!(opposite_edge("right"), "left");
+    }
+
+    #[test]
+    fn seam_reason_string_matches_settings_and_ql() {
+        assert_eq!(SEAM_REASON, "Borders another display — cursor can't stop there");
+    }
+
+    #[test]
+    fn per_display_dock_memory_roundtrip_via_identity() {
+        // The per-monitor memory writes the EDID key when resolvable and reads
+        // via the identified fallback so a legacy device-name row still wins
+        // after the upgrade (ticket 110 + 111).
+        let dir = tempfile::tempdir().unwrap().into_path();
+        let conn = crate::db::init_at(&dir).unwrap();
+        let identity = "edid-1234-ABCD";
+        let device = r"\\.\DISPLAY1";
+        // Simulate set_display_dock_edge for a physical panel: write under
+        // the identity key...
+        let key = match Some(identity) {
+            Some(id) if !id.is_empty() => id,
+            _ => device,
+        };
+        crate::db::save_dock_edge(&conn, key, "right").unwrap();
+        crate::db::save_dock_mode(&conn, key, "fixed").unwrap();
+        // ...reads via identified helper prefer identity.
+        assert_eq!(
+            crate::db::load_dock_edge_identified(&conn, Some(identity), device),
+            Some("right".into())
+        );
+        assert_eq!(
+            crate::db::load_dock_mode_identified(&conn, Some(identity), device),
+            Some("fixed".into())
+        );
+        // A fresh install with only the legacy row still reads.
+        let dir2 = tempfile::tempdir().unwrap().into_path();
+        let conn2 = crate::db::init_at(&dir2).unwrap();
+        crate::db::save_dock_edge(&conn2, device, "left").unwrap();
+        assert_eq!(
+            crate::db::load_dock_edge_identified(&conn2, Some("edid-FFFF-0001"), device),
+            Some("left".into())
+        );
     }
 }

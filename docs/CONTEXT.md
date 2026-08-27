@@ -83,8 +83,20 @@ The miniature window opened from the tray icon with two tabs — Quick Launch (a
 _Avoid_: Miniature window, palette, tray menu
 
 **Quick Launch dock**:
-The Quick Launch window's docked form — a Win32 AppBar on the left/right screen edge, in one of two modes. **Fixed** reserves a slim strip (maximized windows shrink by it). **Auto-hide** is Sprout-driven and overlays: the strip slides out (~180 ms ease-out) when the cursor touches the docked screen edge and slides away to a 2 px sliver when the cursor leaves — other windows keep their full size either way, independent of the taskbar's own auto-hide setting, working even where the shell refuses the auto-hide registration. Its docked-versus-floating state is remembered per monitor and restored whenever Sprout starts — including Windows auto-start (ADR-0013). Never part of Presets or exports.
+The Quick Launch window's docked form — a little window that can be pinned [Win32 AppBar] to the left or right side of a screen. **Fixed** keeps a thin strip always visible and squeezes other windows. **Auto-hide** hides completely [off-screen, no handle] and slides in [~0.18 s ease-out] only when you push the mouse into that screen's outer wall and hold a moment — otherwise other windows keep their full size, even if the system says that edge is busy. Whether it is pinned or floating is remembered for each screen [per-monitor] and restored when Sprout starts — even on auto-start [ADR-0013]. Never part of Presets or exports.
 _Avoid_: Sidebar, tray bar, launcher bar
+
+**Display arrangement**:
+How your screens sit together — each screen's rectangle [rcMonitor] placed on a big invisible canvas [virtual-screen] whose zero point is the main screen [primary]. The user can move screens, but they must touch at least a little; this layout is the single place Sprout looks to tell screens apart and to know which edges are real walls.
+_Avoid_: Screen layout, monitor topology
+
+**Monitor seam**:
+The line where two screens touch by more than a tiny corner [>1 px overlap]. Your mouse slips straight across a seam to the other screen instead of stopping [passes through]. A single-corner diagonal touch [≤1 px] is not a seam — that corner is still a wall.
+_Avoid_: Shared edge, monitor border
+
+**Eligible edge (cursor-stop)**:
+An edge that is a real wall [not a seam for its full side] — the mouse can stop there and the hidden dock can be called. Sprout only offers left and right; a middle line [ineligible seam] has no handle and the opener does nothing — the saved choice quietly moves to the other wall of that same screen next time you dock.
+_Avoid_: Available edge, valid edge
 
 **Auto-start**:
 Sprout's registration to start with Windows: at login only the tray-resident backend starts — the main window never appears — restoring the Quick Launch dock when it was docked, staying tray-only when it was floating (or not yet docked). On by default in installed builds; toggled in Settings. Machine-local; never part of Presets or exports.

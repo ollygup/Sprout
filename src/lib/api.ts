@@ -398,6 +398,28 @@ export function updateGroupsEnabled(
   return invoke<void>("update_groups_enabled", { collection, enabled });
 }
 
+/** One connected display (ticket 111): label, resolution, identity, and
+ * wall eligibility from the live arrangement. */
+export function listDisplays(): Promise<import("./types").DisplayInfo[]> {
+  return invoke<import("./types").DisplayInfo[]>("list_displays");
+}
+
+export function getDisplayDockEdge(display: string): Promise<string | null> {
+  return invoke<string | null>("get_display_dock_edge", { display });
+}
+
+export function setDisplayDockEdge(display: string, edge: string): Promise<void> {
+  return invoke<void>("set_display_dock_edge", { display, edge });
+}
+
+export function getDisplayDockMode(display: string): Promise<string | null> {
+  return invoke<string | null>("get_display_dock_mode", { display });
+}
+
+export function setDisplayDockMode(display: string, mode: string): Promise<void> {
+  return invoke<void>("set_display_dock_mode", { display, mode });
+}
+
 /** The Quick Launch dock's toggle (ticket 53): docks the window to its
  * current monitor's remembered (or Settings-default) edge, or undocks back
  * to the floating window when already docked. */

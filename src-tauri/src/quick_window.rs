@@ -47,17 +47,20 @@
 //! Ticket 63 (motion): auto-hide is Sprout-driven. A ~16 ms polling driver
 //! thread (`GetCursorPos` — the WebView2 child HWND swallows mouse messages,
 //! so hover can never arrive as a window message) animates the docked strip
-//! between its full rect and a 2 px sliver with a 180 ms ease-out slide:
-//! cursor touches the screen edge (or the strip) → slides out; leaves the
-//! strip → slides away. It runs regardless of shell engagement — even a
-//! refused `ABM_SETAUTOHIDEBAR` still hides, because registration buys
-//! coordination only, never motion. The strip never reserves workspace space:
-//! hidden or slid out, other windows keep their full size — the bar overlays
-//! them like an auto-hiding taskbar. `fixed` mode is inert for the driver;
-//! undock/close restore the floating window.
+//! between its full rect and off-screen (ticket 119 Study B — no 2 px handle)
+//! with a 180 ms ease-out slide: cursor pushes into the screen edge wall and
+//! dwells → slides out; leaves the strip → slides away. It runs regardless of
+//! shell engagement — even a refused `ABM_SETAUTOHIDEBAR` still hides, because
+//! registration buys coordination only, never motion. The strip never reserves
+//! workspace space: hidden (off-screen) or slid out, other windows keep their
+//! full size — the bar overlays them like an auto-hiding taskbar. `fixed` mode
+//! is inert for the driver; undock/close restore the floating window.
 
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Mutex, OnceLock,
+};
 use std::time::{Duration, Instant};
 
 use rusqlite::Connection;
@@ -74,8 +77,8 @@ use windows_sys::Win32::Media::{timeBeginPeriod, timeEndPeriod};
 use crate::{
     appbar, db, settings,
     constants::window::{
-        AUTOHIDE_ANIM_POLL_MS, AUTOHIDE_POLL_MS, AUTOHIDE_SLIDE_MS, AUTOHIDE_SLIVER_PX,
-        DOCK_WIDTH, REVEAL_DWELL_MS, REVEAL_SENSITIVITY_PX, WINDOW_HEIGHT, WINDOW_WIDTH,
+        AUTOHIDE_ANIM_POLL_MS, AUTOHIDE_POLL_MS, AUTOHIDE_SLIDE_MS, DOCK_WIDTH,
+        REVEAL_DWELL_MS, REVEAL_SENSITIVITY_PX, WINDOW_HEIGHT, WINDOW_WIDTH,
     },
     AppState,
 };
@@ -129,8 +132,15 @@ static SUBCLASSED: Mutex<Option<HashMap<isize, isize>>> = Mutex::new(None);
 /// The app handle the `ABN_*` handler uses to reconcile and notify — captured
 /// once on first install (the app outlives the window, so it is always valid).
 static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
+/// Display-change epoch for ticket 119 Study E: incremented on every
+/// `WM_DISPLAYCHANGE`; the autohide driver resets its gate when it sees a new
+/// epoch so the next blink sees the new wall via the same cached probe as
+/// Settings (no second polling).
+static DISPLAY_EPOCH: AtomicU64 = AtomicU64::new(0);
 
 type AppBarWndProc = unsafe extern "system" fn(HWND, u32, usize, isize) -> isize;
+
+const WM_DISPLAYCHANGE: u32 = 0x007E;
 
 /// Subclasses the Quick Launch window so the registered AppBar callback
 /// message (`ABN_*` notifications) reaches us. Installed once per window,
@@ -157,6 +167,13 @@ fn install_appbar_callback(app: &AppHandle, hwnd: HWND) {
     }
 }
 
+/// Exposed for the main window's display-change hook (ticket 111): the
+/// same subclass proc is reused so WM_DISPLAYCHANGE is caught even when the
+/// Quick Launch window is closed.
+pub fn install_display_change_hook(app: &AppHandle, hwnd: HWND) {
+    install_appbar_callback(app, hwnd);
+}
+
 /// The subclassed window proc: forwards everything to the original proc, and
 /// watches for the AppBar callback message carrying `ABN_STATECHANGE` — the
 /// shell's notice that the bar's auto-hide / always-on-top attributes changed
@@ -169,6 +186,20 @@ unsafe extern "system" fn appbar_proc(
     wparam: usize,
     lparam: isize,
 ) -> isize {
+    if msg == WM_DISPLAYCHANGE {
+        crate::appbar::invalidate_display_cache();
+        DISPLAY_EPOCH.fetch_add(1, Ordering::SeqCst);
+        if let Some(app) = APP_HANDLE.get() {
+            // Migrations for seam edges are performed lazily on next dock;
+            // invalidate any cached geometry now and tell both surfaces to
+            // re-render (Settings per-monitor list + QL edge arrows, ticket
+            // 111). The opener (ticket 119) will re-read cached eligibility
+            // via the same pure helper — no second probe — and resets its
+            // gate so the next blink sees the new wall (Study E).
+            let _ = app.emit("displays-changed", ());
+            let _ = app.emit("quick-launch-changed", ());
+        }
+    }
     if msg == appbar::callback_message() {
         match wparam as u32 {
             ABN_STATECHANGE => {
@@ -490,6 +521,36 @@ fn resolve_dock_prefs(
     Ok((edge, mode))
 }
 
+/// Same as [`resolve_dock_prefs`] but auto-migrates a seam edge to its
+/// opposite outer wall and persists the migration (ticket 111).
+fn resolve_dock_prefs_migrated(
+    conn: &Connection,
+    settings: &settings::Settings,
+    identity: Option<&str>,
+    monitor: &str,
+) -> Result<(String, String), String> {
+    let (edge, mode) = resolve_dock_prefs(conn, settings, identity, monitor)?;
+    match appbar::edge_eligible_for_device(monitor, &edge) {
+        Ok(false) => {
+            let new_edge = appbar::opposite_edge(&edge).to_string();
+            let key = memory_key(identity, monitor);
+            let _ = db::save_dock_edge(conn, key, &new_edge);
+            Ok((new_edge, mode))
+        }
+        _ => Ok((edge, mode)),
+    }
+}
+
+/// Refuses a seam edge with the shared reason string (ticket 111).
+fn ensure_edge_eligible(device: &str, edge: &str) -> Result<(), String> {
+    settings::validate_dock_edge(edge)?;
+    match appbar::edge_eligible_for_device(device, edge) {
+        Ok(false) => Err(appbar::SEAM_REASON.to_string()),
+        Ok(true) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 /// The storage suffix a display's dock memory uses (ticket 110): the EDID
 /// identity when one resolved, else the device name. Pure — the seam the
 /// fallback rule is tested through.
@@ -523,7 +584,16 @@ pub fn pending_dock(app: &AppHandle) -> Result<(String, String), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     let settings = settings::load(&conn);
     let (monitor, identity) = monitor_refs(hwnd.0)?;
-    resolve_dock_prefs(&conn, &settings, identity.as_deref(), &monitor)
+    // Use migrated resolution so the toggle icon tells the truth even after
+    // the arrangement changed (ticket 111).
+    let (edge, mode) = resolve_dock_prefs(&conn, &settings, identity.as_deref(), &monitor)?;
+    // Preview without persisting — check eligibility for display only; the
+    // actual migration persists on the next real dock.
+    let edge = match appbar::edge_eligible_for_device(&monitor, &edge) {
+        Ok(false) => appbar::opposite_edge(&edge).to_string(),
+        _ => edge,
+    };
+    Ok((edge, mode))
 }
 
 /// Docks the window to the current monitor's remembered (or Settings-default)
@@ -545,8 +615,15 @@ pub fn dock(app: &AppHandle, edge: Option<&str>) -> Result<(), String> {
         let settings = settings::load(&conn);
         let (monitor, identity) = monitor_refs(hwnd.0)?;
         let (resolved_edge, resolved_mode) =
-            resolve_dock_prefs(&conn, &settings, identity.as_deref(), &monitor)?;
-        let edge = edge.map(str::to_string).unwrap_or(resolved_edge);
+            resolve_dock_prefs_migrated(&conn, &settings, identity.as_deref(), &monitor)?;
+        let edge = match edge {
+            Some(e) => {
+                let e = e.to_string();
+                ensure_edge_eligible(&monitor, &e)?;
+                e
+            }
+            None => resolved_edge,
+        };
         settings::validate_dock_edge(&edge)?;
         let mode = resolved_mode;
         // Memory is written under the hardware-identity key when one
@@ -639,6 +716,9 @@ fn reposition(app: &AppHandle, edge: Option<&str>) -> Result<(), String> {
         .map(str::to_string)
         .unwrap_or_else(|| current.edge.clone());
     settings::validate_dock_edge(&edge)?;
+    // Seam check (ticket 111): an edge that touches another display by >1 px
+    // is not a wall.
+    ensure_edge_eligible(&current.monitor, &edge)?;
     let edge_u32 = appbar::edge_constant(&edge).expect("validated edge");
     // In auto-hide mode the driver owns every placement — an edge
     // switch only moves the registration and the live state, and the driver
@@ -1016,6 +1096,10 @@ pub fn start_autohide_driver(app: AppHandle) {
         // each tick, reset on hide-side or mode changes. Cost is a few integer
         // ops per poll, same order of magnitude as before.
         let mut reveal_gate = appbar::RevealGate::default();
+        // Ticket 119 Study E: wall status is re-read on WM_DISPLAYCHANGE same
+        // signal Settings listens to; the opener resets and the next blink sees
+        // the new wall via the same cached probe as Settings.
+        let mut last_display_epoch = DISPLAY_EPOCH.load(Ordering::SeqCst);
         let boot = Instant::now();
         // Whether the process timer resolution is raised to 1 ms (ticket 63):
         // Sleep quantizes to ~15.6 ms otherwise, which stutters the slide.
@@ -1026,6 +1110,11 @@ pub fn start_autohide_driver(app: AppHandle) {
             } else {
                 AUTOHIDE_POLL_MS
             }));
+            let cur_epoch = DISPLAY_EPOCH.load(Ordering::SeqCst);
+            if cur_epoch != last_display_epoch {
+                last_display_epoch = cur_epoch;
+                reveal_gate = appbar::RevealGate::default();
+            }
             if let Err(e) = autohide_tick(&app, &mut anim, &mut shown, &mut reveal_gate, boot) {
                 eprintln!("auto-hide: {e}");
             }
@@ -1093,18 +1182,19 @@ fn settle_mode(app: &AppHandle, current: &DockState) {
         return;
     };
     if current.mode == "auto-hide" {
-        // Hand the workspace back: shrink the strip's reservation to the
-        // sliver once. The ±4 px grant validation stays log-only (the shell
-        // may round); a refused shrink keeps the full reservation and hides
-        // anyway — overlay semantics mean no other window loses space.
+        // Hand the workspace back: shrink the strip's reservation to zero once
+        // (ticket 119 Study B — no handle, no 2 px sliver artifact on any edge).
+        // The ±4 px grant validation stays log-only (the shell may round); a
+        // refused shrink keeps the full reservation and hides anyway — overlay
+        // semantics mean no other window loses space.
         if let Some(monitor) = appbar::monitor_rect(hwnd.0) {
             let full = appbar::appbar_rect(monitor, edge_u32, DOCK_WIDTH as i32);
-            let sliver = appbar::sliver_rect(full, edge_u32, AUTOHIDE_SLIVER_PX);
-            match appbar::reserve(hwnd.0, edge_u32, sliver) {
+            let reservation = appbar::autohide_reservation(monitor, edge_u32);
+            match appbar::reserve(hwnd.0, edge_u32, reservation) {
                 Ok(granted) => {
-                    if appbar::rects_diverged(granted, sliver, 4) {
+                    if appbar::rects_diverged(granted, reservation, 4) {
                         eprintln!(
-                            "auto-hide: unexpected sliver reservation grant — keeping window placement only"
+                            "auto-hide: unexpected reservation grant — keeping window placement only"
                         );
                     }
                 }
@@ -1118,21 +1208,31 @@ fn settle_mode(app: &AppHandle, current: &DockState) {
     }
     // Entering fixed (or a fresh fixed dock's first driver observation):
     // reserve the full strip and place at the granted rect in one atomic
-    // `SetWindowPos`. A bar arriving from auto-hide sits as a 2 px sliver
-    // whose edge IS flush with the shrunken work area — trusting the
-    // flush-keep rule here would pin "fixed" as an invisible 2 px line
-    // (ticket 66), so the full thickness is derived fresh whenever the
-    // window is narrower than a strip. An already-full-width bar (a fresh
-    // fixed dock placed by dock() moments ago) keeps its position —
-    // re-deriving from the self-shrunk work area would march it one width
-    // into the screen (ticket 61).
+    // `SetWindowPos`. A bar arriving from auto-hide sits hidden off-screen or
+    // as a 2 px sliver whose edge IS flush with the shrunken work area —
+    // trusting the flush-keep rule here would pin "fixed" as an invisible
+    // strip (ticket 66, now off-screen per 119), so the full thickness is
+    // derived fresh whenever the window is narrower than a strip or hidden
+    // off-screen. An already-full-width bar (a fresh fixed dock placed by
+    // dock() moments ago) keeps its position — re-deriving from the
+    // self-shrunk work area would march it one width into the screen (ticket
+    // 61).
     let Some(work) = appbar::work_area(hwnd.0) else {
         report_dock_error(app, "Could not switch the bar to fixed: cannot find the monitor work area");
         return;
     };
+    let Some(monitor) = appbar::monitor_rect(hwnd.0) else {
+        report_dock_error(app, "Could not switch the bar to fixed: cannot find the monitor rectangle");
+        return;
+    };
     let actual = appbar::window_rect(hwnd.0).unwrap_or(work);
+    let is_hidden = match edge_u32 {
+        x if x == windows_sys::Win32::UI::Shell::ABE_LEFT => actual.right <= monitor.left,
+        x if x == windows_sys::Win32::UI::Shell::ABE_RIGHT => actual.left >= monitor.right,
+        _ => false,
+    };
     let desired =
-        if actual.right - actual.left < DOCK_WIDTH as i32 {
+        if is_hidden || actual.right - actual.left < DOCK_WIDTH as i32 {
             appbar::appbar_rect(work, edge_u32, DOCK_WIDTH as i32)
         } else {
             appbar::desired_rect(edge_u32, work, actual, DOCK_WIDTH as i32)
@@ -1209,12 +1309,17 @@ fn autohide_tick(
     let Some(actual) = appbar::window_rect(hwnd.0) else {
         return Ok(());
     };
-    let sliver = appbar::sliver_rect(full, edge_u32, AUTOHIDE_SLIVER_PX);
+    let hidden = appbar::hidden_rect(full, edge_u32);
     // Ticket 112: layered reveal gate — trigger zone is the sliver itself
     // (single size source), direction-gated accumulation, and a dwell that
     // cancels the instant the cursor leaves the band. Hide-side hysteresis
     // (strip_contains) is unchanged. Cross-monitor transit never reveals
     // because it exits the 2 px band within a frame, aborting the dwell.
+    // Ticket 119 Study A: the opener reads the precomputed wall check (111)
+    // — a seam (ineligible — >1 px overlap) short-circuits: reset gate, no
+    // handle, hidden = off-screen (Study B). The wall itself is the target.
+    let wall_eligible = appbar::edge_eligible_for_device(&current.monitor, &current.edge)
+        .unwrap_or(true);
     let want_shown = match cursor_pos() {
         None => {
             reveal_gate.accumulated = 0;
@@ -1228,19 +1333,29 @@ fn autohide_tick(
                 appbar::strip_contains(x, y, full)
             }
             _ => {
-                let now_ms = boot.elapsed().as_millis() as u64;
-                let (new_state, should_show) = appbar::reveal_gate_step(
-                    std::mem::take(reveal_gate),
-                    x,
-                    y,
-                    now_ms,
-                    full,
-                    edge_u32,
-                    REVEAL_SENSITIVITY_PX,
-                    REVEAL_DWELL_MS,
-                );
-                *reveal_gate = new_state;
-                should_show
+                if !wall_eligible {
+                    // Study A: middle line — no wall, no handle, opener does
+                    // nothing (reset gate, return false); the strip stays
+                    // off-screen. Applies to both left|right on each screen —
+                    // top/bottom independent. Single geometry source is kept
+                    // via cached_displays (no second probe that could drift).
+                    *reveal_gate = appbar::RevealGate::default();
+                    false
+                } else {
+                    let now_ms = boot.elapsed().as_millis() as u64;
+                    let (new_state, should_show) = appbar::reveal_gate_step(
+                        std::mem::take(reveal_gate),
+                        x,
+                        y,
+                        now_ms,
+                        full,
+                        edge_u32,
+                        REVEAL_SENSITIVITY_PX,
+                        REVEAL_DWELL_MS,
+                    );
+                    *reveal_gate = new_state;
+                    should_show
+                }
             }
         },
     };
@@ -1250,7 +1365,7 @@ fn autohide_tick(
         *anim = Some((actual, Instant::now()));
         *shown = Some(want_shown);
     }
-    let target = if want_shown { full } else { sliver };
+    let target = if want_shown { full } else { hidden };
     if !appbar::rects_diverged(actual, target, 0) {
         return Ok(());
     }
@@ -1296,6 +1411,7 @@ fn autohide_tick(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constants::window::AUTOHIDE_SLIVER_PX;
     use windows_sys::Win32::UI::Shell::{ABE_LEFT, ABE_RIGHT};
 
     fn test_dir() -> std::path::PathBuf {
@@ -1378,9 +1494,21 @@ mod tests {
 
     /// The settle geometry the driver derives when entering fixed (ticket
     /// 66): the same composition `settle_mode` runs, as pure inputs so the
-    /// syscall-free seam is testable.
+    /// syscall-free seam is testable. Ticket 119: hidden is off-screen, so a
+    /// width check alone misses it — also treat an off-screen strip as hidden.
     fn settle_fixed_desired(edge: u32, work: RECT, actual: RECT) -> RECT {
-        if actual.right - actual.left < DOCK_WIDTH as i32 {
+        // Hidden off-screen detection needs the monitor, not just work; the
+        // tests all use the 0..2560 monitor, so we can infer it from the
+        // known monitor width (2560) for the pure helper. Production uses the
+        // live monitor rect (see `settle_mode`).
+        let monitor_left = 0;
+        let monitor_right = 2560;
+        let is_hidden = match edge {
+            x if x == ABE_LEFT => actual.right <= monitor_left,
+            x if x == ABE_RIGHT => actual.left >= monitor_right,
+            _ => false,
+        };
+        if is_hidden || actual.right - actual.left < DOCK_WIDTH as i32 {
             appbar::appbar_rect(work, edge, DOCK_WIDTH as i32)
         } else {
             appbar::desired_rect(edge, work, actual, DOCK_WIDTH as i32)
@@ -1449,24 +1577,30 @@ mod tests {
     }
 
     #[test]
-    fn settle_autohide_shrinks_the_reservation_to_the_sliver() {
-        // Entering auto-hide hands the workspace back: the reservation the
-        // driver commits is the 2 px sliver of the monitor-spanning strip,
-        // and the animation endpoints stay the full strip (ticket 66).
+    fn settle_autohide_hands_back_workspace_and_hides_offscreen() {
+        // Entering auto-hide hands the workspace back (ticket 119 Study B: no
+        // handle — reservation is zero width at the edge, hidden is off-screen).
+        // Animation endpoints stay the full strip (ticket 66).
         let monitor = RECT { left: 0, top: 0, right: 2560, bottom: 1848 };
         for edge in [ABE_LEFT, ABE_RIGHT] {
             let full = appbar::appbar_rect(monitor, edge, DOCK_WIDTH as i32);
-            let sliver = appbar::sliver_rect(full, edge, AUTOHIDE_SLIVER_PX);
-            assert_eq!(sliver.right - sliver.left, AUTOHIDE_SLIVER_PX as i32);
-            assert_eq!(sliver.top, full.top);
-            assert_eq!(sliver.bottom, full.bottom);
+            let hidden = appbar::hidden_rect(full, edge);
+            assert_eq!(hidden.right - hidden.left, DOCK_WIDTH as i32);
+            assert_eq!(hidden.top, full.top);
+            assert_eq!(hidden.bottom, full.bottom);
             if edge == ABE_LEFT {
-                assert_eq!((sliver.left, sliver.right), (0, AUTOHIDE_SLIVER_PX as i32));
+                assert_eq!((hidden.left, hidden.right), (-(DOCK_WIDTH as i32), 0));
             } else {
-                assert_eq!(
-                    (sliver.left, sliver.right),
-                    (2560 - AUTOHIDE_SLIVER_PX as i32, 2560)
-                );
+                assert_eq!((hidden.left, hidden.right), (2560, 2560 + DOCK_WIDTH as i32));
+            }
+            let reservation = appbar::autohide_reservation(monitor, edge);
+            assert_eq!(reservation.right - reservation.left, 0);
+            assert_eq!(reservation.top, monitor.top);
+            assert_eq!(reservation.bottom, monitor.bottom);
+            if edge == ABE_LEFT {
+                assert_eq!((reservation.left, reservation.right), (0, 0));
+            } else {
+                assert_eq!((reservation.left, reservation.right), (2560, 2560));
             }
         }
     }
