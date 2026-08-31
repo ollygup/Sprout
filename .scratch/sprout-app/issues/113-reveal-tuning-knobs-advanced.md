@@ -4,10 +4,10 @@
 
 **Blocked by:** 112 — layered autohide reveal gate.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Both knobs validate and clamp to sane ranges following the established settings pattern; broken stored values fall back to defaults
-- [ ] Defaults equal the shipped gate constants; changing a knob changes driver behavior without restart
-- [ ] Knobs live under a collapsed-by-default Advanced disclosure using the shared Disclosure primitive; hidden entirely when the dock feature surface doesn't apply
-- [ ] Labels describe both states plainly (information scent); tokens/components reused only
-- [ ] Validator/clamp tests added; `svelte-check` clean
+- [x] Both knobs validate and clamp to sane ranges following the established settings pattern; broken stored values fall back to defaults
+- [x] Defaults equal the shipped gate constants; changing a knob changes driver behavior without restart
+- [x] Knobs live under a collapsed-by-default Advanced disclosure using the shared Disclosure primitive; hidden entirely when the dock feature surface doesn't apply
+- [x] Labels describe both states plainly (information scent); tokens/components reused only
+- [x] Validator/clamp tests added; `svelte-check` clean

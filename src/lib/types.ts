@@ -289,6 +289,12 @@ export interface Settings {
   launch_groups: string;
   action_groups: string;
   clip_groups: string;
+  /** Reveal dwell (ticket 113): ms the cursor must hold in the sliver after
+   *  accumulating threshold before the dock reveals. 0 is immediate. */
+  reveal_dwell_ms: number;
+  /** Reveal sensitivity threshold (ticket 113): px of toward-edge travel
+   *  inside the sliver required before dwell starts. 0 needs no push. */
+  reveal_sensitivity_px: number;
 }
 
 /** Which collection a Group buckets (ticket 89) — the discriminator that

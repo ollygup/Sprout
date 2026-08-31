@@ -23,6 +23,7 @@
   import Select from "$lib/components/Select.svelte";
   import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";
   import { theme, restoreTheme, selectTheme } from "$lib/theme.svelte";
+  import Disclosure from "$lib/components/Disclosure.svelte";
   import type { ThemeMode } from "$lib/theme.svelte";
   import {
     checkForUpdates,
@@ -68,6 +69,10 @@
   let dockMode = $state("auto-hide");
   let dockEdge = $state("left");
   let dockState = $state("floating");
+  let revealDwellMs = $state(200);
+  let revealSensitivityPx = $state(12);
+  let advancedOpen = $state(false);
+  let housekeepingAdvancedOpen = $state(false);
   let autostart = $state("on");
   let loading = $state(true);
   let loadFailed = $state(false);
@@ -140,6 +145,10 @@
       dockMode = loaded.dock_mode;
       dockEdge = loaded.dock_edge;
       dockState = loaded.dock_state;
+      // Ticket 113: reveal tuning knobs default to shipped gate constants;
+      // fall back to defaults when the stored value is broken (Settings::load).
+      revealDwellMs = loaded.reveal_dwell_ms ?? 200;
+      revealSensitivityPx = loaded.reveal_sensitivity_px ?? 12;
       autostart = loaded.autostart;
       const persisted = loaded.theme as ThemeMode;
       if (persisted === "system" || persisted === "light" || persisted === "dark") {
@@ -280,6 +289,11 @@
     // Clear per-monitor row errors before batch save.
     displayErrors = {};
     try {
+      // Ticket 113: clamp reveal knobs to sane ranges before persisting
+      // (same 0–1000 ms / 0–50 px the backend validates; broken stored
+      // values already fell back to defaults on load).
+      const clampedDwell = Math.min(1000, Math.max(0, Math.floor(revealDwellMs) || 0));
+      const clampedSens = Math.min(50, Math.max(0, Math.floor(revealSensitivityPx) || 0));
       await updateSettings({
         default_timeout_minutes: Math.max(1, Math.floor(timeout) || 1),
         log_retention_days: Math.max(1, Math.floor(retention) || 1),
@@ -295,6 +309,8 @@
         launch_groups: settings.launch_groups,
         action_groups: settings.action_groups,
         clip_groups: settings.clip_groups,
+        reveal_dwell_ms: clampedDwell,
+        reveal_sensitivity_px: clampedSens,
       });
       // Per-monitor follows Save (only Theme is immediate per 0009). Batch
       // the deferred writes so global + per-monitor share one success notice.
@@ -330,6 +346,8 @@
       timeout = Math.max(1, Math.floor(timeout) || 1);
       retention = Math.max(1, Math.floor(retention) || 1);
       launchConcurrency = Math.min(50, Math.max(1, Math.floor(launchConcurrency) || 1));
+      revealDwellMs = Math.min(1000, Math.max(0, Math.floor(revealDwellMs) || 0));
+      revealSensitivityPx = Math.min(50, Math.max(0, Math.floor(revealSensitivityPx) || 0));
     } catch {
       error = "Couldn't save the settings — try again. If it keeps failing, close Sprout and relaunch.";
     } finally {
@@ -526,54 +544,6 @@
 
       <article class="knob">
         <div class="knob__body">
-          <label class="knob__label" for="default-timeout">Default timeout</label>
-          <p class="knob__hint">
-            Minutes a requirement may take before its installer is killed. New requirements in the
-            preset composer start with this value; you can still override each one.
-          </p>
-        </div>
-        <div class="knob__input">
-          <input
-            id="default-timeout"
-            name="default-timeout"
-            class="field__input"
-            type="number"
-            min="1"
-            max="1440"
-            autocomplete="off"
-            value={timeout}
-            oninput={(e) => (timeout = Number((e.target as HTMLInputElement).value))}
-          />
-          <span class="knob__unit">min</span>
-        </div>
-      </article>
-
-      <article class="knob">
-        <div class="knob__body">
-          <label class="knob__label" for="log-retention">Log retention</label>
-          <p class="knob__hint">
-            How long a finished run's raw log folder is kept before it is pruned. Pruning happens
-            after every run and at app start. The runs list itself is never deleted.
-          </p>
-        </div>
-        <div class="knob__input">
-          <input
-            id="log-retention"
-            name="log-retention"
-            class="field__input"
-            type="number"
-            min="1"
-            max="3650"
-            autocomplete="off"
-            value={retention}
-            oninput={(e) => (retention = Number((e.target as HTMLInputElement).value))}
-          />
-          <span class="knob__unit">days</span>
-        </div>
-      </article>
-
-      <article class="knob">
-        <div class="knob__body">
           <label class="knob__label" for="install-dir">Install directory</label>
           <p class="knob__hint">
             Where installs and upgrades land. Empty means the installer's own default location;
@@ -597,30 +567,6 @@
           {#if installDir}
             <Button type="button" variant="ghost" onclick={() => (installDir = "")}>Clear</Button>
           {/if}
-        </div>
-      </article>
-
-      <article class="knob">
-        <div class="knob__body">
-          <label class="knob__label" for="launch-concurrency">Launch concurrency</label>
-          <p class="knob__hint">
-            How many Quick Launch apps may start at once before the rest queue.
-            A slot frees as soon as the app's window appears.
-          </p>
-        </div>
-        <div class="knob__input">
-          <input
-            id="launch-concurrency"
-            name="launch-concurrency"
-            class="field__input"
-            type="number"
-            min="1"
-            max="50"
-            autocomplete="off"
-            value={launchConcurrency}
-            oninput={(e) => (launchConcurrency = Number((e.target as HTMLInputElement).value))}
-          />
-          <span class="knob__unit">apps</span>
         </div>
       </article>
 
@@ -733,6 +679,75 @@
         </div>
       {/if}
 
+      {#if dockMode === "auto-hide"}
+        <!-- Reveal tuning (ticket 113): quiet knobs under a collapsed disclosure at the
+             end of the dock group (research 0004 no-content→no-chrome, 0006 pattern 7 collapsible
+             sections, 0006 pattern 4 proximity — tuning lives at the dock group's footer, not
+             page-bottom, so the dock cluster stays contiguous). Hidden entirely when auto-hide
+             is not the active dock mode. Distinct label "Reveal tuning" gives information scent
+             per 0008 rule 3, avoiding duplicate "Advanced" carets. -->
+        <div class="dock-advanced">
+          <Disclosure
+            open={advancedOpen}
+            controls="dock-advanced-body"
+            label="Reveal tuning"
+            onclick={() => (advancedOpen = !advancedOpen)}
+          />
+          <div id="dock-advanced-body" class="advanced__body" hidden={!advancedOpen}>
+            <article class="knob">
+              <div class="knob__body">
+                <label class="knob__label" for="reveal-dwell">Reveal delay</label>
+                <p class="knob__hint">
+                  Hold time at the screen edge after pushing into it before the hidden dock
+                  slides out. Shorter feels snappier but may fire on grazes along the seam;
+                  longer needs a deliberate hold and resists accidental reveals. 0–1000 ms,
+                  default 200 ms.
+                </p>
+              </div>
+              <div class="knob__input">
+                <input
+                  id="reveal-dwell"
+                  name="reveal-dwell"
+                  class="field__input"
+                  type="number"
+                  min="0"
+                  max="1000"
+                  autocomplete="off"
+                  value={revealDwellMs}
+                  oninput={(e) => (revealDwellMs = Number((e.target as HTMLInputElement).value))}
+                />
+                <span class="knob__unit">ms</span>
+              </div>
+            </article>
+
+            <article class="knob">
+              <div class="knob__body">
+                <label class="knob__label" for="reveal-sensitivity">Reveal sensitivity</label>
+                <p class="knob__hint">
+                  Distance the cursor must push into the edge before the hold timer starts.
+                  Lower needs only a nudge and feels immediate; higher demands a purposeful push
+                  and ignores brushes along the edge. 0–50 px, default 12 px.
+                </p>
+              </div>
+              <div class="knob__input">
+                <input
+                  id="reveal-sensitivity"
+                  name="reveal-sensitivity"
+                  class="field__input"
+                  type="number"
+                  min="0"
+                  max="50"
+                  autocomplete="off"
+                  value={revealSensitivityPx}
+                  oninput={(e) => (revealSensitivityPx = Number((e.target as HTMLInputElement).value))}
+                />
+                <span class="knob__unit">px</span>
+              </div>
+            </article>
+          </div>
+        </div>
+      {/if}
+
       <article class="knob">
         <div class="knob__body">
           <span class="knob__label">Start with Windows</span>
@@ -826,6 +841,96 @@
           {/if}
         </div>
       </article>
+
+      <!-- Housekeeping advanced (research 0004 progressive disclosure, 0006 pattern 7):
+           infrequent tuning — timeout / retention / concurrency — collapsed behind
+           an obvious affordance. Always visible (not content-gated: defaults always
+           meaningful), never dock-conditional. Install directory stays outside
+           (browse action + absolute-path affordance, not plain number tuning). -->
+      <div class="dock-advanced">
+        <Disclosure
+          open={housekeepingAdvancedOpen}
+          controls="housekeeping-advanced-body"
+          label="Advanced"
+          onclick={() => (housekeepingAdvancedOpen = !housekeepingAdvancedOpen)}
+        />
+        <div id="housekeeping-advanced-body" class="advanced__body" hidden={!housekeepingAdvancedOpen}>
+          <article class="knob">
+            <div class="knob__body">
+              <label class="knob__label" for="default-timeout">Default timeout</label>
+              <p class="knob__hint">
+                Minutes a requirement may take before its installer is killed. New requirements
+                in the preset composer start with this value; you can still override each one.
+                1–1440 min, default 10 min.
+              </p>
+            </div>
+            <div class="knob__input">
+              <input
+                id="default-timeout"
+                name="default-timeout"
+                class="field__input"
+                type="number"
+                min="1"
+                max="1440"
+                autocomplete="off"
+                value={timeout}
+                oninput={(e) => (timeout = Number((e.target as HTMLInputElement).value))}
+              />
+              <span class="knob__unit">min</span>
+            </div>
+          </article>
+
+          <article class="knob">
+            <div class="knob__body">
+              <label class="knob__label" for="log-retention">Log retention</label>
+              <p class="knob__hint">
+                How long a finished run's raw log folder is kept before it is pruned. Pruning
+                happens after every run and at app start. The runs list itself is never deleted.
+                1–3650 days, default 30 days.
+              </p>
+            </div>
+            <div class="knob__input">
+              <input
+                id="log-retention"
+                name="log-retention"
+                class="field__input"
+                type="number"
+                min="1"
+                max="3650"
+                autocomplete="off"
+                value={retention}
+                oninput={(e) => (retention = Number((e.target as HTMLInputElement).value))}
+              />
+              <span class="knob__unit">days</span>
+            </div>
+          </article>
+
+          <article class="knob">
+            <div class="knob__body">
+              <label class="knob__label" for="launch-concurrency">Launch concurrency</label>
+              <p class="knob__hint">
+                How many Quick Launch apps may start at once before the rest queue. Lower is more
+                sequential and gentle on the system; higher is more parallel and snappier but
+                heavier. 1–50 apps, default 8.
+              </p>
+            </div>
+            <div class="knob__input">
+              <input
+                id="launch-concurrency"
+                name="launch-concurrency"
+                class="field__input"
+                type="number"
+                min="1"
+                max="50"
+                autocomplete="off"
+                value={launchConcurrency}
+                oninput={(e) => (launchConcurrency = Number((e.target as HTMLInputElement).value))}
+              />
+              <span class="knob__unit">apps</span>
+            </div>
+          </article>
+        </div>
+      </div>
 
       <div class="form__actions">
         <Button kind="submit" disabled={saving}>
@@ -935,6 +1040,22 @@
     border-radius: var(--radius);
     background: var(--bg-surface);
     padding: var(--space-4);
+  }
+
+  .dock-advanced {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .advanced__body {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+
+  .advanced__body[hidden] {
+    display: none;
   }
 
   .per-monitor {

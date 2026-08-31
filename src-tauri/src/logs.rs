@@ -628,6 +628,8 @@ mod tests {
                 launch_groups: settings::DEFAULT_GROUPS_FEATURE.to_string(),
                 action_groups: settings::DEFAULT_GROUPS_FEATURE.to_string(),
                 clip_groups: settings::DEFAULT_GROUPS_FEATURE.to_string(),
+                reveal_dwell_ms: settings::DEFAULT_REVEAL_DWELL_MS,
+                reveal_sensitivity_px: settings::DEFAULT_REVEAL_SENSITIVITY_PX,
             },
         )
         .unwrap();

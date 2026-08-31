@@ -3,7 +3,7 @@ name = "sprout"
 # App version. Single source of truth: this file — tauri.conf.json omits
 # `version` and Tauri v2 auto-inherits it from here into the exe metadata,
 # the window, and the installer. Never restate it elsewhere.
-version = "0.7.1"
+version = "0.7.2"
 description = "Preset-driven Windows software-installation desktop app"
 authors = ["Sprout contributors"]
 edition = "2021"

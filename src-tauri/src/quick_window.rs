@@ -77,8 +77,8 @@ use windows_sys::Win32::Media::{timeBeginPeriod, timeEndPeriod};
 use crate::{
     appbar, db, settings,
     constants::window::{
-        AUTOHIDE_ANIM_POLL_MS, AUTOHIDE_POLL_MS, AUTOHIDE_SLIDE_MS, DOCK_WIDTH,
-        REVEAL_DWELL_MS, REVEAL_SENSITIVITY_PX, WINDOW_HEIGHT, WINDOW_WIDTH,
+        AUTOHIDE_ANIM_POLL_MS, AUTOHIDE_POLL_MS, AUTOHIDE_SLIDE_MS, DOCK_WIDTH, WINDOW_HEIGHT,
+        WINDOW_WIDTH,
     },
     AppState,
 };
@@ -1343,6 +1343,25 @@ fn autohide_tick(
                     false
                 } else {
                     let now_ms = boot.elapsed().as_millis() as u64;
+                    // Ticket 113: honor the persisted reveal tuning — read
+                    // dwell/sensitivity from Settings on every tick so a
+                    // changed knob takes effect without restart. Falls back
+                    // to the shipped constants when the DB is unavailable
+                    // (the same values Settings defaults to).
+                    let (sensitivity, dwell) = {
+                        let fallback_sens = crate::constants::window::REVEAL_SENSITIVITY_PX;
+                        let fallback_dwell = crate::constants::window::REVEAL_DWELL_MS;
+                        match app.try_state::<crate::AppState>() {
+                            Some(state) => match state.db.lock() {
+                                Ok(conn) => {
+                                    let s = crate::settings::load(&conn);
+                                    (s.reveal_sensitivity_px, s.reveal_dwell_ms)
+                                }
+                                Err(_) => (fallback_sens, fallback_dwell),
+                            },
+                            None => (fallback_sens, fallback_dwell),
+                        }
+                    };
                     let (new_state, should_show) = appbar::reveal_gate_step(
                         std::mem::take(reveal_gate),
                         x,
@@ -1350,8 +1369,8 @@ fn autohide_tick(
                         now_ms,
                         full,
                         edge_u32,
-                        REVEAL_SENSITIVITY_PX,
-                        REVEAL_DWELL_MS,
+                        sensitivity,
+                        dwell,
                     );
                     *reveal_gate = new_state;
                     should_show

@@ -64,6 +64,16 @@ pub const DEFAULT_AUTOSTART: &str = "on";
 /// Every collection's Groups feature is opt-in (ticket 89, research 0006
 /// patterns 2–3): the lists stay flat until the user turns grouping on.
 pub const DEFAULT_GROUPS_FEATURE: &str = "off";
+/// Reveal gate tuning (ticket 113): dwell and sensitivity default to the
+/// shipped gate constants (single size source via `constants::window`).
+pub const DEFAULT_REVEAL_DWELL_MS: u64 = crate::constants::window::REVEAL_DWELL_MS;
+pub const DEFAULT_REVEAL_SENSITIVITY_PX: i32 = crate::constants::window::REVEAL_SENSITIVITY_PX;
+/// Sane ranges for the reveal knobs (ticket 113): dwell 0–1000 ms (snappy to
+/// deliberate hold), sensitivity 0–50 px (immediate to demanding push).
+pub const REVEAL_DWELL_MIN_MS: u64 = 0;
+pub const REVEAL_DWELL_MAX_MS: u64 = 1000;
+pub const REVEAL_SENSITIVITY_MIN_PX: i32 = 0;
+pub const REVEAL_SENSITIVITY_MAX_PX: i32 = 50;
 
 const KEY_TIMEOUT: &str = "settings.timeout_minutes";
 const KEY_RETENTION: &str = "settings.log_retention_days";
@@ -77,6 +87,8 @@ const KEY_DOCK_MODE: &str = "dock.mode";
 const KEY_DOCK_EDGE: &str = "dock.edge";
 const KEY_DOCK_STATE: &str = "dock.state";
 const KEY_AUTOSTART: &str = "settings.autostart";
+const KEY_REVEAL_DWELL_MS: &str = "dock.reveal_dwell_ms";
+const KEY_REVEAL_SENSITIVITY_PX: &str = "dock.reveal_sensitivity_px";
 
 /// The persisted knobs. `u32` fields keep the frontend's number inputs safe;
 /// validation lives in [`Settings::validate`]. `install_dir` is empty when
@@ -114,6 +126,14 @@ pub struct Settings {
     pub action_groups: String,
     /// Whether the Quick Clips page offers its Groups feature (ticket 89).
     pub clip_groups: String,
+    /// Reveal dwell in milliseconds (ticket 113): how long the cursor must
+    /// stay inside the sliver band after accumulating sufficient toward-edge
+    /// travel before the dock reveals. 0 is immediate.
+    pub reveal_dwell_ms: u64,
+    /// Reveal sensitivity threshold in physical pixels (ticket 113):
+    /// accumulated toward-edge motion inside the sliver must exceed this before
+    /// the dwell starts. 0 needs no push.
+    pub reveal_sensitivity_px: i32,
 }
 
 impl Default for Settings {
@@ -131,6 +151,8 @@ impl Default for Settings {
             launch_groups: DEFAULT_GROUPS_FEATURE.to_string(),
             action_groups: DEFAULT_GROUPS_FEATURE.to_string(),
             clip_groups: DEFAULT_GROUPS_FEATURE.to_string(),
+            reveal_dwell_ms: DEFAULT_REVEAL_DWELL_MS,
+            reveal_sensitivity_px: DEFAULT_REVEAL_SENSITIVITY_PX,
         }
     }
 }
@@ -203,6 +225,42 @@ pub fn validate_groups_feature(value: &str) -> std::result::Result<(), String> {
     }
 }
 
+/// Validates the reveal dwell (ticket 113): 0–1000 ms inclusive.
+pub fn validate_reveal_dwell_ms(value: u64) -> std::result::Result<(), String> {
+    if (REVEAL_DWELL_MIN_MS..=REVEAL_DWELL_MAX_MS).contains(&value) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Reveal delay must be between {REVEAL_DWELL_MIN_MS} and {REVEAL_DWELL_MAX_MS} ms"
+        ))
+    }
+}
+
+/// Validates the reveal sensitivity threshold (ticket 113): 0–50 px inclusive.
+pub fn validate_reveal_sensitivity_px(value: i32) -> std::result::Result<(), String> {
+    if (REVEAL_SENSITIVITY_MIN_PX..=REVEAL_SENSITIVITY_MAX_PX).contains(&value) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Reveal sensitivity must be between {REVEAL_SENSITIVITY_MIN_PX} and {REVEAL_SENSITIVITY_MAX_PX} px"
+        ))
+    }
+}
+
+/// Clamps a stored dwell value to the sane range (ticket 113): broken values
+/// become the default — the same shape `load` uses — while valid values
+/// pass through unchanged. Used by the frontend's explicit clamp before save.
+#[allow(dead_code)]
+pub fn clamp_reveal_dwell_ms(value: u64) -> u64 {
+    value.clamp(REVEAL_DWELL_MIN_MS, REVEAL_DWELL_MAX_MS)
+}
+
+/// Clamps a stored sensitivity value to the sane range (ticket 113).
+#[allow(dead_code)]
+pub fn clamp_reveal_sensitivity_px(value: i32) -> i32 {
+    value.clamp(REVEAL_SENSITIVITY_MIN_PX, REVEAL_SENSITIVITY_MAX_PX)
+}
+
 impl Settings {
     /// Rejects values that would break a run or empty the log archive.
     /// Timeouts must be at least 1 minute and at most a day; retention at
@@ -228,6 +286,8 @@ impl Settings {
         validate_groups_feature(&self.launch_groups)?;
         validate_groups_feature(&self.action_groups)?;
         validate_groups_feature(&self.clip_groups)?;
+        validate_reveal_dwell_ms(self.reveal_dwell_ms)?;
+        validate_reveal_sensitivity_px(self.reveal_sensitivity_px)?;
         Ok(())
     }
 }
@@ -246,6 +306,12 @@ pub fn load(conn: &Connection) -> Settings {
         .ok()
     }
     fn number(conn: &Connection, key: &str) -> Option<u32> {
+        raw(conn, key).and_then(|value| value.parse().ok())
+    }
+    fn number_u64(conn: &Connection, key: &str) -> Option<u64> {
+        raw(conn, key).and_then(|value| value.parse().ok())
+    }
+    fn number_i32(conn: &Connection, key: &str) -> Option<i32> {
         raw(conn, key).and_then(|value| value.parse().ok())
     }
     fn validated(
@@ -279,6 +345,12 @@ pub fn load(conn: &Connection) -> Settings {
             .unwrap_or_else(|| DEFAULT_GROUPS_FEATURE.to_string()),
         clip_groups: validated(conn, KEY_CLIP_GROUPS, validate_groups_feature)
             .unwrap_or_else(|| DEFAULT_GROUPS_FEATURE.to_string()),
+        reveal_dwell_ms: number_u64(conn, KEY_REVEAL_DWELL_MS)
+            .filter(|v| (REVEAL_DWELL_MIN_MS..=REVEAL_DWELL_MAX_MS).contains(v))
+            .unwrap_or(DEFAULT_REVEAL_DWELL_MS),
+        reveal_sensitivity_px: number_i32(conn, KEY_REVEAL_SENSITIVITY_PX)
+            .filter(|v| (REVEAL_SENSITIVITY_MIN_PX..=REVEAL_SENSITIVITY_MAX_PX).contains(v))
+            .unwrap_or(DEFAULT_REVEAL_SENSITIVITY_PX),
     }
 }
 
@@ -302,6 +374,9 @@ pub fn save(conn: &Connection, settings: &Settings) -> std::result::Result<(), S
     upsert_meta(&tx, KEY_LAUNCH_GROUPS, &settings.launch_groups).map_err(|e| e.to_string())?;
     upsert_meta(&tx, KEY_ACTION_GROUPS, &settings.action_groups).map_err(|e| e.to_string())?;
     upsert_meta(&tx, KEY_CLIP_GROUPS, &settings.clip_groups).map_err(|e| e.to_string())?;
+    upsert_meta(&tx, KEY_REVEAL_DWELL_MS, &settings.reveal_dwell_ms.to_string()).map_err(|e| e.to_string())?;
+    upsert_meta(&tx, KEY_REVEAL_SENSITIVITY_PX, &settings.reveal_sensitivity_px.to_string())
+        .map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())
 }
 
@@ -409,6 +484,8 @@ mod tests {
             launch_groups: "on".to_string(),
             action_groups: "off".to_string(),
             clip_groups: "on".to_string(),
+            reveal_dwell_ms: 350,
+            reveal_sensitivity_px: 20,
         };
         {
             let conn = crate::db::init_at(&dir).unwrap();
@@ -693,9 +770,94 @@ mod tests {
             launch_groups: DEFAULT_GROUPS_FEATURE.to_string(),
             action_groups: DEFAULT_GROUPS_FEATURE.to_string(),
             clip_groups: DEFAULT_GROUPS_FEATURE.to_string(),
+            reveal_dwell_ms: DEFAULT_REVEAL_DWELL_MS,
+            reveal_sensitivity_px: DEFAULT_REVEAL_SENSITIVITY_PX,
         };
         assert!(save(&conn, &bad).is_err());
         // Nothing was persisted.
         assert_eq!(load(&conn), Settings::default());
+    }
+
+    #[test]
+    fn reveal_defaults_equal_shipped_gate_constants() {
+        // Ticket 113: defaults must equal the shipped gate constants (single
+        // size source); changing a constant updates the default automatically.
+        assert_eq!(DEFAULT_REVEAL_DWELL_MS, crate::constants::window::REVEAL_DWELL_MS);
+        assert_eq!(
+            DEFAULT_REVEAL_SENSITIVITY_PX,
+            crate::constants::window::REVEAL_SENSITIVITY_PX
+        );
+        let d = Settings::default();
+        assert_eq!(d.reveal_dwell_ms, DEFAULT_REVEAL_DWELL_MS);
+        assert_eq!(d.reveal_sensitivity_px, DEFAULT_REVEAL_SENSITIVITY_PX);
+    }
+
+    #[test]
+    fn reveal_validation_and_clamp_cover_sane_ranges() {
+        // Valid boundaries inclusive
+        assert!(validate_reveal_dwell_ms(REVEAL_DWELL_MIN_MS).is_ok());
+        assert!(validate_reveal_dwell_ms(REVEAL_DWELL_MAX_MS).is_ok());
+        assert!(validate_reveal_dwell_ms(200).is_ok());
+        assert!(validate_reveal_dwell_ms(REVEAL_DWELL_MAX_MS + 1).is_err());
+        assert!(validate_reveal_sensitivity_px(REVEAL_SENSITIVITY_MIN_PX).is_ok());
+        assert!(validate_reveal_sensitivity_px(REVEAL_SENSITIVITY_MAX_PX).is_ok());
+        assert!(validate_reveal_sensitivity_px(12).is_ok());
+        assert!(validate_reveal_sensitivity_px(REVEAL_SENSITIVITY_MAX_PX + 1).is_err());
+        assert!(validate_reveal_sensitivity_px(REVEAL_SENSITIVITY_MIN_PX - 1).is_err());
+
+        // Clamp mirrors validation range
+        assert_eq!(clamp_reveal_dwell_ms(0), 0);
+        assert_eq!(clamp_reveal_dwell_ms(500), 500);
+        assert_eq!(clamp_reveal_dwell_ms(2000), REVEAL_DWELL_MAX_MS);
+        assert_eq!(clamp_reveal_dwell_ms(u64::MAX), REVEAL_DWELL_MAX_MS);
+        assert_eq!(clamp_reveal_sensitivity_px(-5), REVEAL_SENSITIVITY_MIN_PX);
+        assert_eq!(clamp_reveal_sensitivity_px(50), 50);
+        assert_eq!(clamp_reveal_sensitivity_px(99), REVEAL_SENSITIVITY_MAX_PX);
+
+        // Settings::validate honors the same ranges
+        let mut s = Settings::default();
+        s.reveal_dwell_ms = REVEAL_DWELL_MAX_MS + 1;
+        assert!(s.validate().is_err());
+        s.reveal_dwell_ms = REVEAL_DWELL_MAX_MS;
+        s.reveal_sensitivity_px = REVEAL_SENSITIVITY_MAX_PX + 1;
+        assert!(s.validate().is_err());
+        s.reveal_sensitivity_px = REVEAL_SENSITIVITY_MIN_PX;
+        assert!(s.validate().is_ok());
+    }
+
+    #[test]
+    fn invalid_stored_reveal_values_fall_back_to_defaults() {
+        let conn = conn();
+        // Broken values written by an older build or manual edit must never
+        // reach the driver — they read back as the defaults.
+        upsert_meta(&conn, KEY_REVEAL_DWELL_MS, "9999").unwrap();
+        upsert_meta(&conn, KEY_REVEAL_SENSITIVITY_PX, "-5").unwrap();
+        let loaded = load(&conn);
+        assert_eq!(loaded.reveal_dwell_ms, DEFAULT_REVEAL_DWELL_MS);
+        assert_eq!(loaded.reveal_sensitivity_px, DEFAULT_REVEAL_SENSITIVITY_PX);
+
+        // Unparseable also falls back
+        upsert_meta(&conn, KEY_REVEAL_DWELL_MS, "fast").unwrap();
+        upsert_meta(&conn, KEY_REVEAL_SENSITIVITY_PX, "high").unwrap();
+        let loaded = load(&conn);
+        assert_eq!(loaded.reveal_dwell_ms, DEFAULT_REVEAL_DWELL_MS);
+        assert_eq!(loaded.reveal_sensitivity_px, DEFAULT_REVEAL_SENSITIVITY_PX);
+    }
+
+    #[test]
+    fn reveal_settings_roundtrip() {
+        let dir = clean_dir();
+        let mut s = Settings::default();
+        s.reveal_dwell_ms = 450;
+        s.reveal_sensitivity_px = 25;
+        {
+            let conn = crate::db::init_at(&dir).unwrap();
+            save(&conn, &s).unwrap();
+            assert_eq!(load(&conn).reveal_dwell_ms, 450);
+            assert_eq!(load(&conn).reveal_sensitivity_px, 25);
+        }
+        let conn = crate::db::init_at(&dir).unwrap();
+        assert_eq!(load(&conn).reveal_dwell_ms, 450);
+        assert_eq!(load(&conn).reveal_sensitivity_px, 25);
     }
 }
