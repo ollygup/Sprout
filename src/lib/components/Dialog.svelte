@@ -10,6 +10,7 @@
     children,
     width = 460,
     focusTarget,
+    role,
   }: {
     open: boolean;
     title: string;
@@ -20,6 +21,8 @@
      *  dangerous button of a destructive confirm); defaults to the first
      *  focusable. */
     focusTarget?: string;
+    /** Alertdialog for the dirty-guard (ticket 116) — consequence-named actions. */
+    role?: "dialog" | "alertdialog";
   } = $props();
 
   let dialog: HTMLDialogElement | undefined = $state();
@@ -102,6 +105,7 @@
   <dialog
     bind:this={dialog}
     class="dialog"
+    role={role}
     aria-modal="true"
     aria-labelledby={titleId}
     style="width: {width}px; max-width: min(92vw, {width}px);"

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { beforeNavigate, goto } from "$app/navigation";
   import type { BackupCounts, DisplayInfo, Settings } from "$lib/types";
   import {
     exportBackup,
@@ -15,6 +16,8 @@
     updateSettings,
   } from "$lib/api";
   import { listen } from "@tauri-apps/api/event";
+  import { invoke } from "@tauri-apps/api/core";
+  import Dialog from "$lib/components/Dialog.svelte";
   import Button from "$lib/components/Button.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
@@ -86,6 +89,108 @@
   let displayModes = $state<Record<string, string>>({});
   let displayErrors = $state<Record<string, string>>({});
 
+  // Ticket 115: dirty snapshot — post-clamp comparison against the loaded values.
+  // Theme and autostart are immediate (tickets 31/75) and never dirty; per-monitor
+  // choices are deferred until Save and count as dirty.
+  let baseline = $state<{
+    timeout: number;
+    retention: number;
+    installDir: string;
+    launchConcurrency: number;
+    dockMode: string;
+    dockEdge: string;
+    dockState: string;
+    revealDwellMs: number;
+    revealSensitivityPx: number;
+  } | null>(null);
+  let baselineDisplayEdges = $state<Record<string, string>>({});
+  let baselineDisplayModes = $state<Record<string, string>>({});
+
+  function clampTimeout(v: number): number {
+    return Math.max(1, Math.floor(v) || 1);
+  }
+  function clampRetention(v: number): number {
+    return Math.max(1, Math.floor(v) || 1);
+  }
+  function clampConcurrency(v: number): number {
+    return Math.min(50, Math.max(1, Math.floor(v) || 1));
+  }
+  function clampDwell(v: number): number {
+    return Math.min(1000, Math.max(0, Math.floor(v) || 0));
+  }
+  function clampSens(v: number): number {
+    return Math.min(50, Math.max(0, Math.floor(v) || 0));
+  }
+
+  const isDirty = $derived.by(() => {
+    if (!settings || !baseline) return false;
+    if (clampTimeout(timeout) !== baseline.timeout) return true;
+    if (clampRetention(retention) !== baseline.retention) return true;
+    if (installDir.trim() !== baseline.installDir) return true;
+    if (clampConcurrency(launchConcurrency) !== baseline.launchConcurrency) return true;
+    if (dockMode !== baseline.dockMode) return true;
+    if (dockEdge !== baseline.dockEdge) return true;
+    if (dockState !== baseline.dockState) return true;
+    if (clampDwell(revealDwellMs) !== baseline.revealDwellMs) return true;
+    if (clampSens(revealSensitivityPx) !== baseline.revealSensitivityPx) return true;
+    if (displays.length > 1) {
+      for (const d of displays) {
+        const cur = displayEdges[d.device_name];
+        const base = baselineDisplayEdges[d.device_name];
+        if (cur !== base) return true;
+      }
+      for (const d of displays) {
+        const cur = displayModes[d.device_name];
+        const base = baselineDisplayModes[d.device_name];
+        if (cur !== base) return true;
+      }
+    }
+    return false;
+  });
+
+  // Ticket 115: polite live region that announces appearance and disappearance
+  // without moving focus or scrolling — text + color, never color alone.
+  let dirtyLiveMessage = $state("");
+  $effect(() => {
+    if (isDirty) {
+      dirtyLiveMessage = "You have unsaved changes — Save or Discard.";
+    } else if (dirtyLiveMessage.startsWith("You have")) {
+      dirtyLiveMessage = "All changes saved or discarded.";
+      const t = setTimeout(() => {
+        dirtyLiveMessage = "";
+      }, 1500);
+      return () => clearTimeout(t);
+    }
+  });
+
+  // Ticket 116: guard leaving dirty Settings — rail navigation + window close
+  // share one three-way dialog. State mirrors research 0008: consequence-named
+  // actions, never Yes/No.
+  let guardOpen = $state(false);
+  let pendingNav: string | null = $state(null);
+  let pendingClose = $state(false);
+  let guardSaving = $state(false);
+
+  // Sync dirty flag to the backend so the Rust close handler can gate on it
+  // (dirty while the Settings route is alive; the flag is cleared on save,
+  // discard, or unmount). Fire-and-forget.
+  $effect(() => {
+    void invoke("set_settings_dirty", { dirty: isDirty }).catch(() => {});
+  });
+
+  beforeNavigate((nav) => {
+    if (!isDirty || guardOpen) return;
+    // willUnload is the window-close path — handled by the Rust emit
+    // (`settings-dirty-close-requested`) so the same dialog is shared.
+    if (nav.willUnload) return;
+    const dest = nav.to?.url.pathname;
+    if (!dest || dest === "/settings") return;
+    nav.cancel();
+    pendingNav = nav.to!.url.pathname + nav.to!.url.search + nav.to!.url.hash;
+    pendingClose = false;
+    guardOpen = true;
+  });
+
   // The manual update check's outcome (ticket 74): the found-version state
   // itself lives in the shared store, so the rail pill follows along.
   let checking = $state(false);
@@ -122,12 +227,23 @@
     const off = listen("displays-changed", () => {
       void loadDisplays();
     }).catch(() => () => {});
+    const offDirtyClose = listen("settings-dirty-close-requested", () => {
+      if (!isDirty || guardOpen) return;
+      pendingNav = null;
+      pendingClose = true;
+      guardOpen = true;
+    }).catch(() => () => {});
     // also re-load when app regains focus (display change may have happened while hidden)
     const onFocus = () => void loadDisplays();
     window.addEventListener("focus", onFocus);
     return () => {
       void off.then((fn) => fn());
+      void offDirtyClose.then((fn) => fn());
       window.removeEventListener("focus", onFocus);
+      // Clear the backend flag when leaving the Settings route while
+      // unmounting — a clean navigation or a destroy after Save/Discard
+      // also clears via the sync effect, but unmount is the final backstop.
+      void invoke("set_settings_dirty", { dirty: false }).catch(() => {});
     };
   });
 
@@ -154,6 +270,17 @@
       if (persisted === "system" || persisted === "light" || persisted === "dark") {
         if (persisted !== theme.mode) restoreTheme(persisted);
       }
+      baseline = {
+        timeout: loaded.default_timeout_minutes,
+        retention: loaded.log_retention_days,
+        installDir: loaded.install_dir.trim(),
+        launchConcurrency: loaded.launch_concurrency,
+        dockMode: loaded.dock_mode,
+        dockEdge: loaded.dock_edge,
+        dockState: loaded.dock_state,
+        revealDwellMs: loaded.reveal_dwell_ms ?? 200,
+        revealSensitivityPx: loaded.reveal_sensitivity_px ?? 12,
+      };
       loadFailed = false;
     } catch {
       loadFailed = true;
@@ -222,6 +349,8 @@
       }
       displayEdges = nextEdges;
       displayModes = nextModes;
+      baselineDisplayEdges = { ...nextEdges };
+      baselineDisplayModes = { ...nextModes };
     } catch {
       displays = [];
     }
@@ -279,6 +408,28 @@
     } catch {
       error = "Couldn't open the folder picker — type the path directly instead.";
     }
+  }
+
+  // Ticket 115: discard restores the loaded snapshot; the bar disappears
+  // because isDirty compares post-clamp — no scroll, no focus move.
+  function discard() {
+    if (!baseline) return;
+    timeout = baseline.timeout;
+    retention = baseline.retention;
+    installDir = baseline.installDir;
+    launchConcurrency = baseline.launchConcurrency;
+    dockMode = baseline.dockMode;
+    dockEdge = baseline.dockEdge;
+    dockState = baseline.dockState;
+    revealDwellMs = baseline.revealDwellMs;
+    revealSensitivityPx = baseline.revealSensitivityPx;
+    if (displays.length > 1) {
+      displayEdges = { ...baselineDisplayEdges };
+      displayModes = { ...baselineDisplayModes };
+    }
+    displayErrors = {};
+    saved = "";
+    error = "";
   }
 
   async function save() {
@@ -348,10 +499,96 @@
       launchConcurrency = Math.min(50, Math.max(1, Math.floor(launchConcurrency) || 1));
       revealDwellMs = Math.min(1000, Math.max(0, Math.floor(revealDwellMs) || 0));
       revealSensitivityPx = Math.min(50, Math.max(0, Math.floor(revealSensitivityPx) || 0));
+      // Ticket 115: after a successful persist, the snapshot becomes the saved
+      // values — post-clamp, trimmed — so the bar clears without a reload.
+      baseline = {
+        timeout,
+        retention,
+        installDir: installDir.trim(),
+        launchConcurrency,
+        dockMode,
+        dockEdge,
+        dockState,
+        revealDwellMs,
+        revealSensitivityPx,
+      };
+      if (!perMonitorError) {
+        baselineDisplayEdges = { ...displayEdges };
+        baselineDisplayModes = { ...displayModes };
+      }
+      // Keep the Settings object in sync so the next save's passthrough
+      // (launch_groups etc) stays truthful.
+      settings = {
+        ...settings,
+        default_timeout_minutes: timeout,
+        log_retention_days: retention,
+        install_dir: installDir.trim(),
+        launch_concurrency: launchConcurrency,
+        dock_mode: dockMode,
+        dock_edge: dockEdge,
+        dock_state: dockState,
+        theme: theme.mode,
+        autostart,
+        reveal_dwell_ms: revealDwellMs,
+        reveal_sensitivity_px: revealSensitivityPx,
+      };
     } catch {
       error = "Couldn't save the settings — try again. If it keeps failing, close Sprout and relaunch.";
     } finally {
       saving = false;
+    }
+  }
+
+  // Ticket 116: the three-way guard dialog — Save changes / Discard changes / Keep editing.
+  // Initial focus sits on Keep editing, Escape means Keep editing, focus
+  // returns to the triggering control on close (Dialog's lastFocus). Save
+  // completes the save then continues the navigation/close the user started.
+  function handleKeepEditing() {
+    if (guardSaving || saving) return;
+    guardOpen = false;
+    pendingNav = null;
+    pendingClose = false;
+    guardSaving = false;
+  }
+
+  function handleDiscardGuard() {
+    if (guardSaving || saving) return;
+    discard();
+    const nav = pendingNav;
+    const doClose = pendingClose;
+    guardOpen = false;
+    pendingNav = null;
+    pendingClose = false;
+    guardSaving = false;
+    if (doClose) {
+      void invoke("destroy_main_window").catch(() => {});
+    } else if (nav) {
+      void goto(nav);
+    }
+  }
+
+  async function handleSaveGuard() {
+    if (guardSaving) return;
+    guardSaving = true;
+    try {
+      await save();
+      if (isDirty || error) {
+        guardSaving = false;
+        return;
+      }
+      const nav = pendingNav;
+      const doClose = pendingClose;
+      guardOpen = false;
+      pendingNav = null;
+      pendingClose = false;
+      guardSaving = false;
+      if (doClose) {
+        void invoke("destroy_main_window").catch(() => {});
+      } else if (nav) {
+        await goto(nav);
+      }
+    } catch {
+      guardSaving = false;
     }
   }
 
@@ -481,7 +718,7 @@
   }
 </script>
 
-<section class="settings" aria-labelledby="settings-title">
+<section class="settings" class:settings--dirty={isDirty} aria-labelledby="settings-title">
   <PageHeader titleId="settings-title" title="Settings">
     {#snippet subtitle()}
       Defaults for authoring and housekeeping, persisted in the Library database and honored by
@@ -938,6 +1175,51 @@
         </Button>
       </div>
     </form>
+    {#if isDirty}
+      <!-- Ticket 115: fixed bottom bar — warning text + Save/Discard, pinned
+           regardless of scroll, until saved or reverted. Text + color, never
+           color alone; announce via polite live region (below). -->
+      <div class="dirty-bar" role="region" aria-label="Unsaved changes">
+        <p class="dirty-bar__text">
+          <span class="dirty-bar__dot" aria-hidden="true"></span>
+          Unsaved changes — Save or Discard
+        </p>
+        <div class="dirty-bar__actions">
+          <Button variant="secondary" onclick={discard} type="button" disabled={saving}
+            >Discard</Button
+          >
+          <Button onclick={save} disabled={saving}>{saving ? "Saving…" : "Save"}</Button>
+        </div>
+      </div>
+    {/if}
+    <!-- Polite live region: announces appearance/disappearance without moving focus or scrolling (0004 rule 5). -->
+    <p class="sr-only" aria-live="polite" aria-atomic="true">{dirtyLiveMessage}</p>
+    <!-- Ticket 116: guard leaving dirty Settings — rail + window close share one three-way alertdialog. -->
+    <Dialog
+      open={guardOpen}
+      title="Unsaved changes"
+      role="alertdialog"
+      width={480}
+      focusTarget="#guard-keep"
+      onclose={handleKeepEditing}
+    >
+      <div class="guard">
+        <p class="guard__body">
+          You have unsaved changes. Save them, discard them, or keep editing — no changes are saved until you say so.
+        </p>
+        <div class="guard__actions">
+          <Button variant="secondary" id="guard-keep" onclick={handleKeepEditing} disabled={guardSaving || saving}
+            >Keep editing</Button
+          >
+          <Button variant="secondary" onclick={handleDiscardGuard} disabled={guardSaving || saving}
+            >Discard changes</Button
+          >
+          <Button onclick={handleSaveGuard} disabled={guardSaving || saving}
+            >{guardSaving || saving ? "Saving…" : "Save changes"}</Button
+          >
+        </div>
+      </div>
+    </Dialog>
   {/if}
 </section>
 
@@ -1007,6 +1289,79 @@
   .settings {
     max-width: 680px;
     margin: 0 auto;
+  }
+
+  .settings--dirty {
+    /* Reserve space so the fixed bar never hides the last knob — the page
+       itself never scrolls to deliver the warning (ticket 115). */
+    padding-bottom: 72px;
+  }
+
+  /* Ticket 115: fixed bottom bar — warning text + at most Save + Discard,
+     pinned regardless of scroll, until saved or reverted. Text + color, never
+     color alone (warn tint + explicit text + dot). Reuses Button primitives
+     and tokens only; no ad-hoc colors. */
+  .dirty-bar {
+    position: fixed;
+    bottom: 0;
+    left: 200px;
+    right: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-4);
+    padding: var(--space-3) var(--space-5);
+    background: var(--bg-surface);
+    border-top: 1px solid var(--warn-tint-border);
+    box-shadow: var(--shadow-dialog);
+    z-index: 20;
+  }
+
+  .dirty-bar__text {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    letter-spacing: var(--tracking-mono);
+    color: var(--warn-text);
+  }
+
+  .dirty-bar__dot {
+    width: 8px;
+    height: 8px;
+    border-radius: var(--radius-pill);
+    background: var(--warn-text);
+    flex-shrink: 0;
+  }
+
+  .dirty-bar__actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-shrink: 0;
+  }
+
+  /* Ticket 116: guard dialog — alertdialog with consequence-named actions */
+  .guard {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-5);
+  }
+
+  .guard__body {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--text);
+    line-height: var(--leading-body);
+  }
+
+  .guard__actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--space-2);
   }
 
   .sifting {

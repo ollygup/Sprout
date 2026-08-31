@@ -64,6 +64,9 @@ pub struct AppState {
     /// run, for every action whose spawned process is still alive. Per-session
     /// only — the entries die with the boot, so nothing persists.
     pub running_actions: Mutex<HashMap<i64, quick_actions::RunningQuickAction>>,
+    /// Ticket 116: whether Settings is dirty (unsaved changes). Frontend syncs
+    /// via `set_settings_dirty`; the main-window close handler gates on it.
+    pub settings_dirty: Mutex<bool>,
 }
 
 fn lock<'a>(state: &'a State<'a, AppState>) -> Result<std::sync::MutexGuard<'a, Connection>, String> {
@@ -495,6 +498,27 @@ fn update_autostart(
     settings::save_autostart(&conn, if enabled { "on" } else { "off" })?;
     drop(conn);
     autostart::sync_registration(&app, enabled)
+}
+
+/// Ticket 116: the frontend's dirty flag for the Settings guard. While dirty,
+/// the main window's close request is held and surfaced as
+/// `settings-dirty-close-requested` instead of destroying the window.
+#[tauri::command]
+fn set_settings_dirty(state: State<'_, AppState>, dirty: bool) -> Result<(), String> {
+    let mut flag = state.settings_dirty.lock().map_err(|e| e.to_string())?;
+    *flag = dirty;
+    Ok(())
+}
+
+/// Ticket 116: destroy the main window after a dirty-guard Save/Discard
+/// confirmation — bypasses the close-requested guard (the caller already
+/// resolved dirtiness).
+#[tauri::command]
+fn destroy_main_window(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("main") {
+        window.destroy().map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 /// The Logs screen's picture of where logs live and how big they are — no
@@ -1788,8 +1812,20 @@ pub fn run() {
                 return;
             }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = window.destroy();
+                // Ticket 116: while Settings is dirty the main window's close
+                // is held and the frontend shows the save/discard/keep dialog.
+                let dirty = window
+                    .app_handle()
+                    .try_state::<AppState>()
+                    .and_then(|s| s.settings_dirty.lock().ok().map(|g| *g))
+                    .unwrap_or(false);
+                if dirty {
+                    api.prevent_close();
+                    let _ = window.app_handle().emit("settings-dirty-close-requested", ());
+                } else {
+                    api.prevent_close();
+                    let _ = window.destroy();
+                }
             }
         })
         .setup(move |app| {
@@ -1862,6 +1898,7 @@ pub fn run() {
             pending_import: Mutex::new(pending_import),
             dock: Mutex::new(None),
             running_actions: Mutex::new(HashMap::new()),
+            settings_dirty: Mutex::new(false),
         })
         .invoke_handler(tauri::generate_handler![
             list_products,
@@ -1942,7 +1979,9 @@ pub fn run() {
             get_display_dock_edge,
             set_display_dock_edge,
             get_display_dock_mode,
-            set_display_dock_mode
+            set_display_dock_mode,
+            set_settings_dirty,
+            destroy_main_window
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
