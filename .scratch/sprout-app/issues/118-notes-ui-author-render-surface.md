@@ -4,10 +4,10 @@
 
 **Blocked by:** 117 — Note storage + API for Quick Actions.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Read-only formatter renders paragraphs, `-`/`*` bullet lists, and `1.`-style ordered lists; everything else escapes verbatim; covered by a unit test suite
-- [ ] Edit dialog offers the Notes textarea with an authoring hint; clearing it removes every trace of the note (no ghost glyphs)
-- [ ] Row click opens the centered details dialog built on shared Dialog primitives (focus trap, Escape, focus restore) matching the Product-details grammar
-- [ ] The carrying-a-note glyph is content-gated: absent without a note, shown in main list and compact window/dock lists (glyph only there — no note content on constrained surfaces)
-- [ ] Rendering styled exclusively from existing tokens/typography; `svelte-check` clean
+- [x] Read-only formatter renders paragraphs, `-`/`*` bullet lists, and `1.`-style ordered lists; everything else escapes verbatim; covered by a unit test suite
+- [x] Edit dialog offers the Notes textarea with an authoring hint; clearing it removes every trace of the note (no ghost glyphs)
+- [x] Row click opens the centered details dialog built on shared Dialog primitives (focus trap, Escape, focus restore) matching the Product-details grammar
+- [x] The carrying-a-note glyph is content-gated: absent without a note, shown in main list and compact window/dock lists (glyph only there — no note content on constrained surfaces)
+- [x] Rendering styled exclusively from existing tokens/typography; `svelte-check` clean

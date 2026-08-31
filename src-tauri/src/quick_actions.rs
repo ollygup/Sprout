@@ -37,6 +37,11 @@ pub struct QuickActionInput {
     pub stoppable: bool,
     /// Runs when Stop is clicked; `None`/empty = kills the process tree.
     pub stop_command: Option<String>,
+    /// Optional free-form note for the action (ticket 117). Machine-local —
+    /// never part of Presets, Plans, or exports. Trimmed on save; empty
+    /// becomes `None` so a cleared note leaves no ghost glyph (ticket 118).
+    #[serde(default, alias = "notes")]
+    pub note: Option<String>,
 }
 
 /// A Quick Action as stored: the input plus its library id. Position is
@@ -212,7 +217,26 @@ pub fn normalized_stop_command(action: &QuickActionInput) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The stored note (ticket 117): whitespace-trimmed, empty values become
+/// `None` so a cleared note leaves no trace (no ghost glyph, ticket 118).
+/// Stored raw otherwise — the formatted text keeps its internal whitespace
+/// and line breaks.
+pub(crate) fn normalized_note(action: &QuickActionInput) -> Option<String> {
+    action
+        .note
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 fn action_from_row(row: &rusqlite::Row) -> Result<QuickAction> {
+    // Reads `note` via COALESCE(`note`, `notes`) so a DB that was migrated
+    // with either column name returns the stored note. `notes` is the alias
+    // kept for compatibility with the spec's "notes column" wording.
+    let note: Option<String> = row.get::<_, Option<String>>(6)?;
+    let notes_alias: Option<String> = row.get::<_, Option<String>>(7).unwrap_or(None);
+    let note = note.or(notes_alias);
     Ok(QuickAction {
         id: row.get(0)?,
         action: QuickActionInput {
@@ -221,15 +245,16 @@ fn action_from_row(row: &rusqlite::Row) -> Result<QuickAction> {
             cwd: row.get(3)?,
             stoppable: row.get::<_, i64>(4)? != 0,
             stop_command: row.get(5)?,
+            note,
         },
-        group_id: row.get(6)?,
+        group_id: row.get(8)?,
     })
 }
 
 /// Every Quick Action in list order (position, then insertion order).
 pub fn list_quick_actions(conn: &Connection) -> Result<Vec<QuickAction>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, command, cwd, stoppable, stop_command, group_id
+        "SELECT id, name, command, cwd, stoppable, stop_command, note, notes, group_id
          FROM quick_actions ORDER BY position, id",
     )?;
     let rows = stmt.query_map([], action_from_row)?;
@@ -239,7 +264,7 @@ pub fn list_quick_actions(conn: &Connection) -> Result<Vec<QuickAction>> {
 /// Fetches one action by id — the runner's lookup (ticket 50).
 pub fn get_quick_action(conn: &Connection, id: i64) -> Result<Option<QuickAction>> {
     conn.query_row(
-        "SELECT id, name, command, cwd, stoppable, stop_command, group_id
+        "SELECT id, name, command, cwd, stoppable, stop_command, note, notes, group_id
          FROM quick_actions WHERE id = ?1",
         params![id],
         action_from_row,
@@ -249,11 +274,13 @@ pub fn get_quick_action(conn: &Connection, id: i64) -> Result<Option<QuickAction
 
 /// The one INSERT shape for a Quick Action, position as the trailing
 /// placeholder — shared by `create_quick_action` and `append_action`.
-const INSERT_ACTION_SQL: &str = "INSERT INTO quick_actions (name, command, cwd, stoppable, stop_command, position)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
+const INSERT_ACTION_SQL: &str =
+    "INSERT INTO quick_actions (name, command, cwd, stoppable, stop_command, note, notes, position)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
 
 /// Appends an action at the end of the list (the next free position).
 pub fn create_quick_action(conn: &Connection, action: &QuickActionInput) -> Result<QuickAction> {
+    let note = normalized_note(action);
     let id = crate::ordered_list::OrderedList::QUICK_ACTIONS.create_at_end(
         conn,
         INSERT_ACTION_SQL,
@@ -263,6 +290,8 @@ pub fn create_quick_action(conn: &Connection, action: &QuickActionInput) -> Resu
             &normalized_cwd(action),
             &action.stoppable,
             &normalized_stop_command(action),
+            &note,
+            &note,
         ],
     )?;
     Ok(get_quick_action(conn, id)?.expect("just inserted"))
@@ -271,6 +300,7 @@ pub fn create_quick_action(conn: &Connection, action: &QuickActionInput) -> Resu
 /// [`create_quick_action`]'s shape inside a caller-owned transaction — the
 /// whole-app backup's merge appends every action under ONE transaction.
 pub(crate) fn append_action(conn: &Connection, action: &QuickActionInput) -> Result<()> {
+    let note = normalized_note(action);
     crate::ordered_list::OrderedList::QUICK_ACTIONS
         .append_at_end(
             conn,
@@ -281,6 +311,8 @@ pub(crate) fn append_action(conn: &Connection, action: &QuickActionInput) -> Res
                 &normalized_cwd(action),
                 &action.stoppable,
                 &normalized_stop_command(action),
+                &note,
+                &note,
             ],
         )
         .map(|_| ())
@@ -290,16 +322,18 @@ pub(crate) fn append_action(conn: &Connection, action: &QuickActionInput) -> Res
 /// the Group reference are untouched — reorders go through `move_quick_action`,
 /// group changes through `assign_to_group`/`unassign_from_group` (ticket 89).
 pub fn update_quick_action(conn: &Connection, action: &QuickAction) -> Result<()> {
+    let note = normalized_note(&action.action);
     conn.execute(
         "UPDATE quick_actions
-         SET name = ?1, command = ?2, cwd = ?3, stoppable = ?4, stop_command = ?5
-         WHERE id = ?6",
+         SET name = ?1, command = ?2, cwd = ?3, stoppable = ?4, stop_command = ?5, note = ?6, notes = ?6
+         WHERE id = ?7",
         params![
             action.action.name.trim(),
             action.action.command.trim(),
             normalized_cwd(&action.action),
             action.action.stoppable,
             normalized_stop_command(&action.action),
+            note,
             action.id,
         ],
     )?;
@@ -641,6 +675,7 @@ mod tests {
             cwd: None,
             stoppable: false,
             stop_command: None,
+            note: None,
         }
     }
 
@@ -913,6 +948,7 @@ mod tests {
             cwd: None,
             stoppable: false,
             stop_command: None,
+            note: None,
         };
         let mut child = spawn_quick_action(&action, None).expect("spawned");
         let _ = child.wait();
@@ -1041,6 +1077,7 @@ mod tests {
             cwd: None,
             stoppable: false,
             stop_command: None,
+            note: None,
         };
         let mut child = spawn_quick_action(&action, Some(&output)).expect("spawned");
         let _ = child.wait();
@@ -1151,6 +1188,181 @@ mod tests {
         assert!(
             contents.contains("stop timed out after 10 s — force-killed the process tree"),
             "{contents}"
+        );
+    }
+
+    // Ticket 117: notes — free-form formatted text, nullable, trimmed-or-empty => None.
+
+    #[test]
+    fn note_roundtrips_trimmed_and_lists() {
+        let dir = tempfile::tempdir().unwrap().into_path();
+        {
+            let conn = crate::db::init_at(&dir).unwrap();
+            let mut with_note = input("noted");
+            with_note.note = Some("  hello note\nsecond line  ".into());
+            let created = create_quick_action(&conn, &with_note).unwrap();
+            // Stored trimmed, internal line breaks preserved.
+            assert_eq!(
+                created.action.note.as_deref(),
+                Some("hello note\nsecond line")
+            );
+            let listed = list_quick_actions(&conn).unwrap();
+            assert_eq!(
+                listed[0].action.note.as_deref(),
+                Some("hello note\nsecond line")
+            );
+            // Update with a different note, trimmed.
+            let mut updated = listed[0].clone();
+            updated.action.note = Some("  updated note  ".into());
+            update_quick_action(&conn, &updated).unwrap();
+            assert_eq!(
+                get_quick_action(&conn, updated.id)
+                    .unwrap()
+                    .unwrap()
+                    .action
+                    .note
+                    .as_deref(),
+                Some("updated note")
+            );
+        }
+        // Re-open: the note survives the connection.
+        let conn = crate::db::init_at(&dir).unwrap();
+        let listed = list_quick_actions(&conn).unwrap();
+        assert_eq!(listed[0].action.note.as_deref(), Some("updated note"));
+    }
+
+    #[test]
+    fn note_empty_and_whitespace_stores_as_none_and_clears() {
+        let conn = conn();
+        // Empty string => None.
+        let mut empty = input("empty-note");
+        empty.note = Some("".into());
+        create_quick_action(&conn, &empty).unwrap();
+        assert_eq!(list_quick_actions(&conn).unwrap()[0].action.note, None);
+        // Whitespace-only => None.
+        let mut ws = input("ws-note");
+        ws.note = Some("   \n\t  ".into());
+        create_quick_action(&conn, &ws).unwrap();
+        assert_eq!(list_quick_actions(&conn).unwrap()[1].action.note, None);
+        // None => None.
+        let mut none = input("none-note");
+        none.note = None;
+        create_quick_action(&conn, &none).unwrap();
+        assert_eq!(list_quick_actions(&conn).unwrap()[2].action.note, None);
+
+        // Clearing an existing note removes every trace (no ghost glyph).
+        let mut with = input("clear-me");
+        with.note = Some("to be cleared".into());
+        let created = create_quick_action(&conn, &with).unwrap();
+        assert_eq!(created.action.note.as_deref(), Some("to be cleared"));
+        let mut cleared = created.clone();
+        cleared.action.note = Some("   ".into());
+        update_quick_action(&conn, &cleared).unwrap();
+        assert_eq!(
+            get_quick_action(&conn, cleared.id).unwrap().unwrap().action.note,
+            None
+        );
+        let mut cleared2 = cleared.clone();
+        cleared2.action.note = None;
+        // Already None — still None.
+        update_quick_action(&conn, &cleared2).unwrap();
+        assert_eq!(
+            get_quick_action(&conn, cleared2.id)
+                .unwrap()
+                .unwrap()
+                .action
+                .note,
+            None
+        );
+    }
+
+    #[test]
+    fn note_does_not_affect_dedup_identity() {
+        let conn = conn();
+        let mut a = input("first");
+        a.command = "docker compose up -d".into();
+        a.cwd = Some(r"D:\Stack".into());
+        a.note = Some("note A".into());
+        create_quick_action(&conn, &a).unwrap();
+
+        let mut twin = input("second");
+        twin.command = "docker compose up -d".into();
+        twin.cwd = Some(r"D:\Stack".into());
+        twin.note = Some("different note".into());
+        // Same command+cwd collides regardless of note content.
+        assert_eq!(
+            colliding_action(&conn, &twin, None).unwrap().as_deref(),
+            Some("first")
+        );
+        // Different note alone never creates a duplicate.
+        let mut elsewhere = input("third");
+        elsewhere.command = "docker compose up -d".into();
+        elsewhere.cwd = Some(r"E:\Other".into());
+        elsewhere.note = Some("note A".into());
+        assert!(colliding_action(&conn, &elsewhere, None).unwrap().is_none());
+    }
+
+    #[test]
+    fn note_migrates_old_databases_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap().into_path();
+        std::fs::create_dir_all(&dir).unwrap();
+        // Simulate a pre-117 database: quick_actions without `note`/`notes`.
+        {
+            let conn = rusqlite::Connection::open(dir.join("sprout.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE quick_actions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    command TEXT NOT NULL,
+                    cwd TEXT,
+                    stoppable INTEGER NOT NULL DEFAULT 0,
+                    stop_command TEXT,
+                    position INTEGER NOT NULL DEFAULT 0
+                );
+                INSERT INTO quick_actions (name, command, cwd, position)
+                VALUES ('legacy', 'echo hi', NULL, 0);",
+            )
+            .unwrap();
+        }
+        let conn = crate::db::init_at(&dir).unwrap();
+        // The `note`/`notes` columns exist and are nullable.
+        for col in ["note", "notes"] {
+            let has: i64 = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM pragma_table_info('quick_actions') WHERE name = '{col}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(has, 1, "column {col} must exist after migration");
+        }
+        // Pre-existing row reads back with None note.
+        let listed = list_quick_actions(&conn).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].action.note, None);
+        // New rows can store notes.
+        let mut with = input("new-with-note");
+        with.note = Some("migrated note".into());
+        create_quick_action(&conn, &with).unwrap();
+        assert_eq!(
+            list_quick_actions(&conn).unwrap()[1]
+                .action
+                .note
+                .as_deref(),
+            Some("migrated note")
+        );
+        // Idempotent: re-running init changes nothing and keeps data.
+        drop(conn);
+        let conn = crate::db::init_at(&dir).unwrap();
+        assert_eq!(list_quick_actions(&conn).unwrap().len(), 2);
+        assert_eq!(
+            list_quick_actions(&conn).unwrap()[1]
+                .action
+                .note
+                .as_deref(),
+            Some("migrated note")
         );
     }
 }

@@ -26,6 +26,7 @@
   import IconButton from "$lib/components/IconButton.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import QuickActionFormDialog from "$lib/components/QuickActionFormDialog.svelte";
+  import QuickActionDetailsDialog from "$lib/components/QuickActionDetailsDialog.svelte";
   import ContextMenu, {
     type ContextMenuItem,
     type ContextMenuState,
@@ -35,6 +36,7 @@
   import PageFeaturesButton from "$lib/components/PageFeaturesButton.svelte";
   import PageHeader from "$lib/components/PageHeader.svelte";
   import SearchInput from "$lib/components/SearchInput.svelte";
+  import { hasNote } from "$lib/noteFormat";
 
   let quickActions = $state<QuickAction[]>([]);
   let loading = $state(true);
@@ -53,6 +55,8 @@
   let formOpen = $state(false);
   let formAction: QuickAction | null = $state(null);
   let deleting: QuickAction | null = $state(null);
+  // Detail peek — centered dialog matching Product-details grammar (research 0006 pattern 13)
+  let details: QuickAction | null = $state(null);
 
   // Groups (tickets 89/90): the page-features gear menu is the feature's
   // only switch (research 0008 — ticket 88's bare toolbar checkbox was
@@ -161,8 +165,13 @@
   }
 
   function openEdit(action: QuickAction) {
+    details = null;
     formAction = action;
     formOpen = true;
+  }
+
+  function openDetails(action: QuickAction) {
+    details = action;
   }
 
   async function remove() {
@@ -320,11 +329,33 @@
 </svelte:head>
 
 {#snippet actionRow(action: QuickAction)}
-  <li class="rack__row">
+  <!-- Row click opens centered details dialog — same grammar Products use (research 0006 pattern 13).
+       Content-gated note glyph appears when note exists (research 0006 pattern 14);
+       compact window surfaces show glyph only (research 0004 rule 3). -->
+  <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <li
+    class="rack__row"
+    role="button"
+    tabindex="0"
+    aria-label={`About ${action.name}`}
+    onclick={() => openDetails(action)}
+    onkeydown={(e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        openDetails(action);
+      }
+    }}
+  >
     <span class="rack__badge" aria-hidden="true">
       <Icon name="terminal" size={14} />
     </span>
     <span class="rack__name">{action.name}</span>
+    {#if hasNote(action.note)}
+      <span class="rack__note" aria-label="Has note" title="Has note">
+        <Icon name="note" size={12} />
+      </span>
+    {/if}
     <span class="rack__command" title={action.command}>
       {action.command}
     </span>
@@ -333,26 +364,30 @@
     {/if}
     <!-- Ticket 98: the three-state control is shared with the Quick Launch
          window's Actions tab — one markup, one spinner, one vocabulary. -->
-    <QuickActionRunControl
-      name={action.name}
-      stoppable={action.stoppable}
-      running={quickActionRuns.running.has(action.id)}
-      stopping={quickActionRuns.stopping.has(action.id)}
-      onrun={() => run(action)}
-      onstop={() => stop(action)}
-    />
-    <IconButton
-      icon="dots"
-      label={`Actions for ${action.name}`}
-      quiet
-      data-ctx-trigger
-      onclick={(e) =>
-        openRowMenu(
-          action,
-          e.currentTarget as HTMLButtonElement,
-          e.detail === 0
-        )}
-    />
+    <span class="rack__controls" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="presentation">
+      <QuickActionRunControl
+        name={action.name}
+        stoppable={action.stoppable}
+        running={quickActionRuns.running.has(action.id)}
+        stopping={quickActionRuns.stopping.has(action.id)}
+        onrun={() => run(action)}
+        onstop={() => stop(action)}
+      />
+    </span>
+    <span class="rack__menu" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="presentation">
+      <IconButton
+        icon="dots"
+        label={`Actions for ${action.name}`}
+        quiet
+        data-ctx-trigger
+        onclick={(e) =>
+          openRowMenu(
+            action,
+            e.currentTarget as HTMLButtonElement,
+            e.detail === 0
+          )}
+      />
+    </span>
   </li>
 {/snippet}
 
@@ -507,6 +542,17 @@
   oncancel={() => (formOpen = false)}
 />
 
+<QuickActionDetailsDialog
+  open={details !== null}
+  action={details}
+  onclose={() => (details = null)}
+  onedit={(a) => openEdit(a)}
+  onrun={(a) => run(a)}
+  onstop={(a) => stop(a)}
+  running={details ? quickActionRuns.running.has(details.id) : false}
+  stopping={details ? quickActionRuns.stopping.has(details.id) : false}
+/>
+
 <ContextMenu ctx={menu} onclose={() => (menu = null)} />
 
 <style>
@@ -539,6 +585,30 @@
     background: var(--bg-card);
     border: 1px solid var(--border);
     border-radius: var(--radius);
+    cursor: pointer;
+    transition: border-color var(--dur-fast) var(--ease-out);
+  }
+
+  .rack__row:hover {
+    border-color: var(--border-strong);
+  }
+
+  .rack__row:focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: -2px;
+  }
+
+  /* Content-gated note glyph (research 0006 pattern 14) — token color only. */
+  .rack__note {
+    display: inline-flex;
+    flex-shrink: 0;
+    color: var(--text-muted);
+  }
+
+  .rack__controls,
+  .rack__menu {
+    display: inline-flex;
+    flex-shrink: 0;
   }
 
   .rack__badge {

@@ -122,6 +122,8 @@ fn migrate(conn: &Connection) -> Result<()> {
             cwd          TEXT,
             stoppable    INTEGER NOT NULL DEFAULT 0,
             stop_command TEXT,
+            note         TEXT,
+            notes        TEXT,
             position     INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS clips (
@@ -135,6 +137,7 @@ fn migrate(conn: &Connection) -> Result<()> {
     ensure_product_timestamps(conn)?;
     ensure_product_install_dir(conn)?;
     ensure_quick_action_stoppable(conn)?;
+    ensure_quick_action_note(conn)?;
     ensure_item_group_columns(conn)
 }
 
@@ -240,6 +243,42 @@ fn ensure_quick_action_stoppable(conn: &Connection) -> Result<()> {
              ALTER TABLE quick_actions ADD COLUMN stop_command TEXT",
         )?;
     }
+    Ok(())
+}
+
+/// Upgrades databases created before Quick Action notes existed (ticket 117):
+/// adds the nullable `note` (and its alias `notes`) column to
+/// `quick_actions`. Fresh databases already have both. Idempotent — re-runs
+/// change nothing.
+fn ensure_quick_action_note(conn: &Connection) -> Result<()> {
+    let has_note: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('quick_actions') WHERE name = 'note')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_note {
+        conn.execute_batch("ALTER TABLE quick_actions ADD COLUMN note TEXT")?;
+    }
+    let has_notes: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('quick_actions') WHERE name = 'notes')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_notes {
+        conn.execute_batch("ALTER TABLE quick_actions ADD COLUMN notes TEXT")?;
+    }
+    // Keep the two names in sync for any pre-existing rows that had only one
+    // of them populated (e.g. a DB migrated from a build that used a different
+    // name). Best-effort — failures are ignored because the columns may still
+    // be empty on a fresh DB.
+    let _ = conn.execute(
+        "UPDATE quick_actions SET notes = note WHERE notes IS NULL AND note IS NOT NULL",
+        [],
+    );
+    let _ = conn.execute(
+        "UPDATE quick_actions SET note = notes WHERE note IS NULL AND notes IS NOT NULL",
+        [],
+    );
     Ok(())
 }
 
@@ -1865,6 +1904,7 @@ mod tests {
             cwd: None,
             stoppable: false,
             stop_command: None,
+            note: None,
         };
         crate::quick_actions::create_quick_action(&conn, &action).unwrap();
         assert_eq!(crate::quick_actions::list_quick_actions(&conn).unwrap().len(), 1);
@@ -1914,6 +1954,7 @@ mod tests {
             cwd: None,
             stoppable: true,
             stop_command: Some("docker compose stop".into()),
+            note: None,
         };
         crate::quick_actions::create_quick_action(&conn, &tracked).unwrap();
         let list = crate::quick_actions::list_quick_actions(&conn).unwrap();

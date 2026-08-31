@@ -23,6 +23,7 @@
   let name = $state("");
   let command = $state("");
   let cwd = $state("");
+  let note = $state("");
   let stoppable = $state(false);
   let stopCommand = $state("");
   let saving = $state(false);
@@ -36,6 +37,7 @@
       name = action?.name ?? "";
       command = action?.command ?? "";
       cwd = action?.cwd ?? "";
+      note = action?.note ?? "";
       stoppable = action?.stoppable ?? false;
       stopCommand = action?.stop_command ?? "";
       saving = false;
@@ -72,6 +74,7 @@
     saving = true;
     error = "";
     try {
+      const trimmedNote = note.trim() || null;
       if (editing && action) {
         await updateQuickAction({
           ...action,
@@ -80,6 +83,7 @@
           cwd: cwd.trim() || null,
           stoppable,
           stop_command: stoppable ? stopCommand.trim() || null : null,
+          note: trimmedNote,
         });
         await onsave(`${name.trim()} saved.`);
       } else {
@@ -89,6 +93,7 @@
           cwd: cwd.trim() || null,
           stoppable,
           stop_command: stoppable ? stopCommand.trim() || null : null,
+          note: trimmedNote,
         });
         await onsave(`${name.trim()} added to Quick Actions.`);
       }
@@ -160,6 +165,26 @@
         <p>Working directory; empty = the app's folder.</p>
       {/snippet}
     </TextInput>
+
+    <div class="field">
+      <div class="field__label-row">
+        <label class="field__label" for="qa-note">Notes</label>
+        <InfoTip label="How notes work">
+          <p>Optional text for whatever you want to record about this action.</p>
+        </InfoTip>
+      </div>
+      <textarea
+        id="qa-note"
+        class="field__cmd field__cmd--note"
+        rows="4"
+        placeholder="Optional — e.g. when to use it, caveats…"
+        autocomplete="off"
+        spellcheck="true"
+        value={note}
+        oninput={(e) => (note = (e.target as HTMLTextAreaElement).value)}
+      ></textarea>
+      <p class="field__hint">Plain text — use - or * for bullets, 1. for numbered steps. Blank line starts a new paragraph.</p>
+    </div>
 
     <label class="stoppable">
       <input
@@ -286,6 +311,18 @@
   .field__cmd::placeholder {
     color: var(--text-muted);
     opacity: 0.75;
+  }
+
+  .field__cmd--note {
+    min-height: 88px;
+    font-family: var(--font-body);
+  }
+
+  .field__hint {
+    margin: 0;
+    font-size: var(--text-xs);
+    line-height: var(--leading-tight);
+    color: var(--text-muted);
   }
 
   .stoppable {

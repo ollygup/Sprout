@@ -30,6 +30,7 @@
   } from "$lib/quickActionRuns.svelte";
   import QuickActionRunControl from "$lib/components/QuickActionRunControl.svelte";
   import { clipTitle, launchReportSummary } from "$lib/format";
+  import { hasNote } from "$lib/noteFormat";
   import { appIcons, lazyIcon } from "$lib/lazyIcon.svelte";
   import { createGroupCollapse } from "$lib/groupCollapse.svelte";
   import type { QuickLaunchDockState } from "$lib/types";
@@ -560,6 +561,12 @@
   {#snippet actionRow(action: QuickAction)}
     <li class="qlw__action">
       <span class="qlw__action-name">{action.name}</span>
+      {#if hasNote(action.note)}
+        <!-- Content-gated note glyph only — no note content on constrained surfaces (research 0004 rule 3, 0006 pattern 14) -->
+        <span class="qlw__note" aria-label="Has note" title="Has note">
+          <Icon name="note" size={12} />
+        </span>
+      {/if}
       <!-- Ticket 93: hover/focus tooltip — the bold name plus the command,
            truncated to one line. The tip stays in the DOM (opacity only), so
            `aria-describedby` below gives keyboard and screen-reader users
@@ -1016,6 +1023,13 @@
     font-size: var(--text-sm);
     font-weight: 600;
     color: var(--text);
+  }
+
+  /* Content-gated note glyph — token color only (research 0006 pattern 14) */
+  .qlw__note {
+    display: inline-flex;
+    flex-shrink: 0;
+    color: var(--text-muted);
   }
 
   /* Ticket 79: the read-only Quick Clips rows — whole-row click-to-copy,

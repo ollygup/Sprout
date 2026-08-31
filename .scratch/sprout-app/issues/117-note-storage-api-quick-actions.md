@@ -6,8 +6,8 @@
 
 **Status:** ready-for-agent
 
-- [ ] Idempotent migration adds the nullable notes column to Quick Actions storage
-- [ ] The edit payload extends with the note; create/update persist it trimmed-or-empty consistently; list returns it
-- [ ] Whole-app backup merge preserves notes alongside the action's other fields
-- [ ] Notes never appear in Preset authoring, Plan payloads, or Preset exports
-- [ ] Cargo tests cover CRUD round-trip, empty/null semantics, and backup passthrough (temp-database precedent)
+- [x] Idempotent migration adds the nullable notes column to Quick Actions storage
+- [x] The edit payload extends with the note; create/update persist it trimmed-or-empty consistently; list returns it
+- [x] Whole-app backup merge preserves notes alongside the action's other fields
+- [x] Notes never appear in Preset authoring, Plan payloads, or Preset exports
+- [x] Cargo tests cover CRUD round-trip, empty/null semantics, and backup passthrough (temp-database precedent)

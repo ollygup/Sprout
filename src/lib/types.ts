@@ -384,7 +384,9 @@ export interface VirtualDesktop {
 /** The editable shape of a Quick Action (ticket 50): a named PowerShell
  *  command with an optional working directory, run from the Quick Launch
  *  window's Quick Actions tab. Machine-local — never part of Presets, Plan,
- *  Run, or exports. */
+ *  Run, or exports. Ticket 117 adds an optional free-form note — stored raw,
+ *  trimmed-or-empty => null, carried through create/update/list and the
+ *  whole-app backup. */
 export interface QuickActionInput {
   name: string;
   /** The PowerShell script, multi-line allowed. */
@@ -396,6 +398,9 @@ export interface QuickActionInput {
   stoppable: boolean;
   /** Runs when Stop is clicked; null/empty = kills the process tree. */
   stop_command: string | null;
+  /** Optional free-form note (ticket 117): formatted text for whatever the
+   *  writer wants. Trimmed on save; empty/whitespace-only => null. */
+  note?: string | null;
 }
 
 /** A Quick Action as stored: the input plus its library id. `group_id` is

@@ -458,6 +458,7 @@ mod tests {
             cwd: None,
             stoppable: false,
             stop_command: None,
+            note: None,
         }
     }
 

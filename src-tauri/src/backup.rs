@@ -516,6 +516,7 @@ mod tests {
             cwd: None,
             stoppable: false,
             stop_command: None,
+            note: None,
         }
     }
 
@@ -1077,5 +1078,64 @@ mod tests {
             db::list_products(&target, None).unwrap().is_empty(),
             "validation failures must leave the library untouched"
         );
+    }
+
+    #[test]
+    fn quick_action_notes_survive_backup_roundtrip_and_alias() {
+        // Ticket 117: notes are machine-local backup data — exported, imported,
+        // and preserved alongside the action's other fields. Both `note` and its
+        // alias `notes` deserialize.
+        let source = conn();
+        let mut with_note = action("Noted");
+        with_note.note = Some("  hello note\nsecond line  ".into());
+        quick_actions::create_quick_action(&source, &with_note).unwrap();
+        let mut plain = action("Plain");
+        plain.command = "echo plain".into();
+        plain.note = None;
+        quick_actions::create_quick_action(&source, &plain).unwrap();
+
+        let dir = tempfile::tempdir().unwrap().into_path();
+        let file = write_file(&dir, "backup.json", "");
+        export_backup(&source, &file, &BackupSelection::all()).unwrap();
+
+        // The file carries the trimmed note.
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+        let actions = on_disk["quick_actions"].as_array().unwrap();
+        assert_eq!(actions.len(), 2);
+        // The trimmed note is stored.
+        assert_eq!(actions[0]["note"], "hello note\nsecond line");
+        // Alias `notes` is accepted on import — a hand-edited backup using the
+        // plural key must still restore.
+        let mut doc: BackupDocument =
+            serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+        doc.quick_actions[1].note = Some("via alias".into());
+        let mut value = serde_json::to_value(&doc).unwrap();
+        // Rewrite the second action to use `notes` instead of `note`.
+        if let Some(arr) = value.get_mut("quick_actions").and_then(|v| v.as_array_mut()) {
+            if let Some(obj) = arr[1].as_object_mut() {
+                let note = obj.remove("note").unwrap();
+                obj.insert("notes".into(), note);
+            }
+        }
+        let alias_file = write_file(&dir, "alias.json", &value.to_string());
+        let target = conn();
+        import_backup(&target, &alias_file).unwrap();
+        let listed = quick_actions::list_quick_actions(&target).unwrap();
+        assert_eq!(listed.len(), 2);
+        // First action kept its trimmed note; second came via `notes` alias.
+        let first = listed.iter().find(|a| a.action.name == "Noted").unwrap();
+        assert_eq!(first.action.note.as_deref(), Some("hello note\nsecond line"));
+        let second = listed.iter().find(|a| a.action.name == "Plain").unwrap();
+        assert_eq!(second.action.note.as_deref(), Some("via alias"));
+
+        // Re-export and re-import is idempotent for notes: empty notes stay None.
+        let target2 = conn();
+        import_backup(&target2, &file).unwrap();
+        let listed2 = quick_actions::list_quick_actions(&target2).unwrap();
+        let plain2 = listed2.iter().find(|a| a.action.name == "Plain").unwrap();
+        assert_eq!(plain2.action.note, None);
+        let noted2 = listed2.iter().find(|a| a.action.name == "Noted").unwrap();
+        assert_eq!(noted2.action.note.as_deref(), Some("hello note\nsecond line"));
     }
 }
