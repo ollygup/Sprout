@@ -110,8 +110,10 @@
   const anyIncluded = $derived(Object.values(include).some(Boolean));
 
   onMount(() => {
-    load();
-    void loadDisplays();
+    void (async () => {
+      await load();
+      await loadDisplays();
+    })();
     const off = listen("displays-changed", () => {
       void loadDisplays();
     }).catch(() => () => {});
@@ -154,10 +156,48 @@
   async function loadDisplays() {
     try {
       const list = await listDisplays();
-      displays = list;
+      // DEV-only preview for flatten without 2 physical displays (A).
+      // `?preview-per-monitor=1` forces 2 mocked displays so you can see the
+      // flattened per-monitor knobs on a single monitor. Tree-shaken out of
+      // production build via `import.meta.env.DEV`.
+      let effective: DisplayInfo[] = list;
+      if (import.meta.env.DEV && typeof window !== "undefined") {
+        const preview = new URLSearchParams(window.location.search).get("preview-per-monitor");
+        if (preview && effective.length <= 1) {
+          effective = [
+            {
+              device_name: "\\\\.\\DISPLAY1",
+              identity: null,
+              id: "\\\\.\\DISPLAY1",
+              label: "Display 1",
+              width: 1920,
+              height: 1080,
+              resolution: "1920 \u00D7 1080",
+              x: 0,
+              y: 0,
+              left_eligible: true,
+              right_eligible: false,
+            },
+            {
+              device_name: "\\\\.\\DISPLAY2",
+              identity: null,
+              id: "\\\\.\\DISPLAY2",
+              label: "Display 2",
+              width: 2560,
+              height: 1440,
+              resolution: "2560 \u00D7 1440",
+              x: 1920,
+              y: 0,
+              left_eligible: false,
+              right_eligible: true,
+            },
+          ];
+        }
+      }
+      displays = effective;
       const nextEdges: Record<string, string> = {};
       const nextModes: Record<string, string> = {};
-      for (const d of list) {
+      for (const d of effective) {
         try {
           const e = await getDisplayDockEdge(d.device_name);
           nextEdges[d.device_name] = e ?? dockEdge;
@@ -178,24 +218,18 @@
     }
   }
 
-  async function changeDisplayEdge(device: string, edge: string) {
+  // Per-monitor follows the global Save pattern (0009 explicit-save). Only
+  // Theme is immediate (ticket 31 / 0008 immediate toggle rule). Per-row
+  // changes are local until Save, then batch-written — matches dock_mode/edge
+  // deferred semantics and avoids mid-form WS writes.
+  function changeDisplayEdge(device: string, edge: string) {
     displayErrors = { ...displayErrors, [device]: "" };
-    try {
-      await setDisplayDockEdge(device, edge);
-      displayEdges = { ...displayEdges, [device]: edge };
-    } catch (e) {
-      displayErrors = { ...displayErrors, [device]: String(e) };
-    }
+    displayEdges = { ...displayEdges, [device]: edge };
   }
 
-  async function changeDisplayMode(device: string, mode: string) {
+  function changeDisplayMode(device: string, mode: string) {
     displayErrors = { ...displayErrors, [device]: "" };
-    try {
-      await setDisplayDockMode(device, mode);
-      displayModes = { ...displayModes, [device]: mode };
-    } catch (e) {
-      displayErrors = { ...displayErrors, [device]: String(e) };
-    }
+    displayModes = { ...displayModes, [device]: mode };
   }
 
   async function pick(mode: ThemeMode) {
@@ -243,6 +277,8 @@
     saving = true;
     saved = "";
     error = "";
+    // Clear per-monitor row errors before batch save.
+    displayErrors = {};
     try {
       await updateSettings({
         default_timeout_minutes: Math.max(1, Math.floor(timeout) || 1),
@@ -260,7 +296,36 @@
         action_groups: settings.action_groups,
         clip_groups: settings.clip_groups,
       });
-      saved = "Saved — the next run honors these.";
+      // Per-monitor follows Save (only Theme is immediate per 0009). Batch
+      // the deferred writes so global + per-monitor share one success notice.
+      // Disabled seam options prevent picking an ineligible edge, but a race
+      // (screens moved after load) still surfaces as a row error.
+      let perMonitorError = false;
+      for (const d of displays) {
+        const edge = displayEdges[d.device_name];
+        if (edge !== undefined) {
+          try {
+            await setDisplayDockEdge(d.device_name, edge);
+          } catch (e) {
+            displayErrors = { ...displayErrors, [d.device_name]: String(e) };
+            perMonitorError = true;
+          }
+        }
+        const mode = displayModes[d.device_name];
+        if (mode !== undefined) {
+          try {
+            await setDisplayDockMode(d.device_name, mode);
+          } catch (e) {
+            displayErrors = { ...displayErrors, [d.device_name]: String(e) };
+            perMonitorError = true;
+          }
+        }
+      }
+      if (perMonitorError) {
+        error = "Some per-monitor choices couldn't be saved — see the rows below.";
+      } else {
+        saved = "Saved — the next run honors these.";
+      }
       // Reflect any clamping back into the fields.
       timeout = Math.max(1, Math.floor(timeout) || 1);
       retention = Math.max(1, Math.floor(retention) || 1);
@@ -618,62 +683,54 @@
       </article>
 
       {#if displays.length > 1}
-        <article class="knob knob--stack" aria-labelledby="per-monitor-title">
-          <div class="knob__body">
+        <!-- Per-monitor: flat knobs per display (flattened to reuse .knob, 0005 rule 5). No nested card. Global defaults above stay fallback. -->
+        <div class="per-monitor" aria-labelledby="per-monitor-title">
+          <div class="per-monitor__header">
             <span class="knob__label" id="per-monitor-title">Per-monitor dock</span>
             <p class="knob__hint">
               Each display remembers its own edge and mode. The defaults above are the fallback for
-              a display without a saved choice. Choices take effect the next time that display docks.
+              a display without a saved choice. Choices save with the button below and take effect the next time that display docks.
             </p>
           </div>
-          <div class="per-monitor">
-            {#each displays as d (d.device_name)}
-              {@const edgeId = `per-monitor-edge-${d.device_name.replace(/[^a-zA-Z0-9]/g, "-")}`}
-              {@const modeId = `per-monitor-mode-${d.device_name.replace(/[^a-zA-Z0-9]/g, "-")}`}
-              {@const reasonId = `per-monitor-reason-${d.device_name.replace(/[^a-zA-Z0-9]/g, "-")}`}
-              {@const hasSeam = !d.left_eligible || !d.right_eligible}
-              <div class="per-monitor__row">
-                <div class="per-monitor__meta">
-                  <span class="per-monitor__label">{d.label}</span>
-                  <span class="per-monitor__res">{d.resolution}</span>
-                  {#if hasSeam}
-                    <span id={reasonId} class="per-monitor__reason">{SEAM_REASON}</span>
-                  {/if}
-                  {#if displayErrors[d.device_name]}
-                    <span class="per-monitor__error" role="alert">{displayErrors[d.device_name]}</span>
-                  {/if}
-                </div>
-                <div class="per-monitor__controls">
-                  <div class="per-monitor__field">
-                    <label class="per-monitor__field-label" for={edgeId}>Edge</label>
-                    <Select
-                      id={edgeId}
-                      variant="small"
-                      value={displayEdges[d.device_name] ?? dockEdge}
-                      onchange={(v) => changeDisplayEdge(d.device_name, v)}
-                      aria-describedby={hasSeam ? reasonId : undefined}
-                    >
-                      <option value="left" disabled={!d.left_eligible}>Left</option>
-                      <option value="right" disabled={!d.right_eligible}>Right</option>
-                    </Select>
-                  </div>
-                  <div class="per-monitor__field">
-                    <label class="per-monitor__field-label" for={modeId}>Mode</label>
-                    <Select
-                      id={modeId}
-                      variant="small"
-                      value={displayModes[d.device_name] ?? dockMode}
-                      onchange={(v) => changeDisplayMode(d.device_name, v)}
-                    >
-                      <option value="auto-hide">Auto-hide</option>
-                      <option value="fixed">Fixed</option>
-                    </Select>
-                  </div>
-                </div>
+          {#each displays as d (d.device_name)}
+            {@const edgeId = `per-monitor-edge-${d.device_name.replace(/[^a-zA-Z0-9]/g, "-")}`}
+            {@const modeId = `per-monitor-mode-${d.device_name.replace(/[^a-zA-Z0-9]/g, "-")}`}
+            {@const reasonId = `per-monitor-reason-${d.device_name.replace(/[^a-zA-Z0-9]/g, "-")}`}
+            {@const hasSeam = !d.left_eligible || !d.right_eligible}
+            <article class="knob">
+              <div class="knob__body">
+                <span class="knob__label">{d.label} · {d.resolution}</span>
+                {#if hasSeam}
+                  <p class="knob__hint" id={reasonId} style="color: var(--warn-text)">{SEAM_REASON}</p>
+                {/if}
+                {#if displayErrors[d.device_name]}
+                  <p class="knob__hint" style="color: var(--danger-text)" role="alert">{displayErrors[d.device_name]}</p>
+                {/if}
               </div>
-            {/each}
-          </div>
-        </article>
+              <div class="knob__input">
+                <Select
+                  id={edgeId}
+                  variant="small"
+                  value={displayEdges[d.device_name] ?? dockEdge}
+                  onchange={(v) => changeDisplayEdge(d.device_name, v)}
+                  aria-describedby={hasSeam ? reasonId : undefined}
+                >
+                  <option value="left" disabled={!d.left_eligible}>Left</option>
+                  <option value="right" disabled={!d.right_eligible}>Right</option>
+                </Select>
+                <Select
+                  id={modeId}
+                  variant="small"
+                  value={displayModes[d.device_name] ?? dockMode}
+                  onchange={(v) => changeDisplayMode(d.device_name, v)}
+                >
+                  <option value="auto-hide">Auto-hide</option>
+                  <option value="fixed">Fixed</option>
+                </Select>
+              </div>
+            </article>
+          {/each}
+        </div>
       {/if}
 
       <article class="knob">
@@ -880,11 +937,6 @@
     padding: var(--space-4);
   }
 
-  .knob--stack {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
   .per-monitor {
     display: flex;
     flex-direction: column;
@@ -892,70 +944,11 @@
     width: 100%;
   }
 
-  .per-monitor__row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-3);
-    padding: var(--space-3);
-    background: var(--bg-page);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-  }
-
-  .per-monitor__meta {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    min-width: 0;
-  }
-
-  .per-monitor__label {
-    font-family: var(--font-display);
-    font-size: var(--text-sm);
-    font-weight: 600;
-    color: var(--text);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .per-monitor__res {
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    letter-spacing: var(--tracking-mono);
-    color: var(--text-muted);
-  }
-
-  .per-monitor__reason {
-    font-size: var(--text-xs);
-    color: var(--warn-text);
-  }
-
-  .per-monitor__error {
-    font-size: var(--text-xs);
-    color: var(--danger-text);
-  }
-
-  .per-monitor__controls {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    flex-shrink: 0;
-  }
-
-  .per-monitor__field {
+  .per-monitor__header {
     display: flex;
     flex-direction: column;
     gap: var(--space-1);
-  }
-
-  .per-monitor__field-label {
-    font-family: var(--font-mono);
-    font-size: var(--text-2xs);
-    letter-spacing: var(--tracking-mono);
-    text-transform: uppercase;
-    color: var(--text-muted);
+    padding: 0 var(--space-1);
   }
 
   .knob__body {
