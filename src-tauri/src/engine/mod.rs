@@ -299,4 +299,13 @@ pub trait LauncherEngine: Send + Sync {
     fn create_desktop(&self) -> Option<String> {
         None
     }
+
+    /// Foregrounds the window `hwnd` (ticket 121): restores it if minimized
+    /// and brings it to the foreground at normal Z (no HWND_TOPMOST). Returns
+    /// true when the call was attempted; the caller decides the report wording.
+    /// The default does nothing and returns false — the queue then reports the
+    /// skip without a foreground side-effect (the batch path).
+    fn foreground_window(&self, _hwnd: usize) -> bool {
+        false
+    }
 }

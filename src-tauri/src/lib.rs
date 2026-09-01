@@ -19,6 +19,7 @@ mod quick_actions;
 mod quick_window;
 mod run;
 mod settings;
+mod store;
 mod tray;
 mod update;
 mod walker;
@@ -680,10 +681,13 @@ fn start_quick_launch(state: State<'_, AppState>, app: AppHandle) -> Result<(), 
 }
 
 /// Starts one Launch entry through the same capped, queued pipeline as Start
-/// all (ticket 93) — the Quick Launch window's clickable entry rows. The
-/// single-flight guard applies equally: a row click while a run is in flight
-/// is rejected, never stacked, and the summary notification and
-/// `launch-run-done` event report the single-entry outcome like any run.
+/// all (ticket 93) — the Quick Launch window's clickable entry rows. Ticket
+/// 121: a single tap on a running `App` on its target desktop foregrounds its
+/// window (restores if minimized) instead of spawning a second instance and
+/// reports `skipped: foregrounded`; batch `Start all` keeps the skip without
+/// foreground. The single-flight guard applies equally: a row click while a
+/// run is in flight is rejected, never stacked, and the summary notification
+/// and `launch-run-done` event report the single-entry outcome like any run.
 #[tauri::command]
 fn start_launch_entry(state: State<'_, AppState>, app: AppHandle, id: i64) -> Result<(), String> {
     let conn = lock(&state)?;
@@ -693,7 +697,7 @@ fn start_launch_entry(state: State<'_, AppState>, app: AppHandle, id: i64) -> Re
         .find(|entry| entry.id == id)
         .ok_or_else(|| "That entry is gone from the Quick Launch list — try again.".to_string())?;
     drop(conn);
-    launch_entries(&app, &state, vec![entry])
+    launch_entries_single(&app, &state, vec![entry])
 }
 
 /// The shared launch-run body behind the Quick Launch window's and the
@@ -706,6 +710,26 @@ fn launch_entries(
     app: &AppHandle,
     state: &AppState,
     entries: Vec<launch::LaunchEntry>,
+) -> Result<(), String> {
+    launch_entries_inner(app, state, entries, false)
+}
+
+/// Ticket 121 single-tap variant: the same single-flight, log, event and
+/// notification path as [`launch_entries`] but the queue foregrounds a running
+/// `App` on its target desktop instead of spawning a second instance.
+fn launch_entries_single(
+    app: &AppHandle,
+    state: &AppState,
+    entries: Vec<launch::LaunchEntry>,
+) -> Result<(), String> {
+    launch_entries_inner(app, state, entries, true)
+}
+
+fn launch_entries_inner(
+    app: &AppHandle,
+    state: &AppState,
+    entries: Vec<launch::LaunchEntry>,
+    is_single: bool,
 ) -> Result<(), String> {
     if state
         .launch_in_progress
@@ -732,8 +756,13 @@ fn launch_entries(
         }
         // Stored assignments are always honored (ADR-0015): there is no
         // master switch anymore, and below the 24H2 gate the engine's empty
-        // desktop list makes every entry behave as unassigned.
-        let report = launch::run_launch_queue(engine.as_ref(), &entries, cap);
+        // desktop list makes every entry behave as unassigned. Ticket 121:
+        // single-tap foregrounds on hit, batch skips without foreground.
+        let report = if is_single {
+            launch::run_single_launch_queue(engine.as_ref(), &entries, cap)
+        } else {
+            launch::run_launch_queue(engine.as_ref(), &entries, cap)
+        };
         if let Some(path) = &log_path {
             launch::write_launch_run_summary(path, &report);
         }

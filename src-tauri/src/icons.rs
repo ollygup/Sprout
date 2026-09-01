@@ -15,15 +15,40 @@ use png::{BitDepth, ColorType, Encoder};
 
 /// The icon for a candidate target (a `.lnk` or exe path), as a PNG data
 /// URL. `None` when the target no longer exists or the shell has no icon for
-/// it — the caller renders the row without one.
+/// it — the caller renders the row without one. UWP `shell:AppsFolder\` targets
+/// (ticket 122) try the 44×44 package logo (AppList) first — the row asset
+/// (`Square44x44Logo`) — then fall back to generic `rocket`.
 pub fn candidate_icon(target: &str) -> Option<String> {
+    if is_uwp_target(target) {
+        if let Some(aumid) = uwp_aumid(target) {
+            if let Some(logo) = crate::store::logo_for_aumid(&aumid) {
+                // 44×44 logo is a PNG file (e.g. PaintAppList.png). Read it
+                // directly as PNG data URL — no HICON/DIB path — and keep the
+                // 44 source (displayed as 24 in picker, 16 in rack/dock via CSS
+                // per current design, no new token). Cache is memory-only
+                // (lazyIcon.svelte), so poisoned entry auto-fixes on next
+                // snapshot.
+                if let Some(url) = png_file_to_data_url(&logo) {
+                    return Some(url);
+                }
+                // Fallback: try shell icon extraction on the logo file itself
+                if let Some(url) = icon_for_file(&logo) {
+                    return Some(url);
+                }
+            }
+        }
+        return None;
+    }
+    icon_for_file(target)
+}
+
+fn icon_for_file(path_str: &str) -> Option<String> {
     use windows_sys::Win32::UI::Shell::{
         SHFILEINFOW, SHGetFileInfoW, SHGFI_ICON, SHGFI_LARGEICON, SHGFI_SHELLICONSIZE,
     };
 
-    let path = std::path::Path::new(target);
+    let path = std::path::Path::new(path_str);
     if !path.is_file() {
-        // Uninstalled exe or odd target: no icon, gracefully.
         return None;
     }
     let mut info: SHFILEINFOW = unsafe { std::mem::zeroed() };
@@ -42,6 +67,29 @@ pub fn candidate_icon(target: &str) -> Option<String> {
     }
     let _icon = IconGuard(info.hIcon);
     render_png(info.hIcon, 32)
+}
+
+fn is_uwp_target(target: &str) -> bool {
+    target.trim().to_ascii_lowercase().starts_with("shell:appsfolder\\")
+}
+
+fn uwp_aumid(target: &str) -> Option<String> {
+    if !is_uwp_target(target) {
+        return None;
+    }
+    let trimmed = target.trim();
+    let prefix_len = "shell:AppsFolder\\".len();
+    Some(trimmed[prefix_len..].trim().to_string())
+}
+
+fn png_file_to_data_url(path: &str) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    // Basic PNG magic check — if not PNG, let SHGetFileInfoW handle it
+    if bytes.len() < 8 || &bytes[0..8] != b"\x89PNG\r\n\x1a\n" {
+        return None;
+    }
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    Some(format!("data:image/png;base64,{}", STANDARD.encode(&bytes)))
 }
 
 /// Draws the icon into a 32×32 32bpp DIB section and encodes it as a PNG.

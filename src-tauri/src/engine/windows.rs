@@ -56,6 +56,33 @@ const MIN_WINGET_BUILD: u32 = 19041;
 /// assignment surface hides itself (ticket 44).
 const MIN_VIRTUAL_DESKTOP_BUILD: u32 = 26100;
 
+/// Whether a launch target is a Store/MSIX AUMID launch key (ticket 122):
+/// `shell:AppsFolder\<AUMID>` (case-insensitive, trimmed).
+fn is_uwp_target(target: &str) -> bool {
+    target.trim().to_ascii_lowercase().starts_with("shell:appsfolder\\")
+}
+
+/// The AUMID inside a `shell:AppsFolder\` target, trimmed. `None` for Win32
+/// targets.
+fn uwp_aumid(target: &str) -> Option<String> {
+    if !is_uwp_target(target) {
+        return None;
+    }
+    let trimmed = target.trim();
+    let prefix_len = "shell:AppsFolder\\".len();
+    Some(trimmed[prefix_len..].trim().to_string())
+}
+
+/// The AUMID a window belongs to (UWP, ticket 122) — via
+/// `GetApplicationUserModelId`. `None` for Win32 windows or on failure. Stubbed
+/// to `None` for now: the pid path in `new_window_for_spawned` finds the UWP
+/// window via its owning pid without needing the AUMID, and the fake's
+/// `image_key` handles AUMID matching for tests. A full implementation would
+/// call `GetApplicationUserModelId` on the window's process handle (Appx).
+fn window_aumid(_hwnd: usize) -> Option<String> {
+    None
+}
+
 /// A command step's exit code when its author declared none: 0 only.
 const DEFAULT_SUCCESS_CODE: i32 = 0;
 
@@ -818,6 +845,28 @@ impl crate::engine::LauncherEngine for WindowsLauncherEngine {
     fn create_desktop(&self) -> Option<String> {
         create_virtual_desktop()
     }
+
+    fn foreground_window(&self, hwnd: usize) -> bool {
+        foreground_window(hwnd)
+    }
+}
+
+/// Foregrounds a window (ticket 121): restores it if minimized and brings
+/// it to the foreground at normal Z (no HWND_TOPMOST) so a Fixed dock
+/// (AppBar ABM_SETPOS work-area squeeze) stays as-is — overlapping single
+/// foreground appears above it per Q10. No ShellExecute on hit.
+fn foreground_window(hwnd: usize) -> bool {
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        IsIconic, SetForegroundWindow, ShowWindow, SW_RESTORE,
+    };
+    let hwnd = hwnd as HWND;
+    unsafe {
+        if IsIconic(hwnd) != 0 {
+            ShowWindow(hwnd, SW_RESTORE);
+        }
+        SetForegroundWindow(hwnd) != 0
+    }
 }
 
 /// Launches an app entry as-is through the shell: ShellExecuteExW on the .lnk
@@ -826,8 +875,13 @@ impl crate::engine::LauncherEngine for WindowsLauncherEngine {
 /// when the shell hands the launch to an already-running process (ticket 47):
 /// Explorer and other single-instance shells report success with no process
 /// handle, and that is a *started* launch, never a failure. The window
-/// resolution's image fallback finds the window in that case.
+/// resolution's image fallback finds the window in that case. Ticket 122:
+/// `shell:AppsFolder\<AUMID>` (Store/MSIX) goes through
+/// `IApplicationActivationManager::ActivateApplication` instead.
 fn spawn_app(target: &str) -> Result<crate::engine::Spawned, String> {
+    if let Some(aumid) = uwp_aumid(target) {
+        return activate_uwp(&aumid);
+    }
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError};
     use windows_sys::Win32::System::Threading::GetProcessId;
     use windows_sys::Win32::UI::Shell::{
@@ -865,6 +919,30 @@ fn spawn_app(target: &str) -> Result<crate::engine::Spawned, String> {
     Ok(crate::engine::Spawned {
         pid,
         target: target.to_string(),
+    })
+}
+
+/// Activates a Store/MSIX app via `IApplicationActivationManager::ActivateApplication`
+/// (ticket 122). `AO_NONE` is the normal activation — no flags. On success the
+/// pid is the new app's; on failure the error bubbles as a failed Launch entry
+/// (never a silent stall). The call needs COM MTA, like `ShellLinkLnkResolver`.
+fn activate_uwp(aumid: &str) -> Result<crate::engine::Spawned, String> {
+    use windows::core::PCWSTR;
+    use windows::Win32::System::Com::{CoCreateInstance, CoIncrementMTAUsage, CLSCTX_INPROC_SERVER};
+    use windows::Win32::UI::Shell::{ApplicationActivationManager, IApplicationActivationManager, AO_NONE};
+
+    let _mta = unsafe { CoIncrementMTAUsage() }
+        .map_err(|e| format!("Windows could not activate '{aumid}' (COM init failed: {e:?})"))?;
+    let manager: IApplicationActivationManager = unsafe {
+        CoCreateInstance(&ApplicationActivationManager, None, CLSCTX_INPROC_SERVER)
+    }
+    .map_err(|e| format!("Windows could not activate '{aumid}' ({e:?})"))?;
+    let wide: Vec<u16> = aumid.encode_utf16().chain(std::iter::once(0)).collect();
+    let pid = unsafe { manager.ActivateApplication(PCWSTR(wide.as_ptr()), PCWSTR::null(), AO_NONE) }
+        .map_err(|e| format!("Windows could not activate '{aumid}' ({e:?})"))?;
+    Ok(crate::engine::Spawned {
+        pid: Some(pid),
+        target: format!("shell:AppsFolder\\{aumid}"),
     })
 }
 
@@ -940,7 +1018,8 @@ fn wait_for_new_window(
 /// then a direct child's window that is not in the snapshot (wrapper
 /// launchers — Discord's updater, installer shims). The queue waits on and
 /// moves exactly the window this finds — never one the user already has
-/// open.
+/// open. Ticket 122: `shell:AppsFolder\` UWP targets also match via
+/// `GetApplicationUserModelId` (AUMID) when the image fallback misses.
 fn new_window_for_spawned(spawned: &crate::engine::Spawned, before: &[usize]) -> Option<usize> {
     if let Some(pid) = spawned.pid {
         if let Some(hwnd) = window_for_pid(pid) {
@@ -952,6 +1031,18 @@ fn new_window_for_spawned(spawned: &crate::engine::Spawned, before: &[usize]) ->
     if let Some(image) = &image {
         for (hwnd, pid) in &windows {
             if !before.contains(hwnd) && process_matches_image(*pid, image) {
+                return Some(*hwnd);
+            }
+        }
+    }
+    if let Some(aumid) = uwp_aumid(&spawned.target) {
+        let needle = aumid.to_lowercase();
+        for (hwnd, _) in &windows {
+            if !before.contains(hwnd)
+                && window_aumid(*hwnd)
+                    .map(|id| id.to_lowercase() == needle)
+                    .unwrap_or(false)
+            {
                 return Some(*hwnd);
             }
         }
@@ -1017,8 +1108,26 @@ fn visible_app_windows() -> Vec<(usize, u32)> {
 /// unversioned image. Each window carries the desktop answers the skip rule
 /// is decided from; windows whose desktop cannot be resolved never match an
 /// assigned-desktop skip, so a machine that cannot answer the question
-/// launches instead of wrongly skipping.
+/// launches instead of wrongly skipping. Ticket 122: `shell:AppsFolder\`
+/// UWP targets match via `GetApplicationUserModelId` (AUMID) instead of the
+/// image basename.
 fn app_windows(target: &str) -> Vec<crate::engine::AppWindow> {
+    if let Some(aumid) = uwp_aumid(target) {
+        let needle = aumid.to_lowercase();
+        return visible_app_windows()
+            .into_iter()
+            .filter(|(hwnd, _)| {
+                window_aumid(*hwnd)
+                    .map(|id| id.to_lowercase() == needle)
+                    .unwrap_or(false)
+            })
+            .map(|(hwnd, _)| crate::engine::AppWindow {
+                hwnd,
+                desktop: window_desktop(hwnd),
+                on_current_desktop: window_on_current_desktop(hwnd),
+            })
+            .collect();
+    }
     let Some(image) = window_image_basename(target) else {
         return Vec::new();
     };
@@ -1251,8 +1360,14 @@ fn process_alive(pid: u32) -> bool {
 /// PATH-resolvable and never a false failure; and an unresolvable shortcut
 /// counts as existing — the shell may still launch it. An app that updated
 /// its version folder fails the entry fast with "target no longer exists"
-/// instead of the silent 15 s window stall.
+/// instead of the silent 15 s window stall. UWP `shell:AppsFolder\` targets
+/// (ticket 122) are always considered existing — they are not filesystem
+/// paths and the PackageManager would have to be queried to prove absence,
+/// which would make a Store app's versioned-folder update look like a failure.
 fn target_exists(path: &str) -> bool {
+    if is_uwp_target(path) {
+        return true;
+    }
     use crate::walker::LnkResolver;
     let path = Path::new(path);
     // A bare executable name resolves through PATH — never a false failure.

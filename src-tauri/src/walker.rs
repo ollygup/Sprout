@@ -158,25 +158,52 @@ fn wide_string(path: &Path) -> Vec<u16> {
 }
 
 /// The fresh snapshot: per-user + all-users Start Menu shortcuts, merged with
-/// the uninstall-registry entries, deduped and sorted by name. Re-walked on
-/// every call — no cache.
+/// the uninstall-registry entries and the Store/MSIX enumeration (ticket 122),
+/// deduped and sorted by name. Re-walked on every call — no cache.
 pub fn snapshot() -> Vec<Candidate> {
-    snapshot_with(&start_menu_roots(), &RegistryReader, &ShellLinkLnkResolver)
+    let roots = start_menu_roots();
+    let start_menu = walk_start_menu(&roots, &ShellLinkLnkResolver);
+    let registry: Vec<Candidate> = RegistryReader
+        .entries()
+        .iter()
+        .filter_map(candidate_from_registry)
+        .collect();
+    let store = crate::store::store_candidates();
+    merge_three(start_menu, registry, store)
 }
 
-/// The walk itself with its seams injected (test entry point).
+/// The walk itself with its seams injected (test entry point) — the Win32
+/// sources only. Store/MSIX is additive on the live snapshot, not on the
+/// scripted test seam, so existing tests stay deterministic regardless of what
+/// is installed on the machine.
 fn snapshot_with(
     roots: &[PathBuf],
     registry: &dyn UninstallRegistry,
     resolver: &dyn LnkResolver,
 ) -> Vec<Candidate> {
     let start_menu = walk_start_menu(roots, resolver);
-    let registry = registry
+    let registry: Vec<Candidate> = registry
         .entries()
         .iter()
         .filter_map(candidate_from_registry)
         .collect();
     merge(start_menu, registry)
+}
+
+/// The live snapshot with Store/MSIX merged in (ticket 122).
+fn snapshot_with_store_merged(
+    roots: &[PathBuf],
+    registry: &dyn UninstallRegistry,
+    resolver: &dyn LnkResolver,
+    store: Vec<Candidate>,
+) -> Vec<Candidate> {
+    let start_menu = walk_start_menu(roots, resolver);
+    let registry: Vec<Candidate> = registry
+        .entries()
+        .iter()
+        .filter_map(candidate_from_registry)
+        .collect();
+    merge_three(start_menu, registry, store)
 }
 
 /// The two Start Menu roots: this user's shortcuts (`%APPDATA%\...`) and the
@@ -329,13 +356,46 @@ fn is_windows_apps(path: &str) -> bool {
 /// registry twin only donates its publisher when the winner lacks one), and
 /// within each source same-name duplicates collapse before that (the resolved
 /// duplicate beats the unresolved one). Candidates without an exe path are
-/// never merged — they are distinct shortcuts.
+/// never merged — they are distinct shortcuts. Ticket 122 adds the Store/MSIX
+/// source (shell:AppsFolder\<AUMID>) deduped on AUMID exact plus the same
+/// intra-source name collapse; Store candidates never collapse with Win32 ones
+/// on name alone — the picker shows both when they coexist (e.g. Calculator).
 fn merge(start_menu: Vec<Candidate>, registry: Vec<Candidate>) -> Vec<Candidate> {
+    merge_three(start_menu, registry, Vec::new())
+}
+
+fn merge_three(
+    start_menu: Vec<Candidate>,
+    registry: Vec<Candidate>,
+    store: Vec<Candidate>,
+) -> Vec<Candidate> {
     let start_menu = collapse_by_name(start_menu);
     let registry = collapse_by_name(registry);
+    let store = collapse_by_name(store);
     let mut by_exe: HashMap<String, Candidate> = HashMap::new();
+    let mut by_aumid: HashMap<String, Candidate> = HashMap::new();
     let mut unresolved: Vec<Candidate> = Vec::new();
     for candidate in start_menu.into_iter().chain(registry) {
+        // Store candidates should never come via the Win32 path, but handle
+        // defensively: a target with the shell:AppsFolder prefix is a UWP AUMID.
+        if candidate
+            .target
+            .to_ascii_lowercase()
+            .starts_with("shell:appsfolder\\")
+        {
+            let key = candidate.target.to_lowercase();
+            match by_aumid.get_mut(&key) {
+                Some(held) => {
+                    if held.publisher.is_none() {
+                        held.publisher = candidate.publisher.clone();
+                    }
+                }
+                None => {
+                    by_aumid.insert(key, candidate);
+                }
+            }
+            continue;
+        }
         match &candidate.exe_path {
             Some(exe) => {
                 let key = exe.replace('/', "\\").to_lowercase();
@@ -353,7 +413,29 @@ fn merge(start_menu: Vec<Candidate>, registry: Vec<Candidate>) -> Vec<Candidate>
             None => unresolved.push(candidate),
         }
     }
-    let mut merged: Vec<Candidate> = by_exe.into_values().chain(unresolved).collect();
+    for candidate in store {
+        let key = candidate.target.to_lowercase();
+        // Store dedup is on AUMID exact (case-insensitive via lowercasing the
+        // whole shell:AppsFolder\AUMID key). A second pass on
+        // display-name+publisher is the intra-source collapse_by_name already
+        // done; cross-source (Win32 vs Store) never merges on name alone so the
+        // picker shows both variants when they coexist.
+        match by_aumid.get_mut(&key) {
+            Some(held) => {
+                if held.publisher.is_none() {
+                    held.publisher = candidate.publisher.clone();
+                }
+            }
+            None => {
+                by_aumid.insert(key, candidate);
+            }
+        }
+    }
+    let mut merged: Vec<Candidate> = by_exe
+        .into_values()
+        .chain(by_aumid.into_values())
+        .chain(unresolved)
+        .collect();
     merged.sort_by(|a, b| {
         a.name
             .to_lowercase()
@@ -730,5 +812,88 @@ mod tests {
             merged.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
             vec!["alpha", "Bravo"]
         );
+    }
+
+    // Ticket 122: Store/MSIX additive source
+
+    #[test]
+    fn store_candidates_merge_with_win32_and_remain_distinct() {
+        // Win32 Calculator via Start Menu and Store Calculator via AUMID have
+        // the same display name but different launch keys — the picker shows
+        // both (they are distinct apps, not deduped on name).
+        let root = temp_root();
+        let win32_lnk = make_lnk(&root, "Calculator.lnk");
+        let mut resolve = HashMap::new();
+        resolve.insert(win32_lnk.clone(), Some(r"C:\Windows\System32\calc.exe".into()));
+        let store = vec![Candidate {
+            name: "Calculator".into(),
+            publisher: Some("Microsoft Corporation".into()),
+            target: "shell:AppsFolder\\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App".into(),
+            exe_path: None,
+        }];
+        let merged = snapshot_with_store_merged(
+            &[root],
+            &ScriptedRegistry { entries: vec![] },
+            &scripted(resolve),
+            store,
+        );
+        assert_eq!(merged.len(), 2, "Win32 and Store Calculator are distinct");
+        let targets: Vec<&str> = merged.iter().map(|c| c.target.as_str()).collect();
+        assert!(targets.iter().any(|t| t.to_ascii_lowercase().starts_with("shell:appsfolder\\")));
+        assert!(targets.contains(&win32_lnk.to_string_lossy().as_ref()));
+        // Sorted by name: both are Calculator, ordered by target
+        assert_eq!(merged[0].name, "Calculator");
+        assert_eq!(merged[1].name, "Calculator");
+    }
+
+    #[test]
+    fn store_dedup_on_aumid_exact() {
+        let store = vec![
+            Candidate {
+                name: "Calculator".into(),
+                publisher: Some("Microsoft Corporation".into()),
+                target: "shell:AppsFolder\\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App".into(),
+                exe_path: None,
+            },
+            Candidate {
+                name: "Calculator".into(),
+                publisher: Some("Microsoft Corporation".into()),
+                target: "shell:AppsFolder\\MICROSOFT.WINDOWSCALCULATOR_8WEKYB3D8BBWE!APP".into(),
+                exe_path: None,
+            },
+        ];
+        let merged = snapshot_with_store_merged(
+            &[],
+            &ScriptedRegistry { entries: vec![] },
+            &scripted(HashMap::new()),
+            store,
+        );
+        assert_eq!(merged.len(), 1, "AUMID exact (case-insensitive) dedups");
+        assert_eq!(merged[0].name, "Calculator");
+    }
+
+    #[test]
+    fn store_and_win32_coexist_in_sorted_order() {
+        let root = temp_root();
+        let spotify_lnk = make_lnk(&root, "Spotify.lnk");
+        let mut resolve = HashMap::new();
+        resolve.insert(spotify_lnk.clone(), Some(r"C:\Apps\Spotify\Spotify.exe".into()));
+        let store = vec![Candidate {
+            name: "Spotify".into(),
+            publisher: Some("Spotify AB".into()),
+            target: "shell:AppsFolder\\SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify".into(),
+            exe_path: None,
+        }];
+        let merged = snapshot_with_store_merged(
+            &[root],
+            &ScriptedRegistry { entries: vec![] },
+            &scripted(resolve),
+            store,
+        );
+        // Both Spotify variants remain (Win32 vs Store)
+        assert_eq!(merged.len(), 2);
+        // Framework/resource packages would have been filtered before this point —
+        // the live enumeration excludes IsFramework/IsResourcePackage, so a
+        // framework package never reaches the merge.
     }
 }

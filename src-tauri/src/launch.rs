@@ -482,6 +482,44 @@ fn run_launch_queue_until(
     cap: usize,
     window_timeout: Duration,
 ) -> LaunchReport {
+    run_launch_queue_inner(engine, entries, cap, window_timeout, false)
+}
+
+/// Ticket 121 single-tap core: like [`run_launch_queue_until`] but a running
+/// app on its target desktop is foregrounded (restored if minimized) instead
+/// of spawning a second instance. The call reports `skipped: foregrounded`
+/// without a second pid; batch mode keeps the skip without foreground.
+fn run_single_launch_queue_until(
+    engine: &dyn LauncherEngine,
+    entries: &[LaunchEntry],
+    cap: usize,
+    window_timeout: Duration,
+) -> LaunchReport {
+    run_launch_queue_inner(engine, entries, cap, window_timeout, true)
+}
+
+/// Batch single-entry wrapper for the Tauri command (ticket 121): foreground
+/// on hit, otherwise the normal queue.
+pub fn run_single_launch_queue(
+    engine: &dyn LauncherEngine,
+    entries: &[LaunchEntry],
+    cap: usize,
+) -> LaunchReport {
+    run_single_launch_queue_until(engine, entries, cap, WINDOW_TIMEOUT)
+}
+
+/// The shared inner behind both queue entry points — `foreground_single`
+/// controls whether a running app on its target desktop is foregrounded
+/// (single-tap) or reported as skipped without foreground (batch). The queue,
+/// slot cap, window timeout, desktop-assignment notes and move logic are
+/// identical — only the hit path diverges.
+fn run_launch_queue_inner(
+    engine: &dyn LauncherEngine,
+    entries: &[LaunchEntry],
+    cap: usize,
+    window_timeout: Duration,
+    foreground_single: bool,
+) -> LaunchReport {
     let cap = cap.max(1);
     let mut report = LaunchReport::default();
     let mut in_flight: Vec<(Spawned, Vec<usize>, Instant)> = Vec::new();
@@ -495,13 +533,21 @@ fn run_launch_queue_until(
     let mut queue: VecDeque<&LaunchEntry> = entries.iter().collect();
 
     while let Some(entry) = queue.pop_front() {
-        // The skip rule (app entries only — a command has no window to
-        // match): does the app already have a window on the target desktop?
-        // An assigned entry skips only when a window sits on its desktop
-        // GUID; an unassigned entry only when a window sits on the current
-        // desktop. Windows elsewhere are never skipped over and never moved.
-        // The same query doubles as the pre-launch snapshot the new-window
-        // resolution prefers windows against (ticket 48).
+        // The skip / foreground rule (app entries only — a command has no
+        // window to match): does the app already have a window on the target
+        // desktop? An assigned entry matches only when a window sits on its
+        // desktop GUID; an unassigned entry only when a window sits on the
+        // current desktop. Windows elsewhere are never skipped/foregrounded and
+        // never moved. The same query doubles as the pre-launch snapshot the
+        // new-window resolution prefers windows against (ticket 48). Ticket 121:
+        // single-tap foregrounds the most-recent window on that desktop
+        // (IsIconic→ShowWindow(SW_RESTORE) + SetForegroundWindow at normal Z,
+        // no HWND_TOPMOST) instead of spawning; batch keeps the skip without
+        // foreground. Only LaunchEntryKind::App is foregrounded — Command
+        // entries always spawn via command_argv. An assigned entry with a dead
+        // desktop_id (Some(false) path per ticket 99) is never foregrounded
+        // even if a window sits on the current desktop — it frees at spawn with
+        // the existing note.
         if entry.entry.kind == LaunchEntryKind::App {
             let windows = engine.app_windows(&entry.entry.target);
             let on_target = match &entry.entry.desktop_id {
@@ -511,11 +557,37 @@ fn run_launch_queue_until(
                 None => windows.iter().any(|window| window.on_current_desktop),
             };
             if on_target {
-                report.skipped.push(format!(
-                    "{} — already open on this desktop",
-                    entry.entry.name
-                ));
-                continue;
+                let eligible_for_foreground = foreground_single
+                    && match &entry.entry.desktop_id {
+                        Some(guid) => engine.desktops().iter().any(|d| &d.id == guid),
+                        None => true,
+                    };
+                if eligible_for_foreground {
+                    let hwnd = match &entry.entry.desktop_id {
+                        Some(guid) => windows
+                            .iter()
+                            .find(|w| w.desktop.as_deref() == Some(guid.as_str()))
+                            .map(|w| w.hwnd),
+                        None => windows
+                            .iter()
+                            .find(|w| w.on_current_desktop)
+                            .map(|w| w.hwnd),
+                    };
+                    if let Some(hwnd) = hwnd {
+                        let _ = engine.foreground_window(hwnd);
+                    }
+                    report.skipped.push(format!("{} — foregrounded", entry.entry.name));
+                    continue;
+                } else if !foreground_single {
+                    report.skipped.push(format!(
+                        "{} — already open on this desktop",
+                        entry.entry.name
+                    ));
+                    continue;
+                }
+                // foreground_single && !eligible (dead desktop) falls through
+                // to the target_exists check and the normal spawn with the
+                // dead-desktop note — never foregrounded, never skipped.
             }
             // Ticket 48: an app that updated its version folder fails fast —
             // no silent 15 s window stall.
@@ -1066,6 +1138,9 @@ mod tests {
         /// so tests can assert the move happened after the window appeared
         /// and moved the window the queue waited for.
         Moved(usize, String),
+        /// Ticket 121: a single-tap foreground — the hwnd that was
+        /// foregrounded (IsIconic→ShowWindow+SetForegroundWindow).
+        Foregrounded(usize),
     }
 
     /// One scripted window of a target's image: its handle — the key the
@@ -1082,8 +1157,17 @@ mod tests {
     /// The image key the fake matches targets against — the lowercase
     /// basename of the target path, mirroring the real engine's image
     /// matching (ticket 48): a versioned install path and the running
-    /// instance's unversioned path are the same app.
+    /// instance's unversioned path are the same app. UWP targets
+    /// `shell:AppsFolder\<AUMID>` (ticket 122) use the lowercased AUMID as
+    /// the key so the same window table works for Store apps.
     fn image_key(target: &str) -> String {
+        let trimmed = target.trim();
+        if trimmed
+            .to_ascii_lowercase()
+            .starts_with("shell:appsfolder\\")
+        {
+            return trimmed["shell:appsfolder\\".len()..].to_lowercase();
+        }
         Path::new(target)
             .file_name()
             .map(|name| name.to_string_lossy().to_lowercase())
@@ -1217,7 +1301,7 @@ mod tests {
                 .iter()
                 .filter_map(|(_, e)| match e {
                     Event::Spawned(name) => Some(name.clone()),
-                    Event::Freed | Event::Moved(..) => None,
+                    Event::Freed | Event::Moved(..) | Event::Foregrounded(..) => None,
                 })
                 .collect()
         }
@@ -1242,6 +1326,20 @@ mod tests {
                 .iter()
                 .filter_map(|(_, e)| match e {
                     Event::Moved(hwnd, guid) => Some((*hwnd, guid.clone())),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// Ticket 121: the hwnds that were foregrounded (single-tap hit).
+        fn foregrounded(&self) -> Vec<usize> {
+            self.state
+                .lock()
+                .unwrap()
+                .log
+                .iter()
+                .filter_map(|(_, e)| match e {
+                    Event::Foregrounded(hwnd) => Some(*hwnd),
                     _ => None,
                 })
                 .collect()
@@ -1294,7 +1392,7 @@ mod tests {
                         max = max.max(active);
                     }
                     Event::Freed => active = active.saturating_sub(1),
-                    Event::Moved(..) => {}
+                    Event::Moved(..) | Event::Foregrounded(..) => {}
                 }
             }
             max
@@ -1348,6 +1446,12 @@ mod tests {
         }
 
         fn target_exists(&self, target: &str) -> bool {
+            // UWP shell:AppsFolder targets are not filesystem paths — always
+            // considered existing (ticket 122), even if the test scripted them
+            // as missing.
+            if target.trim().to_ascii_lowercase().starts_with("shell:appsfolder\\") {
+                return true;
+            }
             !self.missing.contains(target)
         }
 
@@ -1425,6 +1529,12 @@ mod tests {
                     current: false,
                 })
                 .collect()
+        }
+
+        fn foreground_window(&self, hwnd: usize) -> bool {
+            let mut state = self.state.lock().unwrap();
+            state.log.push((Instant::now(), Event::Foregrounded(hwnd)));
+            true
         }
     }
 
@@ -1900,6 +2010,262 @@ mod tests {
         // run spawned and moved nothing.
         assert_eq!(engine.spawned_targets(), vec!["Edge"]);
         assert_eq!(engine.moved(), vec![(1, guid.to_string())]);
+    }
+
+    // ------------------- ticket 121: foreground-if-running --------------
+
+    #[test]
+    fn foregounds_single_on_same_desktop() {
+        let guid = "550fe0a1-3d41-4e5f-9a2b-c8d0e1f2a3b4";
+        let engine = FakeLauncher::new()
+            .desktops(&[guid])
+            .window(r"C:\Apps\Notepad.exe", 100, Some(guid), false);
+        let entries = vec![desktop_app_entry("Notepad", 1, guid)];
+        // Single-tap foregrounds the most-recent window on the target desktop
+        // (restores if minimized in the real engine) and reports
+        // `skipped: foregrounded` without spawning a second pid.
+        let report = run_single_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW);
+        assert_eq!(report.skipped, vec!["Notepad — foregrounded".to_string()]);
+        assert!(report.started.is_empty());
+        assert!(report.failed.is_empty());
+        assert_eq!(engine.spawned_targets().len(), 0, "no duplicate process");
+        assert_eq!(engine.foregrounded(), vec![100]);
+        // Multiple hits → foreground most-recent Z: craft two windows on the
+        // same desktop, ensure the first in EnumWindows order (topmost) wins.
+        let engine = FakeLauncher::new()
+            .desktops(&[guid])
+            .window(r"C:\Apps\Notepad.exe", 100, Some(guid), false)
+            .window(r"C:\Apps\Notepad.exe", 200, Some(guid), false);
+        let report = run_single_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW);
+        assert_eq!(report.skipped, vec!["Notepad — foregrounded".to_string()]);
+        assert_eq!(engine.foregrounded().len(), 1);
+        // The first matching window in EnumWindows order is foregrounded.
+        // Our fake preserves insertion order, so 100 is first; real engine's
+        // EnumWindows order is topmost first.
+        assert_eq!(engine.foregrounded()[0], 100);
+    }
+
+    #[test]
+    fn batch_skips_without_foreground() {
+        let guid = "550fe0a1-3d41-4e5f-9a2b-c8d0e1f2a3b4";
+        let engine = FakeLauncher::new()
+            .desktops(&[guid])
+            .window(r"C:\Apps\A.exe", 100, Some(guid), false);
+        let entries = vec![
+            desktop_app_entry("A", 1, guid),
+            desktop_app_entry("B", 2, guid),
+        ];
+        // Batch Start all with 1 running + 1 cold: 1 started, 1 skipped, no
+        // foreground steals focus from batch.
+        let report = run_launch_queue_until(&engine, &entries, 2, SHORT_WINDOW);
+        assert_eq!(report.started, vec!["B"]);
+        assert_eq!(
+            report.skipped,
+            vec!["A — already open on this desktop".to_string()]
+        );
+        assert!(report.failed.is_empty());
+        assert_eq!(engine.foregrounded().len(), 0, "batch never foregrounds");
+        assert_eq!(engine.spawned_targets(), vec!["B"]);
+    }
+
+    #[test]
+    fn unassigned_foregounds_on_current_desktop() {
+        // Unassigned entry whose window is only on another desktop does not
+        // foreground — it spawns normally (per-desktop rule).
+        let guid_one = "550fe0a1-3d41-4e5f-9a2b-c8d0e1f2a3b4";
+        let guid_two = "c3d4e5f6-1111-2222-3333-444455556666";
+        let engine = FakeLauncher::new()
+            .desktops(&[guid_one, guid_two])
+            .window(r"C:\Apps\A.exe", 100, Some(guid_two), false);
+        let entries = vec![app_entry("A", 1)];
+        // Single tap: window only on other desktop → spawns, not foregrounded
+        let report = run_single_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW);
+        assert_eq!(report.started, vec!["A"]);
+        assert!(report.skipped.is_empty());
+        assert_eq!(engine.foregrounded().len(), 0);
+
+        // Unassigned entry whose window is on the current desktop foregrounds
+        let engine = FakeLauncher::new().window(r"C:\Apps\A.exe", 100, None, true);
+        let report = run_single_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW);
+        assert_eq!(report.skipped, vec!["A — foregrounded".to_string()]);
+        assert!(report.started.is_empty());
+        assert_eq!(engine.foregrounded(), vec![100]);
+
+        // Command entries never foreground even when a window of the same
+        // basename exists — they always spawn via command_argv.
+        let engine = FakeLauncher::new().window(r"C:\Apps\A.exe", 100, None, true);
+        let entries = vec![command_entry("A", 1)];
+        let report = run_single_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW);
+        assert_eq!(report.started, vec!["A"]);
+        assert!(report.skipped.is_empty());
+        assert_eq!(engine.foregrounded().len(), 0);
+    }
+
+    #[test]
+    fn foreground_does_not_apply_to_dead_desktop_assignment() {
+        let guid_live = "550fe0a1-3d41-4e5f-9a2b-c8d0e1f2a3b4";
+        let guid_dead = "deadbeef-dead-beef-dead-beefdeadbeef";
+        let engine = FakeLauncher::new()
+            .desktops(&[guid_live])
+            .window(r"C:\Apps\A.exe", 100, None, true);
+        // Entry assigned to dead desktop, but window is on current desktop.
+        // Single-tap must NOT foreground — it falls through to spawn with the
+        // dead-desktop note (ticket 99 Some(false) path).
+        let entries = vec![desktop_app_entry("A", 1, guid_dead)];
+        let report = run_single_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW);
+        assert_eq!(report.started, vec!["A"]);
+        assert!(report.skipped.is_empty());
+        assert_eq!(engine.foregrounded().len(), 0);
+        assert!(
+            report.notes[0].contains("no longer exists"),
+            "got: {:?}",
+            report.notes
+        );
+    }
+
+    // ------------------- ticket 122: Store/MSIX ---------------------------
+
+    fn uwp_entry(name: &str, id: i64, aumid: &str) -> LaunchEntry {
+        LaunchEntry {
+            id,
+            entry: LaunchEntryInput {
+                name: name.into(),
+                kind: LaunchEntryKind::App,
+                target: format!("shell:AppsFolder\\{aumid}"),
+                shell: None,
+                show_window: false,
+                desktop_id: None,
+            },
+            group_id: None,
+        }
+    }
+
+    fn uwp_desktop_entry(name: &str, id: i64, aumid: &str, guid: &str) -> LaunchEntry {
+        LaunchEntry {
+            id,
+            entry: LaunchEntryInput {
+                name: name.into(),
+                kind: LaunchEntryKind::App,
+                target: format!("shell:AppsFolder\\{aumid}"),
+                shell: None,
+                show_window: false,
+                desktop_id: Some(guid.into()),
+            },
+            group_id: None,
+        }
+    }
+
+    #[test]
+    fn store_uwp_entry_validates_and_collides_case_insensitively() {
+        let entry = uwp_entry(
+            "Calculator",
+            1,
+            "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",
+        );
+        assert!(validate_launch_entry(&entry.entry).is_ok());
+        // Shell must stay None for app entries.
+        let mut with_shell = entry.entry.clone();
+        with_shell.shell = Some(LaunchShell::Powershell);
+        assert!(validate_launch_entry(&with_shell).is_err());
+
+        let conn = conn();
+        create_launch_entry(&conn, &entry.entry).unwrap();
+        // Same AUMID with different case / surrounding whitespace collides.
+        let mut twin = uwp_entry(
+            "Calc2",
+            2,
+            "microsoft.windowscalculator_8wekyb3d8bbwe!app",
+        );
+        twin.entry.target = format!(
+            "  shell:AppsFolder\\{}  ",
+            "MICROSOFT.WINDOWSCALCULATOR_8WEKYB3D8BBWE!APP"
+        );
+        // colliding_entry uses trimmed, case-insensitive compare (SQL COLLATE NOCASE)
+        // — the AUMID branch is the same as the Win32 path branch.
+        assert!(colliding_entry(&conn, &twin.entry, None)
+            .unwrap()
+            .is_some());
+        // Different AUMID does not collide.
+        let other = uwp_entry("Other", 3, "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify");
+        assert!(colliding_entry(&conn, &other.entry, None)
+            .unwrap()
+            .is_none());
+        // Win32 flow unchanged: same target as another kind does not collide.
+        let mut as_command = command_input("run calc");
+        as_command.target = "shell:AppsFolder\\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App".into();
+        assert!(colliding_entry(&conn, &as_command, None).unwrap().is_none());
+    }
+
+    #[test]
+    fn store_uwp_launch_via_aumid_activates() {
+        // Picking a Store Calculator entry creates kind=app row with
+        // target=shell:AppsFolder\<AUMID>; launching activates Calculator (no
+        // custom command) via ActivateApplication, not ShellExecute.
+        let engine = FakeLauncher::new();
+        let entries = vec![uwp_entry(
+            "Calculator",
+            1,
+            "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",
+        )];
+        let report = run_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW);
+        assert_eq!(report.started, vec!["Calculator"]);
+        assert!(report.skipped.is_empty());
+        assert!(report.failed.is_empty());
+        assert_eq!(engine.spawned_targets(), vec!["Calculator"]);
+        assert_eq!(engine.foregrounded().len(), 0);
+        // Single-tap foreground also works for UWP when window is on target
+        let engine = FakeLauncher::new().window(
+            "shell:AppsFolder\\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",
+            100,
+            None,
+            true,
+        );
+        let report = run_single_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW);
+        assert_eq!(report.skipped, vec!["Calculator — foregrounded".to_string()]);
+        assert!(report.started.is_empty());
+        assert_eq!(engine.foregrounded(), vec![100]);
+        assert_eq!(engine.spawned_targets().len(), 0);
+    }
+
+    #[test]
+    fn store_uwp_dead_desktop_frees_at_spawn() {
+        // Launch of UWP on assigned dead desktop still frees at spawn per
+        // ticket 99, reporting dead-desktop note (not a failure, not a move).
+        let guid_live = "550fe0a1-3d41-4e5f-9a2b-c8d0e1f2a3b4";
+        let guid_dead = "deadbeef-dead-beef-dead-beefdeadbeef";
+        let engine = FakeLauncher::new().desktops(&[guid_live]);
+        let entries = vec![uwp_desktop_entry(
+            "Calculator",
+            1,
+            "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",
+            guid_dead,
+        )];
+        let report = run_launch_queue_until(&engine, &entries, 1, SHORT_WINDOW);
+        assert_eq!(report.started, vec!["Calculator"]);
+        assert!(report.skipped.is_empty());
+        assert!(report.failed.is_empty());
+        assert_eq!(engine.moved().len(), 0, "dead desktop never moves");
+        assert_eq!(report.notes.len(), 1);
+        assert!(
+            report.notes[0].contains("no longer exists"),
+            "got: {:?}",
+            report.notes
+        );
+        assert_eq!(engine.foregrounded().len(), 0);
+    }
+
+    #[test]
+    fn store_uwp_validates_as_app_with_no_shell() {
+        let entry = uwp_entry("StoreApp", 1, "Publisher.App_123!App");
+        assert!(validate_launch_entry(&entry.entry).is_ok());
+        // Target exists is always true for shell:AppsFolder (ticket 122)
+        let engine = FakeLauncher::new();
+        assert!(engine.target_exists(&entry.entry.target));
+        // Even a missing filesystem path would be considered existing for UWP
+        let missing = FakeLauncher::new().missing("shell:AppsFolder\\Missing!App");
+        // But target_exists is hard-wired to true for the prefix, so missing
+        // set does not affect UWP.
+        assert!(missing.target_exists("shell:AppsFolder\\Missing!App"));
     }
 }
 
