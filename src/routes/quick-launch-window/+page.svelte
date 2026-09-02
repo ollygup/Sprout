@@ -17,6 +17,7 @@
     listGroups,
     listLaunchEntries,
     listQuickActions,
+    openSprout,
     runQuickAction,
     startLaunchEntry,
     startQuickLaunch,
@@ -433,6 +434,24 @@
   function close() {
     invoke("close_quick_launch_window").catch((e) => console.error(e));
   }
+
+  // Ticket 123: the dock header's mark doubles as a home affordance — a
+  // second entry point to the main window beside the tray's right-click menu.
+  // Reuses `tray::open_sprout` (`open_main_window` + `open_if_docked`, single
+  // seam for tray, dock and single-instance) so dock and tray share the same
+  // main-thread foreground and `800ms` zombie handling; failure is logged.
+  let openingMain = $state(false);
+  async function openMain() {
+    if (openingMain) return;
+    openingMain = true;
+    try {
+      await openSprout();
+    } catch (e) {
+      console.error(e);
+    } finally {
+      openingMain = false;
+    }
+  }
 </script>
 
 <svelte:head>
@@ -449,15 +468,22 @@
     class="qlw__bar"
     data-tauri-drag-region={titleBarDragRegion(dock.docked)}
   >
-    <span class="qlw__mark" aria-hidden="true"><SproutMark size={16} /></span>
-    <h1 class="qlw__title">Quick Launch</h1>
-    {#if dock.docked}
-      <span class="qlw__dock-hint" aria-hidden="true">
-        <Icon
-          name={dock.edge === "left" ? "dock-left" : "dock-right"}
-          size={13}
-        />
-      </span>
+    <button
+      class="qlw__mark"
+      type="button"
+      aria-label="Open Sprout"
+      title="Open Sprout"
+      aria-busy={openingMain}
+      disabled={openingMain}
+      data-tauri-drag-region="false"
+      onclick={openMain}
+    >
+      <SproutMark size={16} />
+    </button>
+    {#if !dock.docked}
+      <h1 class="qlw__title">Quick Launch</h1>
+    {:else}
+      <span class="qlw__spacer" aria-hidden="true"></span>
       <IconButton
         icon="chevron-left"
         label={dock.left_eligible ? "Dock to the left edge" : SEAM_REASON}
@@ -827,33 +853,59 @@
 
   .qlw__mark {
     display: inline-flex;
+    align-items: center;
+    justify-content: center;
     flex-shrink: 0;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    transition:
+      background var(--dur-fast) var(--ease-out),
+      border-color var(--dur-fast) var(--ease-out);
   }
 
-  /* The docked strip (ticket 53) gets a distinct edge: a hint in the header
-     and a slightly deeper page background so the pinned bar reads as one
-     surface against the desktop. Ticket 59: the header padding mirrors on
-     both docked edges — the wider inset lands on the screen-edge side, so a
-     left- and right-docked strip have identical side spacing (no gap
-     asymmetry, no crowding against the neighboring application's space). */
+  .qlw__mark:hover {
+    background: var(--bg-hover);
+    border-color: var(--border);
+  }
+
+  .qlw__mark:focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+
+  .qlw__mark:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+
+  .qlw__spacer {
+    flex: 1;
+    min-width: 0;
+  }
+
+  /* The docked strip (ticket 53) gets a distinct edge: a slightly deeper
+     page background so the pinned bar reads as one surface against the
+     desktop. Ticket 59 mirrored the padding (wider inset on the screen-edge
+     side) for environment-symmetric gaps; ticket 123 follow-up makes the
+     docked header symmetric (8px both sides) so the mark + controls are
+     centered within the 340px strip — left auto-hide was 4px off-center with
+     the mirrored 16/8, reported as "not centered" — and drops the decorative
+     `dock-left`/`dock-right` hint (redundant with window position + disabled
+     chevron, wasted 21px at 340). */
   .qlw--docked {
     background: var(--bg-card);
   }
 
-  .qlw--docked-left .qlw__bar {
-    padding-left: var(--space-4);
-    padding-right: var(--space-2);
-  }
-
+  .qlw--docked-left .qlw__bar,
   .qlw--docked-right .qlw__bar {
     padding-left: var(--space-2);
-    padding-right: var(--space-4);
-  }
-
-  .qlw__dock-hint {
-    display: inline-flex;
-    flex-shrink: 0;
-    color: var(--accent);
+    padding-right: var(--space-2);
   }
 
   .qlw__title {

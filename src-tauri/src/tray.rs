@@ -94,7 +94,7 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
 /// Launch bar follows the same restore rule as boot (ADR-0013): a remembered
 /// "docked" preference brings it back; floating waits for its explicit
 /// left-click.
-fn open_sprout(app: &AppHandle) {
+pub(crate) fn open_sprout(app: &AppHandle) {
     if let Err(error) = crate::open_main_window(app) {
         // A failure here is silently ignored in the click handler; log to
         // stderr rather than dropping it entirely.

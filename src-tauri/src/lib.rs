@@ -68,10 +68,51 @@ pub struct AppState {
     /// Ticket 116: whether Settings is dirty (unsaved changes). Frontend syncs
     /// via `set_settings_dirty`; the main-window close handler gates on it.
     pub settings_dirty: Mutex<bool>,
+    /// Ticket 123: timestamp of last main window close (destroy) — used to
+    /// detect the close→reopen race where `get_webview_window("main")` still
+    /// returns a zombie handle for a few ms after `destroy()`. `open_main_window`
+    /// checks this and sleeps if the close was very recent.
+    pub main_close_time: Mutex<Option<std::time::Instant>>,
+    /// A newly-created main window is native-visible but fully transparent so
+    /// WebView2 can load without showing its blank startup surface. The main
+    /// layout clears this only after its first render is mounted.
+    pub main_window_loading: AtomicBool,
 }
 
 fn lock<'a>(state: &'a State<'a, AppState>) -> Result<std::sync::MutexGuard<'a, Connection>, String> {
     state.db.lock().map_err(|e| e.to_string())
+}
+
+/// Emits `quick-launch-changed` only to the Quick Launch window when its HWND
+/// is still valid — avoids `PostMessage failed ; Invalid window handle` spam
+/// when the main window has just been destroyed (close→reopen race, vite HMR
+/// reload). `app.emit` would broadcast to the destroyed main webview as well.
+fn emit_quick_launch_changed(app: &AppHandle) {
+    use tauri::Manager;
+    if let Some(window) = app.get_webview_window(quick_window::QUICK_LAUNCH_WINDOW) {
+        let valid = match window.hwnd() {
+            Ok(hwnd) => unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsWindow(hwnd.0) != 0 },
+            Err(_) => false,
+        };
+        if valid {
+            let _ = window.emit("quick-launch-changed", ());
+        }
+    }
+}
+
+fn emit_valid<T: serde::Serialize + Clone>(app: &AppHandle, event: &str, payload: &T) {
+    use tauri::Manager;
+    for label in [quick_window::QUICK_LAUNCH_WINDOW, "main"] {
+        if let Some(window) = app.get_webview_window(label) {
+            let valid = match window.hwnd() {
+                Ok(hwnd) => unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsWindow(hwnd.0) != 0 },
+                Err(_) => false,
+            };
+            if valid {
+                let _ = window.emit(event, payload.clone());
+            }
+        }
+    }
 }
 
 /// Lists Library Products, optionally filtered by a search query matched
@@ -463,7 +504,7 @@ fn update_settings(
     if let Err(e) = quick_window::apply_settings(&app, &settings) {
         eprintln!("Could not apply dock settings to the live window: {e}");
     }
-    let _ = app.emit("quick-launch-changed", ());
+    emit_quick_launch_changed(&app);
     Ok(())
 }
 
@@ -480,7 +521,7 @@ fn update_theme(
     let conn = lock(&state)?;
     settings::save_theme(&conn, &theme)?;
     drop(conn);
-    let _ = app.emit("quick-launch-changed", ());
+    emit_quick_launch_changed(&app);
     Ok(())
 }
 
@@ -517,6 +558,11 @@ fn set_settings_dirty(state: State<'_, AppState>, dirty: bool) -> Result<(), Str
 #[tauri::command]
 fn destroy_main_window(app: AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("main") {
+        if let Some(state) = app.try_state::<AppState>() {
+            if let Ok(mut t) = state.main_close_time.lock() {
+                *t = Some(std::time::Instant::now());
+            }
+        }
         window.destroy().map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -593,7 +639,7 @@ fn create_launch_entry(
     }
     let created = launch::create_launch_entry(&conn, &entry).map_err(|e| e.to_string())?;
     drop(conn);
-    let _ = app.emit("quick-launch-changed", ());
+    emit_quick_launch_changed(&app);
     Ok(created)
 }
 
@@ -614,7 +660,7 @@ fn update_launch_entry(
     }
     launch::update_launch_entry(&conn, &entry).map_err(|e| e.to_string())?;
     drop(conn);
-    let _ = app.emit("quick-launch-changed", ());
+    emit_quick_launch_changed(&app);
     Ok(())
 }
 
@@ -628,7 +674,7 @@ fn delete_launch_entry(
     let conn = lock(&state)?;
     launch::delete_launch_entry(&conn, id).map_err(|e| e.to_string())?;
     drop(conn);
-    let _ = app.emit("quick-launch-changed", ());
+    emit_quick_launch_changed(&app);
     Ok(())
 }
 
@@ -643,7 +689,7 @@ fn move_launch_entry(
     let conn = lock(&state)?;
     launch::move_launch_entry(&conn, id, to_position).map_err(|e| e.to_string())?;
     drop(conn);
-    let _ = app.emit("quick-launch-changed", ());
+    emit_quick_launch_changed(&app);
     Ok(())
 }
 
@@ -766,7 +812,7 @@ fn launch_entries_inner(
         if let Some(path) = &log_path {
             launch::write_launch_run_summary(path, &report);
         }
-        let _ = app.emit("launch-run-done", &report);
+        emit_valid(&app, "launch-run-done", &report);
         let _ = notify_launch_summary(&app, &report);
         running.store(false, Ordering::SeqCst);
     });
@@ -786,6 +832,145 @@ fn notify_launch_summary(app: &AppHandle, report: &launch::LaunchReport) -> Resu
         .map_err(|e| e.to_string())
 }
 
+/// Pure helper for ticket 123 white-screen: whether the window handle should be
+/// treated as a zombie that will paint white. `is_valid_hwnd` is the `IsWindow`
+/// result; `elapsed_since_close` is `main_close_time.elapsed()` when a close
+/// happened. A recently-closed window ( <800 ms ) is a zombie even when HWND
+/// still reports valid — WebView2 is destroyed but the manager still returns the
+/// handle, and focusing it yields a full-white, unclosable window. The 800 ms
+/// grace covers the async `destroy()` + manager cleanup + WebView2 COM teardown
+/// on slower machines; 500 ms was insufficient for the close→reopen race
+/// (click while shown → close → click again). Pure — the regression test seam.
+pub(crate) fn is_zombie_window(
+    is_valid_hwnd: bool,
+    elapsed_since_close: Option<std::time::Duration>,
+) -> bool {
+    if !is_valid_hwnd {
+        return true;
+    }
+    if let Some(elapsed) = elapsed_since_close {
+        if elapsed < std::time::Duration::from_millis(800) {
+            return true;
+        }
+    }
+    false
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ExistingMainWindowAction {
+    Rebuild,
+    WaitForFrontendReady,
+    Reveal,
+}
+
+fn existing_main_window_action(
+    is_valid_hwnd: bool,
+    elapsed_since_close: Option<std::time::Duration>,
+    is_loading: bool,
+) -> ExistingMainWindowAction {
+    if is_zombie_window(is_valid_hwnd, elapsed_since_close) {
+        ExistingMainWindowAction::Rebuild
+    } else if is_loading {
+        ExistingMainWindowAction::WaitForFrontendReady
+    } else {
+        ExistingMainWindowAction::Reveal
+    }
+}
+
+#[cfg(test)]
+mod white_screen_tests {
+    use super::{existing_main_window_action, is_zombie_window, ExistingMainWindowAction};
+    use std::time::Duration;
+
+    #[test]
+    fn valid_hwnd_but_recent_close_is_zombie() {
+        // The exact repro: valid HWND but close 100ms ago -> must be zombie (white)
+        assert!(is_zombie_window(true, Some(Duration::from_millis(100))));
+        assert!(is_zombie_window(true, Some(Duration::from_millis(0))));
+        assert!(is_zombie_window(true, Some(Duration::from_millis(799))));
+    }
+
+    #[test]
+    fn valid_hwnd_with_old_close_is_not_zombie() {
+        // Outside grace: focusing existing window is safe (idempotent focus)
+        assert!(!is_zombie_window(true, Some(Duration::from_millis(800))));
+        assert!(!is_zombie_window(true, Some(Duration::from_millis(2000))));
+        assert!(!is_zombie_window(true, None));
+    }
+
+    #[test]
+    fn invalid_hwnd_is_always_zombie() {
+        assert!(is_zombie_window(false, None));
+        assert!(is_zombie_window(false, Some(Duration::from_millis(100))));
+        assert!(is_zombie_window(false, Some(Duration::from_millis(2000))));
+    }
+
+    #[test]
+    fn close_reopen_race_needs_grace() {
+        // Minimised repro sequence: shown -> click (focus) -> close -> click (reopen) within 800ms
+        // The second click sees valid HWND but elapsed 100ms -> zombie
+        let elapsed_after_close = Some(Duration::from_millis(100));
+        let is_valid = true; // IsWindow still true because destroy() async
+        // Legacy logic (only !is_valid) would be false -> bug (returns white)
+        let legacy = !is_valid;
+        assert!(!legacy, "legacy would think not zombie");
+        // Fixed logic must be true -> rebuild
+        assert!(is_zombie_window(is_valid, elapsed_after_close));
+    }
+
+    #[test]
+    fn valid_loading_window_waits_for_frontend_ready() {
+        assert_eq!(
+            existing_main_window_action(true, None, true),
+            ExistingMainWindowAction::WaitForFrontendReady
+        );
+    }
+
+    #[test]
+    fn valid_ready_window_is_revealed() {
+        assert_eq!(
+            existing_main_window_action(true, None, false),
+            ExistingMainWindowAction::Reveal
+        );
+    }
+
+    #[test]
+    fn zombie_window_is_rebuilt_even_while_loading() {
+        assert_eq!(
+            existing_main_window_action(true, Some(Duration::from_millis(100)), true),
+            ExistingMainWindowAction::Rebuild
+        );
+    }
+}
+
+fn set_main_window_alpha(window: &tauri::WebviewWindow, alpha: u8) -> tauri::Result<()> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetLayeredWindowAttributes, SetWindowLongPtrW, GWL_EXSTYLE, LWA_ALPHA,
+        WS_EX_LAYERED,
+    };
+
+    let hwnd = window.hwnd()?;
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd.0, GWL_EXSTYLE);
+        SetWindowLongPtrW(
+            hwnd.0,
+            GWL_EXSTYLE,
+            style | WS_EX_LAYERED as isize,
+        );
+        if SetLayeredWindowAttributes(hwnd.0, 0, alpha, LWA_ALPHA) == 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        if alpha == u8::MAX {
+            SetWindowLongPtrW(
+                hwnd.0,
+                GWL_EXSTYLE,
+                (style | WS_EX_LAYERED as isize) & !(WS_EX_LAYERED as isize),
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Opens the main window: focuses the existing one, or recreates it when it
 /// was destroyed by closing it (ticket 43). Shared by the boot path, the
 /// tray's Open Sprout and the single-instance focus hook. The recreated
@@ -793,13 +978,100 @@ fn notify_launch_summary(app: &AppHandle, report: &launch::LaunchReport) -> Resu
 /// the single size source since the conf file stopped declaring windows
 /// (ticket 76, ADR-0013).
 pub(crate) fn open_main_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
+    use std::time::Duration;
     use tauri::Manager;
-    if let Some(window) = app.get_webview_window("main") {
-        window.set_focus()?;
-        Ok(window)
-    } else {
-        let window = tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
+    // Ticket 123 white-screen (close → reopen via dock mark showed blank):
+    // `window.destroy()` on close is async — the label "main" lingers in the
+    // manager until the event loop processes it. A immediate rebuild then sees
+    // "already exists" and the old (destroyed) handle still answers
+    // `get_webview_window`, leading to focusing a zombie white webview. Retry
+    // with short sleeps so the manager can settle. A live, ready window is
+    // shown/unminimized/focused; a transparent loading one waits for the
+    // frontend's mounted signal.
+    // Also respect `main_close_time` — if the user just closed (≤800 ms ago),
+    // the manager is guaranteed to still hold the zombie, so wait first.
+    // Lean destroy-on-close (least memory) requires this, not hidden-window.
+    if let Some(state) = app.try_state::<AppState>() {
+        if let Ok(t) = state.main_close_time.lock() {
+            if let Some(at) = *t {
+                let elapsed = at.elapsed();
+                if elapsed < Duration::from_millis(800) {
+                    std::thread::sleep(Duration::from_millis(800) - elapsed);
+                }
+            }
+        }
+    }
+    for _ in 0..7 {
+        if let Some(window) = app.get_webview_window("main") {
+            // Zombie check: `destroy()` on close is async — the manager may still
+            // return a handle whose HWND is already invalid (white/blank). `IsWindow`
+            // fails for a destroyed HWND, so we drop it and retry the build instead
+            // of focusing a dead webview (close→reopen white screen).
+            let is_valid = match window.hwnd() {
+                Ok(hwnd) => unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsWindow(hwnd.0) != 0 },
+                Err(_) => false,
+            };
+            let elapsed_opt = {
+                if let Some(state) = app.try_state::<AppState>() {
+                    if let Ok(g) = state.main_close_time.lock() {
+                        g.map(|at| at.elapsed())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            };
+            // Ticket 123 fix: a recently-closed window ( <800ms ) is a zombie even when
+            // HWND still reports valid — focusing it paints white. This is the repro:
+            // shown → click (focus) → close (destroy async) → click (reopen) within 800ms
+            // still sees the old handle with valid HWND. Legacy checked only !is_valid.
+            let is_loading = app
+                .try_state::<AppState>()
+                .map(|state| state.main_window_loading.load(Ordering::SeqCst))
+                .unwrap_or(false);
+            match existing_main_window_action(is_valid, elapsed_opt, is_loading) {
+                ExistingMainWindowAction::Rebuild => {
+                    if let Some(state) = app.try_state::<AppState>() {
+                        state.main_window_loading.store(false, Ordering::SeqCst);
+                    }
+                    let _ = window.destroy();
+                    std::thread::sleep(Duration::from_millis(120));
+                    continue;
+                }
+                ExistingMainWindowAction::WaitForFrontendReady => return Ok(window),
+                ExistingMainWindowAction::Reveal => {}
+            }
+            // A ready live window takes the idempotent focus path. Loading is
+            // deliberately left transparent until the frontend acknowledges mount.
+            let ok = (|| -> tauri::Result<()> {
+                window.show()?;
+                window.unminimize()?;
+                window.set_focus()?;
+                Ok(())
+            })()
+            .is_ok();
+            if ok {
+                if let Some(state) = app.try_state::<AppState>() {
+                    if let Ok(mut t) = state.main_close_time.lock() {
+                        *t = None;
+                    }
+                }
+                return Ok(window);
+            }
+            let _ = window.destroy();
+            std::thread::sleep(Duration::from_millis(120));
+            continue;
+        }
+        if let Some(state) = app.try_state::<AppState>() {
+            state.main_window_loading.store(true, Ordering::SeqCst);
+        }
+        let build = tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
             .title("Sprout")
+            .visible(true)
+            .transparent(true)
+            .background_color(tauri::window::Color(0, 0, 0, 0))
+            .skip_taskbar(true)
             .inner_size(
                 constants::window::MAIN_WINDOW_WIDTH,
                 constants::window::MAIN_WINDOW_HEIGHT,
@@ -808,16 +1080,46 @@ pub(crate) fn open_main_window(app: &AppHandle) -> tauri::Result<tauri::WebviewW
                 constants::window::MAIN_WINDOW_MIN_WIDTH,
                 constants::window::MAIN_WINDOW_MIN_HEIGHT,
             )
-            .build()?;
-        // Ticket 111: WM_DISPLAYCHANGE for the main window so Settings' per-
-        // monitor list re-renders when screens move while the Quick Launch
-        // window is closed (tray-only). Reuses the Quick Launch subclass
-        // proc — both windows share the same cache invalidation.
-        if let Ok(hwnd) = window.hwnd() {
-            quick_window::install_display_change_hook(app, hwnd.0);
+            .build();
+        match build {
+            Ok(window) => {
+                // Ticket 111: WM_DISPLAYCHANGE for the main window so Settings' per-
+                // monitor list re-renders when screens move while the Quick Launch
+                // window is closed (tray-only). Reuses the Quick Launch subclass
+                // proc — both windows share the same cache invalidation.
+                if let Ok(hwnd) = window.hwnd() {
+                    quick_window::install_display_change_hook(app, hwnd.0);
+                }
+                let prepare = window.center();
+                if let Err(e) = prepare {
+                    if let Some(state) = app.try_state::<AppState>() {
+                        state.main_window_loading.store(false, Ordering::SeqCst);
+                    }
+                    let _ = window.destroy();
+                    return Err(e);
+                }
+                if let Some(state) = app.try_state::<AppState>() {
+                    if let Ok(mut t) = state.main_close_time.lock() {
+                        *t = None;
+                    }
+                }
+                return Ok(window);
+            }
+            Err(e) if e.to_string().to_lowercase().contains("already exists") => {
+                std::thread::sleep(Duration::from_millis(120));
+                continue;
+            }
+            Err(e) => {
+                if let Some(state) = app.try_state::<AppState>() {
+                    state.main_window_loading.store(false, Ordering::SeqCst);
+                }
+                return Err(e);
+            },
         }
-        Ok(window)
     }
+    Err(tauri::Error::AssetNotFound(
+        "main window failed to open after retries".into(),
+    ))
 }
 
 /// The fresh installed-app snapshot behind the Quick Launch search
@@ -901,7 +1203,7 @@ fn create_quick_action(
     }
     let created = quick_actions::create_quick_action(&conn, &action).map_err(|e| e.to_string())?;
     drop(conn);
-    let _ = app.emit("quick-launch-changed", ());
+    emit_quick_launch_changed(&app);
     Ok(created)
 }
 
@@ -924,7 +1226,7 @@ fn update_quick_action(
     }
     quick_actions::update_quick_action(&conn, &action).map_err(|e| e.to_string())?;
     drop(conn);
-    let _ = app.emit("quick-launch-changed", ());
+    emit_quick_launch_changed(&app);
     Ok(())
 }
 
@@ -938,7 +1240,7 @@ fn delete_quick_action(
     let conn = lock(&state)?;
     quick_actions::delete_quick_action(&conn, id).map_err(|e| e.to_string())?;
     drop(conn);
-    let _ = app.emit("quick-launch-changed", ());
+    emit_quick_launch_changed(&app);
     Ok(())
 }
 
@@ -953,7 +1255,7 @@ fn move_quick_action(
     let conn = lock(&state)?;
     quick_actions::move_quick_action(&conn, id, to_position).map_err(|e| e.to_string())?;
     drop(conn);
-    let _ = app.emit("quick-launch-changed", ());
+    emit_quick_launch_changed(&app);
     Ok(())
 }
 
@@ -987,7 +1289,7 @@ fn create_clip(
     }
     let created = clips::create_clip(&conn, &clip).map_err(|e| e.to_string())?;
     drop(conn);
-    let _ = app.emit("quick-launch-changed", ());
+    emit_quick_launch_changed(&app);
     Ok(created)
 }
 
@@ -1012,7 +1314,7 @@ fn update_clip(
     }
     clips::update_clip(&conn, &clip).map_err(|e| e.to_string())?;
     drop(conn);
-    let _ = app.emit("quick-launch-changed", ());
+    emit_quick_launch_changed(&app);
     Ok(())
 }
 
@@ -1027,7 +1329,7 @@ fn delete_clip(
     let conn = lock(&state)?;
     clips::delete_clip(&conn, id).map_err(|e| e.to_string())?;
     drop(conn);
-    let _ = app.emit("quick-launch-changed", ());
+    emit_quick_launch_changed(&app);
     Ok(())
 }
 
@@ -1042,7 +1344,7 @@ fn move_clip(
     let conn = lock(&state)?;
     clips::move_clip(&conn, id, to_position).map_err(|e| e.to_string())?;
     drop(conn);
-    let _ = app.emit("quick-launch-changed", ());
+    emit_quick_launch_changed(&app);
     Ok(())
 }
 
@@ -1087,7 +1389,7 @@ fn create_group(
     let conn = lock(&state)?;
     let created = groups::create_group(&conn, collection, &name)?;
     drop(conn);
-    let _ = app.emit("quick-launch-changed", ());
+    emit_quick_launch_changed(&app);
     Ok(created)
 }
 
@@ -1097,7 +1399,7 @@ fn rename_group(app: AppHandle, state: State<'_, AppState>, id: i64, name: Strin
     let conn = lock(&state)?;
     groups::rename_group(&conn, id, &name)?;
     drop(conn);
-    let _ = app.emit("quick-launch-changed", ());
+    emit_quick_launch_changed(&app);
     Ok(())
 }
 
@@ -1107,7 +1409,7 @@ fn delete_group(app: AppHandle, state: State<'_, AppState>, id: i64) -> Result<(
     let conn = lock(&state)?;
     groups::delete_group(&conn, id).map_err(|e| e.to_string())?;
     drop(conn);
-    let _ = app.emit("quick-launch-changed", ());
+    emit_quick_launch_changed(&app);
     Ok(())
 }
 
@@ -1123,7 +1425,7 @@ fn move_group(
     let conn = lock(&state)?;
     groups::move_group(&conn, id, to_position).map_err(|e| e.to_string())?;
     drop(conn);
-    let _ = app.emit("quick-launch-changed", ());
+    emit_quick_launch_changed(&app);
     Ok(())
 }
 
@@ -1141,7 +1443,7 @@ fn assign_to_group(
     let conn = lock(&state)?;
     groups::assign_item(&conn, collection, item_id, group_id).map_err(|e| e.to_string())?;
     drop(conn);
-    let _ = app.emit("quick-launch-changed", ());
+    emit_quick_launch_changed(&app);
     Ok(())
 }
 
@@ -1156,7 +1458,7 @@ fn unassign_from_group(
     let conn = lock(&state)?;
     groups::unassign_item(&conn, collection, item_id).map_err(|e| e.to_string())?;
     drop(conn);
-    let _ = app.emit("quick-launch-changed", ());
+    emit_quick_launch_changed(&app);
     Ok(())
 }
 
@@ -1174,7 +1476,7 @@ fn update_groups_enabled(
     let conn = lock(&state)?;
     settings::save_groups_feature(&conn, collection, if enabled { "on" } else { "off" })?;
     drop(conn);
-    let _ = app.emit("quick-launch-changed", ());
+    emit_quick_launch_changed(&app);
     Ok(())
 }
 
@@ -1533,6 +1835,47 @@ fn per_display_key<'a>(identity: Option<&'a str>, device: &'a str) -> String {
     }
 }
 
+/// Opens (or focuses) the main window (ticket 123): the dock header's mark
+/// click and any other surface that needs a non-tray entry point. Reuses the
+/// single-size-source `open_main_window` seam (tray + single-instance hook).
+#[tauri::command]
+fn open_main_window_cmd(app: AppHandle) -> Result<(), String> {
+    crate::open_main_window(&app)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn main_window_ready(app: AppHandle) -> Result<(), String> {
+    let Some(state) = app.try_state::<AppState>() else {
+        return Err("application state is unavailable".into());
+    };
+    if !state.main_window_loading.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    let Some(window) = app.get_webview_window("main") else {
+        state.main_window_loading.store(false, Ordering::SeqCst);
+        return Err("main window is unavailable".into());
+    };
+    let reveal = set_main_window_alpha(&window, u8::MAX)
+        .and_then(|_| window.set_skip_taskbar(false))
+        .and_then(|_| window.show())
+        .and_then(|_| window.unminimize())
+        .and_then(|_| window.set_focus());
+    state.main_window_loading.store(false, Ordering::SeqCst);
+    if let Err(e) = reveal {
+        let _ = window.destroy();
+        return Err(e.to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn open_sprout_cmd(app: AppHandle) -> Result<(), String> {
+    crate::tray::open_sprout(&app);
+    Ok(())
+}
+
 /// The dock chrome's state query (tickets 53 & 59): the current edge and mode
 /// when docked, or — while the window floats — the target edge/mode the
 /// toggle would dock to; `docked` tells the two apart. The header renders its
@@ -1853,6 +2196,13 @@ pub fn run() {
                     let _ = window.app_handle().emit("settings-dirty-close-requested", ());
                 } else {
                     api.prevent_close();
+                    // Ticket 123: remember close time for the close→reopen white-screen
+                    // race — `destroy()` is async and the label lingers.
+                    if let Some(state) = window.app_handle().try_state::<AppState>() {
+                        if let Ok(mut t) = state.main_close_time.lock() {
+                            *t = Some(std::time::Instant::now());
+                        }
+                    }
                     let _ = window.destroy();
                 }
             }
@@ -1928,6 +2278,8 @@ pub fn run() {
             dock: Mutex::new(None),
             running_actions: Mutex::new(HashMap::new()),
             settings_dirty: Mutex::new(false),
+            main_close_time: Mutex::new(None),
+            main_window_loading: AtomicBool::new(false),
         })
         .invoke_handler(tauri::generate_handler![
             list_products,
@@ -2001,6 +2353,9 @@ pub fn run() {
             unassign_from_group,
             update_groups_enabled,
             close_quick_launch_window,
+            open_main_window_cmd,
+            main_window_ready,
+            open_sprout_cmd,
             toggle_quick_launch_dock,
             switch_quick_launch_dock_edge,
             get_quick_launch_dock_state,

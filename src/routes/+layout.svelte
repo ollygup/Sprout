@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import type { Snippet } from "svelte";
   import { page } from "$app/state";
   import "../lib/styles/tokens.css";
@@ -6,7 +7,7 @@
   import { listen } from "@tauri-apps/api/event";
   import NavRail from "$lib/components/NavRail.svelte";
   import RunBanner from "$lib/components/RunBanner.svelte";
-  import { takePendingImport } from "$lib/api";
+  import { mainWindowReady, takePendingImport } from "$lib/api";
   import { launchImport } from "$lib/launchImport.svelte";
   import { startRunAwareness } from "$lib/runAwareness.svelte";
   import { startTheme } from "$lib/theme.svelte";
@@ -21,6 +22,13 @@
   const isQuickLaunchWindow = $derived(
     page.route.id === "/quick-launch-window"
   );
+
+  // WebView2 can paint its native window before this shell exists. Rust keeps
+  // only the main window transparent until this mounted acknowledgement.
+  onMount(() => {
+    if (isQuickLaunchWindow) return;
+    mainWindowReady().catch((error) => console.error(error));
+  });
 
   // The theme store (ticket 31) applies its cached mode at import, before the
   // first paint; this wires the OS listener and backend reconciliation.

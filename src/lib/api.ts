@@ -420,6 +420,20 @@ export function setDisplayDockMode(display: string, mode: string): Promise<void>
   return invoke<void>("set_display_dock_mode", { display, mode });
 }
 
+/** Opens (or focuses) the main window — the dock header's mark click
+ * (ticket 123) and any future non-tray entry point. */
+export function openMainWindow(): Promise<void> {
+  return invoke<void>("open_main_window_cmd");
+}
+
+export function mainWindowReady(): Promise<void> {
+  return invoke<void>("main_window_ready");
+}
+
+export function openSprout(): Promise<void> {
+  return invoke<void>("open_sprout_cmd");
+}
+
 /** The Quick Launch dock's toggle (ticket 53): docks the window to its
  * current monitor's remembered (or Settings-default) edge, or undocks back
  * to the floating window when already docked. */

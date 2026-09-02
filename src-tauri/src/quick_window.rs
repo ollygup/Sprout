@@ -142,6 +142,33 @@ type AppBarWndProc = unsafe extern "system" fn(HWND, u32, usize, isize) -> isize
 
 const WM_DISPLAYCHANGE: u32 = 0x007E;
 
+/// Emits `quick-launch-changed` only to the Quick Launch window when its HWND is still valid — avoids PostMessage to a destroyed main webview (close→reopen race, vite HMR).
+fn emit_quick_launch_changed_qw(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window(QUICK_LAUNCH_WINDOW) {
+        let valid = match window.hwnd() {
+            Ok(hwnd) => unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsWindow(hwnd.0) != 0 },
+            Err(_) => false,
+        };
+        if valid {
+            let _ = window.emit("quick-launch-changed", ());
+        }
+    }
+}
+
+fn emit_displays_changed(app: &AppHandle) {
+    for label in [QUICK_LAUNCH_WINDOW, "main"] {
+        if let Some(window) = app.get_webview_window(label) {
+            let valid = match window.hwnd() {
+                Ok(hwnd) => unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsWindow(hwnd.0) != 0 },
+                Err(_) => false,
+            };
+            if valid {
+                let _ = window.emit("displays-changed", ());
+            }
+        }
+    }
+}
+
 /// Subclasses the Quick Launch window so the registered AppBar callback
 /// message (`ABN_*` notifications) reaches us. Installed once per window,
 /// before the AppBar registration; a no-op when already installed for `hwnd`.
@@ -190,14 +217,15 @@ unsafe extern "system" fn appbar_proc(
         crate::appbar::invalidate_display_cache();
         DISPLAY_EPOCH.fetch_add(1, Ordering::SeqCst);
         if let Some(app) = APP_HANDLE.get() {
-            // Migrations for seam edges are performed lazily on next dock;
-            // invalidate any cached geometry now and tell both surfaces to
-            // re-render (Settings per-monitor list + QL edge arrows, ticket
-            // 111). The opener (ticket 119) will re-read cached eligibility
-            // via the same pure helper — no second probe — and resets its
-            // gate so the next blink sees the new wall (Study E).
-            let _ = app.emit("displays-changed", ());
-            let _ = app.emit("quick-launch-changed", ());
+            // Guard against emitting to a destroyed/reloading webview (vite HMR
+            // or close→reopen race) — `IsWindow` fails for an invalid handle and
+            // prevents the "PostMessage failed ; Invalid window handle"
+            // spam that appears in dev when `svelte-kit sync` reloads the page.
+            let valid = unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsWindow(hwnd) != 0 };
+            if valid {
+                emit_displays_changed(app);
+                emit_quick_launch_changed_qw(app);
+            }
         }
     }
     if msg == appbar::callback_message() {
@@ -280,7 +308,7 @@ fn set_blocked(app: &AppHandle, reason: Option<String>) -> bool {
         Err(_) => false,
     };
     if changed {
-        let _ = app.emit("quick-launch-changed", ());
+        emit_quick_launch_changed_qw(app);
     }
     changed
 }
@@ -388,10 +416,20 @@ fn record_last_rect(app: &AppHandle, rect: Option<RECT>) {
 
 /// Surfaces a dock failure in the window (ticket 61): logs one line and emits
 /// the `quick-launch-dock-error` event the Quick Launch window renders as its
-/// error banner — no silent half-dock, no pretending to be docked.
+/// error banner — no silent half-dock, no pretending to be docked. Only emits
+/// to the Quick Launch window when its HWND is still valid to avoid PostMessage
+/// to a destroyed main webview.
 fn report_dock_error(app: &AppHandle, message: &str) {
     eprintln!("{message}");
-    let _ = app.emit("quick-launch-dock-error", message.to_string());
+    if let Some(window) = app.get_webview_window(QUICK_LAUNCH_WINDOW) {
+        let valid = match window.hwnd() {
+            Ok(hwnd) => unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsWindow(hwnd.0) != 0 },
+            Err(_) => false,
+        };
+        if valid {
+            let _ = window.emit("quick-launch-dock-error", message.to_string());
+        }
+    }
 }
 
 /// Applies the docked window's auto-hide state for `mode` at `edge` and
@@ -894,7 +932,7 @@ pub fn set_dock_mode(app: &AppHandle, mode: &str) -> Result<(), String> {
     // for. `set_autohide` is registration coordination only: it moves no
     // window and reserves no space (ticket 66).
     apply_dock_mode(app, current_edge_hwnd(app)?, &current.edge, mode);
-    let _ = app.emit("quick-launch-changed", ());
+    emit_quick_launch_changed_qw(app);
     {
         let state = app.state::<AppState>();
         let conn = state.db.lock().map_err(|e| e.to_string())?;
@@ -1067,7 +1105,7 @@ fn drift_check(app: &AppHandle, consecutive: &mut u32) -> Result<bool, String> {
     if current.mode == "auto-hide" {
         apply_dock_mode(app, hwnd.0, &current.edge, "auto-hide");
     }
-    let _ = app.emit("quick-launch-changed", ());
+    emit_quick_launch_changed_qw(app);
     Ok(true)
 }
 
