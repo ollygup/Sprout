@@ -12,6 +12,7 @@
     listDisplays,
     setDisplayDockEdge,
     setDisplayDockMode,
+    reconcileQuickLaunchSettings,
     updateAutostart,
     updateSettings,
   } from "$lib/api";
@@ -74,9 +75,14 @@
   let dockState = $state("floating");
   let revealDwellMs = $state(200);
   let revealSensitivityPx = $state(12);
+  let companionOpen = $state(false);
   let advancedOpen = $state(false);
   let housekeepingAdvancedOpen = $state(false);
   let autostart = $state("on");
+  // Ticket 125 companion: active URL (null=off), height ratio 0.25–0.60, saved list
+  let companionUrl: string | null = $state(null);
+  let companionHeightRatio = $state(0.40);
+  let companionUrlList = $state<string[]>([]);
   let loading = $state(true);
   let loadFailed = $state(false);
   let saving = $state(false);
@@ -85,6 +91,7 @@
 
   // Per-monitor dock (ticket 111): only when >1 display; global above stays fallback.
   let displays = $state<DisplayInfo[]>([]);
+  let physicalDisplays = $state<DisplayInfo[]>([]);
   let displayEdges = $state<Record<string, string>>({});
   let displayModes = $state<Record<string, string>>({});
   let displayErrors = $state<Record<string, string>>({});
@@ -102,6 +109,9 @@
     dockState: string;
     revealDwellMs: number;
     revealSensitivityPx: number;
+    companionUrl: string | null;
+    companionHeightRatio: number;
+    companionUrlList: string[];
   } | null>(null);
   let baselineDisplayEdges = $state<Record<string, string>>({});
   let baselineDisplayModes = $state<Record<string, string>>({});
@@ -121,6 +131,25 @@
   function clampSens(v: number): number {
     return Math.min(50, Math.max(0, Math.floor(v) || 0));
   }
+  function clampCompanionRatio(v: number): number {
+    const f = Number(v);
+    if (!Number.isFinite(f)) return 0.40;
+    return Math.min(0.60, Math.max(0.25, Math.round(f * 100) / 100));
+  }
+  function normalizeCompanionList(list: string[]): string[] {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const raw of list) {
+      const trimmed = raw.trim();
+      if (!trimmed) continue;
+      if (!trimmed.toLowerCase().startsWith("https://")) continue;
+      const key = trimmed.toLowerCase().replace(/\/+$/, "");
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(trimmed);
+    }
+    return out;
+  }
 
   const isDirty = $derived.by(() => {
     if (!settings || !baseline) return false;
@@ -133,6 +162,9 @@
     if (dockState !== baseline.dockState) return true;
     if (clampDwell(revealDwellMs) !== baseline.revealDwellMs) return true;
     if (clampSens(revealSensitivityPx) !== baseline.revealSensitivityPx) return true;
+    if ((companionUrl ?? null) !== (baseline.companionUrl ?? null)) return true;
+    if (clampCompanionRatio(companionHeightRatio) !== baseline.companionHeightRatio) return true;
+    if (normalizeCompanionList(companionUrlList).join("\n") !== baseline.companionUrlList.join("\n")) return true;
     if (displays.length > 1) {
       for (const d of displays) {
         const cur = displayEdges[d.device_name];
@@ -266,6 +298,9 @@
       revealDwellMs = loaded.reveal_dwell_ms ?? 200;
       revealSensitivityPx = loaded.reveal_sensitivity_px ?? 12;
       autostart = loaded.autostart;
+      companionUrl = loaded.companion_url ?? null;
+      companionHeightRatio = clampCompanionRatio(loaded.companion_height_ratio ?? 0.40);
+      companionUrlList = normalizeCompanionList(loaded.companion_url_list ?? []);
       const persisted = loaded.theme as ThemeMode;
       if (persisted === "system" || persisted === "light" || persisted === "dark") {
         if (persisted !== theme.mode) restoreTheme(persisted);
@@ -280,6 +315,9 @@
         dockState: loaded.dock_state,
         revealDwellMs: loaded.reveal_dwell_ms ?? 200,
         revealSensitivityPx: loaded.reveal_sensitivity_px ?? 12,
+        companionUrl: loaded.companion_url ?? null,
+        companionHeightRatio: clampCompanionRatio(loaded.companion_height_ratio ?? 0.40),
+        companionUrlList: normalizeCompanionList(loaded.companion_url_list ?? []),
       };
       loadFailed = false;
     } catch {
@@ -292,6 +330,7 @@
   async function loadDisplays() {
     try {
       const list = await listDisplays();
+      physicalDisplays = list;
       // DEV-only preview for flatten without 2 physical displays (A).
       // `?preview-per-monitor=1` forces 2 mocked displays so you can see the
       // flattened per-monitor knobs on a single monitor. Tree-shaken out of
@@ -353,6 +392,7 @@
       baselineDisplayModes = { ...nextModes };
     } catch {
       displays = [];
+      physicalDisplays = [];
     }
   }
 
@@ -370,6 +410,7 @@
     displayModes = { ...displayModes, [device]: mode };
   }
 
+  // Ticket 125 companion list helpers — dedup trimmed case-insensitive on host+path, machine-local
   async function pick(mode: ThemeMode) {
     saved = "";
     error = "";
@@ -423,6 +464,9 @@
     dockState = baseline.dockState;
     revealDwellMs = baseline.revealDwellMs;
     revealSensitivityPx = baseline.revealSensitivityPx;
+    companionUrl = baseline.companionUrl;
+    companionHeightRatio = baseline.companionHeightRatio;
+    companionUrlList = [...baseline.companionUrlList];
     if (displays.length > 1) {
       displayEdges = { ...baselineDisplayEdges };
       displayModes = { ...baselineDisplayModes };
@@ -445,6 +489,8 @@
       // values already fell back to defaults on load).
       const clampedDwell = Math.min(1000, Math.max(0, Math.floor(revealDwellMs) || 0));
       const clampedSens = Math.min(50, Math.max(0, Math.floor(revealSensitivityPx) || 0));
+      const clampedCompanionRatio = clampCompanionRatio(companionHeightRatio);
+      const normalizedList = normalizeCompanionList(companionUrlList);
       await updateSettings({
         default_timeout_minutes: Math.max(1, Math.floor(timeout) || 1),
         log_retention_days: Math.max(1, Math.floor(retention) || 1),
@@ -462,14 +508,21 @@
         clip_groups: settings.clip_groups,
         reveal_dwell_ms: clampedDwell,
         reveal_sensitivity_px: clampedSens,
+        companion_url: companionUrl,
+        companion_height_ratio: clampedCompanionRatio,
+        companion_url_list: normalizedList,
       });
       // Per-monitor follows Save (only Theme is immediate per 0009). Batch
       // the deferred writes so global + per-monitor share one success notice.
       // Disabled seam options prevent picking an ineligible edge, but a race
       // (screens moved after load) still surfaces as a row error.
       let perMonitorError = false;
-      for (const d of displays) {
-        const edge = displayEdges[d.device_name];
+      // A single physical display has no visible per-monitor controls, so its
+      // remembered values must follow the global knobs. DEV preview displays
+      // are visual fixtures only and must never write fake monitor records.
+      const displayTargets = physicalDisplays.length > 1 ? displays : physicalDisplays;
+      for (const d of displayTargets) {
+        const edge = physicalDisplays.length > 1 ? displayEdges[d.device_name] : dockEdge;
         if (edge !== undefined) {
           try {
             await setDisplayDockEdge(d.device_name, edge);
@@ -478,7 +531,7 @@
             perMonitorError = true;
           }
         }
-        const mode = displayModes[d.device_name];
+        const mode = physicalDisplays.length > 1 ? displayModes[d.device_name] : dockMode;
         if (mode !== undefined) {
           try {
             await setDisplayDockMode(d.device_name, mode);
@@ -488,6 +541,7 @@
           }
         }
       }
+      await reconcileQuickLaunchSettings();
       if (perMonitorError) {
         error = "Some per-monitor choices couldn't be saved — see the rows below.";
       } else {
@@ -499,6 +553,8 @@
       launchConcurrency = Math.min(50, Math.max(1, Math.floor(launchConcurrency) || 1));
       revealDwellMs = Math.min(1000, Math.max(0, Math.floor(revealDwellMs) || 0));
       revealSensitivityPx = Math.min(50, Math.max(0, Math.floor(revealSensitivityPx) || 0));
+      companionHeightRatio = clampCompanionRatio(companionHeightRatio);
+      companionUrlList = normalizeCompanionList(companionUrlList);
       // Ticket 115: after a successful persist, the snapshot becomes the saved
       // values — post-clamp, trimmed — so the bar clears without a reload.
       baseline = {
@@ -511,6 +567,9 @@
         dockState,
         revealDwellMs,
         revealSensitivityPx,
+        companionUrl,
+        companionHeightRatio,
+        companionUrlList: [...companionUrlList],
       };
       if (!perMonitorError) {
         baselineDisplayEdges = { ...displayEdges };
@@ -531,9 +590,16 @@
         autostart,
         reveal_dwell_ms: revealDwellMs,
         reveal_sensitivity_px: revealSensitivityPx,
+        companion_url: companionUrl,
+        companion_height_ratio: companionHeightRatio,
+        companion_url_list: [...companionUrlList],
       };
-    } catch {
-      error = "Couldn't save the settings — try again. If it keeps failing, close Sprout and relaunch.";
+    } catch (cause) {
+      console.error("settings save failed", cause);
+      const detail = String(cause).trim();
+      error = detail
+        ? `Couldn't save the settings — ${detail}`
+        : "Couldn't save the settings — try again. If it keeps failing, close Sprout and relaunch.";
     } finally {
       saving = false;
     }
@@ -915,6 +981,75 @@
           {/each}
         </div>
       {/if}
+
+      <!-- Companion is an optional dock capability, so its global controls stay beside the
+           dock settings but collapse as one named section (0004 rule 2; 0006 pattern 7).
+           URL authoring remains on its dedicated configuration surface (0006 pattern 1). -->
+      <div class="dock-advanced">
+        <Disclosure
+          open={companionOpen}
+          controls="companion-settings-body"
+          label="Companion"
+          onclick={() => (companionOpen = !companionOpen)}
+        />
+        <div id="companion-settings-body" class="advanced__body" hidden={!companionOpen}>
+          <article class="knob">
+            <div class="knob__body">
+              <label class="knob__label" for="companion-url">Active site</label>
+              <p class="knob__hint">
+                Choose what appears while Quick Launch is docked. Off removes the pane completely.
+              </p>
+            </div>
+            <div class="knob__input">
+              <Select
+                id="companion-url"
+                variant="small"
+                value={companionUrl ?? ""}
+                onchange={(v) => (companionUrl = v ? v : null)}
+              >
+                <option value="">Off</option>
+                {#each companionUrlList as url (url)}
+                  <option value={url}>{url}</option>
+                {/each}
+              </Select>
+            </div>
+          </article>
+
+          <article class="knob">
+            <div class="knob__body">
+              <label class="knob__label" for="companion-ratio">Pane height</label>
+              <p class="knob__hint">
+                Sets the starting height. You can also drag the divider in the dock.
+              </p>
+            </div>
+            <div class="knob__input">
+              <input
+                id="companion-ratio"
+                name="companion-ratio"
+                class="field__input"
+                type="number"
+                min="0.25"
+                max="0.60"
+                step="0.05"
+                autocomplete="off"
+                value={companionHeightRatio}
+                oninput={(e) => (companionHeightRatio = Number((e.target as HTMLInputElement).value))}
+              />
+              <span class="knob__unit">× dock</span>
+            </div>
+          </article>
+
+          <div class="companion-manager">
+            <div class="knob__body">
+              <span class="knob__label">Saved sites</span>
+              <p class="knob__hint">
+                {companionUrlList.length === 1 ? "1 site saved on this PC." : `${companionUrlList.length} sites saved on this PC.`}
+              </p>
+            </div>
+            <Button variant="secondary" onclick={() => goto("/companion")}>Manage sites</Button>
+          </div>
+        </div>
+      </div>
 
       {#if dockMode === "auto-hide"}
         <!-- Reveal tuning (ticket 113): quiet knobs under a collapsed disclosure at the
@@ -1411,6 +1546,14 @@
 
   .advanced__body[hidden] {
     display: none;
+  }
+
+  .companion-manager {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-5);
+    padding: var(--space-2) var(--space-1) 0;
   }
 
   .per-monitor {

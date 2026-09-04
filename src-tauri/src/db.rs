@@ -886,6 +886,10 @@ pub fn get_run(conn: &Connection, id: &str) -> Result<Option<RunRecord>> {
 /// first time.
 const KEY_DOCK_EDGE_PREFIX: &str = "quicklaunch.dock.edge.";
 const KEY_DOCK_MODE_PREFIX: &str = "quicklaunch.dock.mode.";
+/// Companion height ratio per monitor (ticket 125): the splitter position that
+/// dock bottom 25–60% occupies, stored per monitor so each screen remembers its
+/// own divider — falls back to the global settings ratio.
+const KEY_COMPANION_HEIGHT_RATIO_PREFIX: &str = "quicklaunch.companion.height_ratio.";
 
 /// The monitor-scoped meta key for a dock property.
 fn dock_key(prefix: &str, monitor: &str) -> String {
@@ -942,6 +946,33 @@ pub fn load_dock_mode_identified(
     identity
         .and_then(|id| load_dock_mode(conn, id))
         .or_else(|| load_dock_mode(conn, device_name))
+}
+
+/// Persists the companion height ratio for `monitor` (ticket 125). The caller
+/// validates the ratio; a broken value must never reach the dock.
+pub fn save_companion_height_ratio(conn: &Connection, monitor: &str, ratio: f64) -> Result<()> {
+    upsert_meta(conn, &dock_key(KEY_COMPANION_HEIGHT_RATIO_PREFIX, monitor), &ratio.to_string())
+}
+
+/// The remembered companion height ratio for `monitor`, when a valid one is
+/// stored — broken values read back as `None`, so the dock falls back to the
+/// Settings default.
+pub fn load_companion_height_ratio(conn: &Connection, monitor: &str) -> Option<f64> {
+    read_meta(conn, &dock_key(KEY_COMPANION_HEIGHT_RATIO_PREFIX, monitor))
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| crate::settings::validate_companion_height_ratio(*v).is_ok())
+}
+
+/// The identified-shape twin for the companion height ratio (ticket 125):
+/// identity-keyed values win, falling back to device-name.
+pub fn load_companion_height_ratio_identified(
+    conn: &Connection,
+    identity: Option<&str>,
+    device_name: &str,
+) -> Option<f64> {
+    identity
+        .and_then(|id| load_companion_height_ratio(conn, id))
+        .or_else(|| load_companion_height_ratio(conn, device_name))
 }
 
 fn read_meta(conn: &Connection, key: &str) -> Option<String> {

@@ -8,6 +8,7 @@
 mod db;
 mod domain;
 mod engine;
+mod external;
 mod groups;
 mod icons;
 mod import_export;
@@ -87,9 +88,13 @@ fn lock<'a>(state: &'a State<'a, AppState>) -> Result<std::sync::MutexGuard<'a, 
 /// is still valid — avoids `PostMessage failed ; Invalid window handle` spam
 /// when the main window has just been destroyed (close→reopen race, vite HMR
 /// reload). `app.emit` would broadcast to the destroyed main webview as well.
+///
+/// The host resolves as a native Window: a WebviewWindow lookup rejects a
+/// window hosting a differently labeled child WebView, so with Companion up
+/// it yields None and silently drops the event the dock's entries, actions,
+/// clips, and Companion state all refresh from.
 fn emit_quick_launch_changed(app: &AppHandle) {
-    use tauri::Manager;
-    if let Some(window) = app.get_webview_window(quick_window::QUICK_LAUNCH_WINDOW) {
+    if let Some(window) = quick_window::quick_launch_window(&app) {
         let valid = match window.hwnd() {
             Ok(hwnd) => unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsWindow(hwnd.0) != 0 },
             Err(_) => false,
@@ -103,7 +108,7 @@ fn emit_quick_launch_changed(app: &AppHandle) {
 fn emit_valid<T: serde::Serialize + Clone>(app: &AppHandle, event: &str, payload: &T) {
     use tauri::Manager;
     for label in [quick_window::QUICK_LAUNCH_WINDOW, "main"] {
-        if let Some(window) = app.get_webview_window(label) {
+        if let Some(window) = app.get_window(label) {
             let valid = match window.hwnd() {
                 Ok(hwnd) => unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsWindow(hwnd.0) != 0 },
                 Err(_) => false,
@@ -1802,6 +1807,15 @@ fn set_display_dock_mode(
     db::save_dock_mode(&conn, &key, &mode).map_err(|e| e.to_string())
 }
 
+/// Applies the final saved global + per-monitor picture after the Settings
+/// screen finishes its batch writes, then publishes one definitive refresh.
+#[tauri::command]
+fn reconcile_quick_launch_settings(app: AppHandle) -> Result<(), String> {
+    quick_window::reconcile_saved_settings(&app)?;
+    emit_quick_launch_changed(&app);
+    Ok(())
+}
+
 fn resolve_display_keys(
     display: &str,
     displays: &[appbar::DisplayInfo],
@@ -1833,6 +1847,91 @@ fn per_display_key<'a>(identity: Option<&'a str>, device: &'a str) -> String {
         Some(id) if !id.is_empty() => id.to_string(),
         _ => device.to_string(),
     }
+}
+
+// ------------------- Companion (ticket 125) -------------------------------
+
+/// Sets the companion active URL (ticket 125): https:// or null (off).
+/// Validates, persists, and notifies the Quick Launch window so the pane
+/// appears/disappears without reopening (content-gated).
+#[tauri::command]
+fn set_companion_url(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    url: Option<String>,
+) -> Result<(), String> {
+    let normalized = settings::normalize_companion_url(url.as_deref());
+    settings::validate_companion_url(normalized.as_deref())?;
+    let conn = lock(&state)?;
+    settings::save_companion_url(&conn, normalized.as_deref())?;
+    drop(conn);
+    emit_quick_launch_changed(&app);
+    Ok(())
+}
+
+#[tauri::command]
+fn open_companion_external(url: String) -> Result<(), String> {
+    settings::validate_companion_url(Some(&url))?;
+    external::open(url.trim())
+}
+
+/// Sets the global companion height ratio (ticket 125): 0.25–0.60.
+#[tauri::command]
+fn set_companion_height_ratio(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    ratio: f64,
+) -> Result<(), String> {
+    settings::validate_companion_height_ratio(ratio)?;
+    let conn = lock(&state)?;
+    settings::save_companion_height_ratio(&conn, ratio)?;
+    drop(conn);
+    emit_quick_launch_changed(&app);
+    Ok(())
+}
+
+/// Sets the companion saved URL list (ticket 125): deduped host+path case-insensitive.
+#[tauri::command]
+fn set_companion_url_list(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    urls: Vec<String>,
+) -> Result<(), String> {
+    settings::validate_companion_url_list(&urls)?;
+    let conn = lock(&state)?;
+    settings::save_companion_url_list(&conn, &urls)?;
+    drop(conn);
+    emit_quick_launch_changed(&app);
+    Ok(())
+}
+
+/// Per-monitor companion height ratio read (ticket 125): identity wins, falls
+/// back to device name, `None` means use the global settings ratio.
+#[tauri::command]
+fn get_companion_height_ratio(
+    state: State<'_, AppState>,
+    display: String,
+) -> Result<Option<f64>, String> {
+    let conn = lock(&state)?;
+    let displays = appbar::cached_displays();
+    let (device_name, identity) = resolve_display_keys(&display, &displays);
+    Ok(db::load_companion_height_ratio_identified(&conn, identity.as_deref(), &device_name))
+}
+
+/// Per-monitor companion height ratio write (ticket 125): validated, clamped
+/// on read, persisted per monitor (falls back to global settings).
+#[tauri::command]
+fn set_companion_height_ratio_for_display(
+    state: State<'_, AppState>,
+    display: String,
+    ratio: f64,
+) -> Result<(), String> {
+    settings::validate_companion_height_ratio(ratio)?;
+    let conn = lock(&state)?;
+    let displays = appbar::cached_displays();
+    let (device_name, identity) = resolve_display_keys(&display, &displays);
+    let key = per_display_key(identity.as_deref(), &device_name);
+    db::save_companion_height_ratio(&conn, &key, ratio).map_err(|e| e.to_string())
 }
 
 /// Opens (or focuses) the main window (ticket 123): the dock header's mark
@@ -1947,8 +2046,7 @@ fn get_quick_launch_dock_state(app: AppHandle) -> Result<DockStateView, String> 
 }
 
 fn pending_eligibility(app: &AppHandle) -> Result<(bool, bool), String> {
-    let window = app
-        .get_webview_window(quick_window::QUICK_LAUNCH_WINDOW)
+    let window = quick_window::quick_launch_window(&app)
         .ok_or_else(|| "Quick Launch window is not open".to_string())?;
     let hwnd = window.hwnd().map_err(|e| e.to_string())?;
     let device = appbar::monitor_key(hwnd.0)
@@ -2060,8 +2158,7 @@ fn debug66_dock_mode_stress(app: AppHandle) {
                 }
             };
             let s = settings::load(&conn);
-            let monitor = app
-                .get_webview_window(quick_window::QUICK_LAUNCH_WINDOW)
+            let monitor = quick_window::quick_launch_window(&app)
                 .and_then(|w| w.hwnd().ok())
                 .and_then(|h| appbar::monitor_key(h.0));
             let (edge, mode) = match &monitor {
@@ -2364,6 +2461,13 @@ pub fn run() {
             set_display_dock_edge,
             get_display_dock_mode,
             set_display_dock_mode,
+            reconcile_quick_launch_settings,
+            set_companion_url,
+            open_companion_external,
+            set_companion_height_ratio,
+            set_companion_url_list,
+            get_companion_height_ratio,
+            set_companion_height_ratio_for_display,
             set_settings_dirty,
             destroy_main_window
         ])

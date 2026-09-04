@@ -33,6 +33,16 @@ function parseMode(value: string | null): ThemeMode {
   return value === "light" || value === "dark" ? value : "system";
 }
 
+function syncNativeWindowTheme(applied: "light" | "dark") {
+  if (
+    typeof window === "undefined" ||
+    !("__TAURI_INTERNALS__" in window || "__TAURI_IPC__" in window)
+  ) return;
+  void import("@tauri-apps/api/window")
+    .then(({ getCurrentWindow }) => getCurrentWindow().setTheme(applied))
+    .catch((error) => console.error("native theme update failed", error));
+}
+
 /// Applies a mode to the document right now and caches it for the next
 /// launch. The `color-scheme` property comes from the tokens' `data-theme`
 /// blocks, so native controls match too.
@@ -41,6 +51,7 @@ function apply(mode: ThemeMode) {
   theme.mode = mode;
   theme.applied = applied;
   document.documentElement.dataset.theme = applied;
+  syncNativeWindowTheme(applied);
   try {
     localStorage.setItem(STORAGE_KEY, mode);
   } catch {

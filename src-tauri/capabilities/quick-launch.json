@@ -3,5 +3,20 @@
   "identifier": "quick-launch",
   "description": "Capability for the Quick Launch window",
   "windows": ["quick-launch"],
-  "permissions": ["core:default", "core:window:allow-start-dragging"]
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:webview:default",
+    "core:webview:allow-create-webview",
+    "core:webview:allow-get-all-webviews",
+    "core:webview:allow-webview-close",
+    "core:webview:allow-set-webview-position",
+    "core:webview:allow-set-webview-size",
+    "core:webview:allow-webview-position",
+    "core:webview:allow-webview-size",
+    "core:webview:allow-set-webview-zoom",
+    "core:event:default",
+    "core:event:allow-listen",
+    "core:event:allow-emit"
+  ]
 }

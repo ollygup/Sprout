@@ -398,6 +398,38 @@ export function updateGroupsEnabled(
   return invoke<void>("update_groups_enabled", { collection, enabled });
 }
 
+/** Companion: set the active https URL (ticket 125) — null = off. */
+export function setCompanionUrl(url: string | null): Promise<void> {
+  return invoke<void>("set_companion_url", { url });
+}
+
+export function openCompanionExternal(url: string): Promise<void> {
+  return invoke<void>("open_companion_external", { url });
+}
+
+/** Companion: set the height ratio (ticket 125) — 0.25–0.60. */
+export function setCompanionHeightRatio(ratio: number): Promise<void> {
+  return invoke<void>("set_companion_height_ratio", { ratio });
+}
+
+/** Companion: set the saved URL list (ticket 125) — deduped host+path. */
+export function setCompanionUrlList(urls: string[]): Promise<void> {
+  return invoke<void>("set_companion_url_list", { urls });
+}
+
+/** Companion per-monitor height ratio (ticket 125) — falls back to global. */
+export function getCompanionHeightRatio(display: string): Promise<number | null> {
+  return invoke<number | null>("get_companion_height_ratio", { display });
+}
+
+export function setCompanionHeightRatioForDisplay(display: string, ratio: number): Promise<void> {
+  return invoke<void>("set_companion_height_ratio_for_display", { display, ratio });
+}
+
+/** Companion mobile UA: identify WebView2 as Chromium so responsive sites do not receive Safari-only bundles. */
+export const COMPANION_MOBILE_UA =
+  "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36";
+
 /** One connected display (ticket 111): label, resolution, identity, and
  * wall eligibility from the live arrangement. */
 export function listDisplays(): Promise<import("./types").DisplayInfo[]> {
@@ -418,6 +450,11 @@ export function getDisplayDockMode(display: string): Promise<string | null> {
 
 export function setDisplayDockMode(display: string, mode: string): Promise<void> {
   return invoke<void>("set_display_dock_mode", { display, mode });
+}
+
+/** Applies the complete saved dock/Companion state after Settings batch writes. */
+export function reconcileQuickLaunchSettings(): Promise<void> {
+  return invoke<void>("reconcile_quick_launch_settings");
 }
 
 /** Opens (or focuses) the main window — the dock header's mark click

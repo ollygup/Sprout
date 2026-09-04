@@ -91,6 +91,15 @@ pub const QUICK_LAUNCH_WINDOW: &str = "quick-launch";
 /// in production, Vite's fallback in dev.
 const ROUTE: &str = "quick-launch-window";
 
+/// The native host remains a Window after Companion adds another WebView.
+/// Tauri's WebviewWindow lookup deliberately rejects multi-WebView windows,
+/// so every Quick Launch resolution — geometry here and event delivery in
+/// `lib.rs` — goes through this seam. A WebviewWindow lookup silently yields
+/// None once the companion child exists and drops the caller on the floor.
+pub(crate) fn quick_launch_window(app: &AppHandle) -> Option<tauri::Window> {
+    app.get_window(QUICK_LAUNCH_WINDOW)
+}
+
 /// The docked form's live state: which edge and visibility mode the window is
 /// currently docked with, which monitor it is attached to, and the rect the
 /// bar was last placed at (the `ABM_SETPOS`-granted rect — the drift check's
@@ -144,7 +153,7 @@ const WM_DISPLAYCHANGE: u32 = 0x007E;
 
 /// Emits `quick-launch-changed` only to the Quick Launch window when its HWND is still valid — avoids PostMessage to a destroyed main webview (close→reopen race, vite HMR).
 fn emit_quick_launch_changed_qw(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window(QUICK_LAUNCH_WINDOW) {
+    if let Some(window) = quick_launch_window(app) {
         let valid = match window.hwnd() {
             Ok(hwnd) => unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsWindow(hwnd.0) != 0 },
             Err(_) => false,
@@ -157,7 +166,7 @@ fn emit_quick_launch_changed_qw(app: &AppHandle) {
 
 fn emit_displays_changed(app: &AppHandle) {
     for label in [QUICK_LAUNCH_WINDOW, "main"] {
-        if let Some(window) = app.get_webview_window(label) {
+        if let Some(window) = app.get_window(label) {
             let valid = match window.hwnd() {
                 Ok(hwnd) => unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsWindow(hwnd.0) != 0 },
                 Err(_) => false,
@@ -421,7 +430,7 @@ fn record_last_rect(app: &AppHandle, rect: Option<RECT>) {
 /// to a destroyed main webview.
 fn report_dock_error(app: &AppHandle, message: &str) {
     eprintln!("{message}");
-    if let Some(window) = app.get_webview_window(QUICK_LAUNCH_WINDOW) {
+    if let Some(window) = quick_launch_window(app) {
         let valid = match window.hwnd() {
             Ok(hwnd) => unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsWindow(hwnd.0) != 0 },
             Err(_) => false,
@@ -453,7 +462,7 @@ fn apply_dock_mode(app: &AppHandle, hwnd: HWND, edge: &str, mode: &str) {
 /// edge/mode memory, falling back to the settings defaults). A failed dock
 /// leaves it floating rather than failing the open.
 pub fn open(app: &AppHandle) -> tauri::Result<()> {
-    if let Some(window) = app.get_webview_window(QUICK_LAUNCH_WINDOW) {
+    if let Some(window) = quick_launch_window(app) {
         // When the window is docked (ticket 53), this raises it into focus —
         // the tray's left-click and the docked bar coexist.
         window.set_focus()?;
@@ -516,7 +525,7 @@ pub fn open_if_docked(app: &AppHandle) -> tauri::Result<()> {
 /// When docked, the AppBar is released first (the edge is never left
 /// occupied) and the window is destroyed; the tray reopens it floating.
 pub fn close(app: &AppHandle) -> tauri::Result<()> {
-    let Some(window) = app.get_webview_window(QUICK_LAUNCH_WINDOW) else {
+    let Some(window) = quick_launch_window(app) else {
         return Ok(());
     };
     if is_docked(app) {
@@ -614,8 +623,7 @@ fn monitor_refs(hwnd: HWND) -> Result<(String, Option<String>), String> {
 /// back to the Settings defaults. Read-only; the header renders the target
 /// edge's icon from it.
 pub fn pending_dock(app: &AppHandle) -> Result<(String, String), String> {
-    let window = app
-        .get_webview_window(QUICK_LAUNCH_WINDOW)
+    let window = quick_launch_window(app)
         .ok_or_else(|| "Quick Launch window is not open".to_string())?;
     let hwnd = window.hwnd().map_err(|e| e.to_string())?;
     let state = app.state::<AppState>();
@@ -643,8 +651,7 @@ pub fn dock(app: &AppHandle, edge: Option<&str>) -> Result<(), String> {
     if is_docked(app) {
         return reposition(app, edge);
     }
-    let window = app
-        .get_webview_window(QUICK_LAUNCH_WINDOW)
+    let window = quick_launch_window(app)
         .ok_or_else(|| "Quick Launch window is not open".to_string())?;
     let hwnd = window.hwnd().map_err(|e| e.to_string())?;
     let state = app.state::<AppState>();
@@ -744,8 +751,7 @@ pub fn dock(app: &AppHandle, edge: Option<&str>) -> Result<(), String> {
 /// failure after the reservation moved releases the AppBar — a half-docked
 /// bar is never left behind.
 fn reposition(app: &AppHandle, edge: Option<&str>) -> Result<(), String> {
-    let window = app
-        .get_webview_window(QUICK_LAUNCH_WINDOW)
+    let window = quick_launch_window(app)
         .ok_or_else(|| "Quick Launch window is not open".to_string())?;
     let hwnd = window.hwnd().map_err(|e| e.to_string())?;
     let state = app.state::<AppState>();
@@ -852,8 +858,7 @@ pub fn undock(app: &AppHandle) -> Result<(), String> {
     if !is_docked(app) {
         return Ok(());
     }
-    let window = app
-        .get_webview_window(QUICK_LAUNCH_WINDOW)
+    let window = quick_launch_window(app)
         .ok_or_else(|| "Quick Launch window is not open".to_string())?;
     let hwnd = window.hwnd().map_err(|e| e.to_string())?;
     if let Some(current) = docked_state(app) {
@@ -944,8 +949,7 @@ pub fn set_dock_mode(app: &AppHandle, mode: &str) -> Result<(), String> {
 
 /// The docked window's HWND — the one syscall [`apply_dock_mode`] needs.
 fn current_edge_hwnd(app: &AppHandle) -> Result<HWND, String> {
-    let window = app
-        .get_webview_window(QUICK_LAUNCH_WINDOW)
+    let window = quick_launch_window(app)
         .ok_or_else(|| "Quick Launch window is not open".to_string())?;
     let hwnd = window.hwnd().map_err(|e| e.to_string())?;
     Ok(hwnd.0)
@@ -957,7 +961,7 @@ fn current_edge_hwnd(app: &AppHandle) -> Result<HWND, String> {
 /// auto-hide. No-op while the window is closed; the settings' values win over
 /// the per-monitor memory (the user just asked for them explicitly).
 pub fn apply_settings(app: &AppHandle, settings: &settings::Settings) -> Result<(), String> {
-    if app.get_webview_window(QUICK_LAUNCH_WINDOW).is_none() {
+    if quick_launch_window(app).is_none() {
         return Ok(());
     }
     match (is_docked(app), settings.dock_state.as_str()) {
@@ -978,6 +982,79 @@ pub fn apply_settings(app: &AppHandle, settings: &settings::Settings) -> Result<
     Ok(())
 }
 
+/// Whether a Settings save must hand the dock back to the driver: anything
+/// but a converged auto-hide dock. A dock-irrelevant save (Companion URL,
+/// timeouts, …) on converged auto-hide must not reset the settle or
+/// re-probe the shell — the spurious settle re-logs reservation grants and
+/// the re-probe can surface a refusal the change had nothing to do with.
+/// Real transitions converge through `apply_settings`, which registers on
+/// its own paths; converged fixed keeps its explicit re-placement below.
+fn needs_reestablish(live_edge: &str, live_mode: &str, stored_edge: &str, stored_mode: &str) -> bool {
+    live_edge != stored_edge || live_mode != stored_mode || live_mode != "auto-hide"
+}
+
+/// Reconciles the live Quick Launch window from the fully persisted settings,
+/// including the docked monitor's overrides. The caller needs no ordering
+/// knowledge about global versus per-monitor saves.
+pub fn reconcile_saved_settings(app: &AppHandle) -> Result<(), String> {
+    let mut stored = {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        settings::load(&conn)
+    };
+
+    if quick_launch_window(app).is_none() {
+        {
+            let state = app.state::<AppState>();
+            *state.dock.lock().map_err(|e| e.to_string())? = None;
+        }
+        if stored.dock_state == "docked" {
+            open(app).map_err(|e| e.to_string())?;
+        } else {
+            return Ok(());
+        }
+    }
+
+    if let Some(current) = docked_state(app) {
+        let (edge, mode) = {
+            let state = app.state::<AppState>();
+            let conn = state.db.lock().map_err(|e| e.to_string())?;
+            resolve_dock_prefs_migrated(
+                &conn,
+                &stored,
+                current.identity.as_deref(),
+                &current.monitor,
+            )?
+        };
+        stored.dock_edge = edge;
+        stored.dock_mode = mode;
+    }
+
+    apply_settings(app, &stored)?;
+
+    // A previous settle can be visually stale even when its mode string is
+    // already correct. A Settings save that moved the dock is an explicit
+    // request to re-establish the persisted geometry, so hand ownership back
+    // to the driver once — but never for a converged auto-hide dock (see
+    // `needs_reestablish`): the driver already owns its placement and
+    // re-probing only re-logs a foreign-held slot.
+    if is_docked(app) {
+        let current = docked_state(app)
+            .ok_or_else(|| "Quick Launch window is not docked".to_string())?;
+        if needs_reestablish(&current.edge, &current.mode, &stored.dock_edge, &stored.dock_mode) {
+            {
+                let state = app.state::<AppState>();
+                let mut dock = state.dock.lock().map_err(|e| e.to_string())?;
+                if let Some(dock) = dock.as_mut() {
+                    dock.settled = None;
+                }
+            }
+            apply_dock_mode(app, current_edge_hwnd(app)?, &current.edge, &current.mode);
+        }
+    }
+    Ok(())
+}
+
 /// Releases the AppBar (ABM_REMOVE) and clears the dock state without
 /// reshaping — the quit path (ticket 53: the edge is never left occupied) and
 /// the close path, where the window is destroyed right after. No-op when the
@@ -988,7 +1065,7 @@ pub fn release_dock(app: &AppHandle) -> Result<(), String> {
     let Some(current) = dock.take() else {
         return Ok(());
     };
-    if let Some(window) = app.get_webview_window(QUICK_LAUNCH_WINDOW) {
+    if let Some(window) = quick_launch_window(app) {
         if let Ok(hwnd) = window.hwnd() {
             // Release any auto-hide registration on the docked edge too — the
             // edge is fully given back, not left half-occupied (ticket 60).
@@ -1010,7 +1087,7 @@ pub fn release_dock(app: &AppHandle) -> Result<(), String> {
 /// divergence the drift watchdog would then fight every second). `topmost`
 /// raises into the topmost band — used for auto-hide strips so later /
 /// restored windows never cover them (ticket 66 follow-up).
-fn reshape(window: &tauri::WebviewWindow, rect: RECT, topmost: bool) -> Result<(), String> {
+fn reshape(window: &tauri::Window, rect: RECT, topmost: bool) -> Result<(), String> {
     window
         .set_min_size(None::<PhysicalSize<u32>>)
         .map_err(|e| e.to_string())?;
@@ -1067,7 +1144,7 @@ fn drift_check(app: &AppHandle, consecutive: &mut u32) -> Result<bool, String> {
         *consecutive = 0;
         return Ok(false);
     }
-    let Some(window) = app.get_webview_window(QUICK_LAUNCH_WINDOW) else {
+    let Some(window) = quick_launch_window(app) else {
         return Ok(false);
     };
     let hwnd = window.hwnd().map_err(|e| e.to_string())?;
@@ -1210,7 +1287,7 @@ fn record_settled(app: &AppHandle, mode: &str) {
 /// [`autohide_tick`] slides the strip from wherever it is to its target,
 /// replacing the old inline teleport with the intended motion.
 fn settle_mode(app: &AppHandle, current: &DockState) {
-    let Some(window) = app.get_webview_window(QUICK_LAUNCH_WINDOW) else {
+    let Some(window) = quick_launch_window(app) else {
         return;
     };
     let Ok(hwnd) = window.hwnd() else {
@@ -1332,7 +1409,7 @@ fn autohide_tick(
         *reveal_gate = appbar::RevealGate::default();
         return Ok(());
     }
-    let Some(window) = app.get_webview_window(QUICK_LAUNCH_WINDOW) else {
+    let Some(window) = quick_launch_window(app) else {
         return Ok(());
     };
     let hwnd = window.hwnd().map_err(|e| e.to_string())?;
@@ -1696,5 +1773,18 @@ mod tests {
             d.settled = Some(observed_mode.into());
         }
         assert_ne!(d.settled.as_deref(), Some("fixed"));
+    }
+
+    #[test]
+    fn reestablish_only_leaves_converged_autohide_alone() {
+        // A dock-irrelevant save (Companion URL, timeouts, …) on a converged
+        // auto-hide dock must not kick the driver or re-probe the shell.
+        assert!(!needs_reestablish("right", "auto-hide", "right", "auto-hide"));
+        // Genuine divergence always re-establishes…
+        assert!(needs_reestablish("right", "auto-hide", "left", "auto-hide"));
+        assert!(needs_reestablish("right", "auto-hide", "right", "fixed"));
+        assert!(needs_reestablish("left", "fixed", "right", "auto-hide"));
+        // …and converged fixed keeps its explicit re-placement.
+        assert!(needs_reestablish("right", "fixed", "right", "fixed"));
     }
 }

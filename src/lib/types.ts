@@ -295,6 +295,15 @@ export interface Settings {
   /** Reveal sensitivity threshold (ticket 113): px of toward-edge travel
    *  inside the sliver required before dwell starts. 0 needs no push. */
   reveal_sensitivity_px: number;
+  /** Companion active URL (ticket 125): https URL or null (off) — machine-local.
+   *  When null the dock shows no pane, no splitter, no header button. */
+  companion_url: string | null;
+  /** Companion height ratio (ticket 125): 0.25–0.60, default 0.40 — bottom fraction
+   *  of the dock occupied by the web view. Per-monitor memory falls back here. */
+  companion_height_ratio: number;
+  /** Companion saved URL list (ticket 125): https URLs edited in the main app,
+   *  deduped host+path case-insensitive. Machine-local. */
+  companion_url_list: string[];
 }
 
 /** Which collection a Group buckets (ticket 89) — the discriminator that

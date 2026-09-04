@@ -53,8 +53,8 @@ use windows_sys::Win32::UI::Shell::{
     ABM_SETAUTOHIDEBAR, ABM_SETPOS, APPBARDATA,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetWindowRect, RegisterWindowMessageW, SetWindowPos, SWP_NOACTIVATE, SWP_NOSENDCHANGING,
-    SWP_NOZORDER, HWND_TOPMOST,
+    GetClassNameW, GetWindowRect, RegisterWindowMessageW, SetWindowPos, SWP_NOACTIVATE,
+    SWP_NOSENDCHANGING, SWP_NOZORDER, HWND_TOPMOST,
 };
 
 /// The registered AppBar callback message (ticket 60). `RegisterWindowMessage`
@@ -988,6 +988,37 @@ pub fn autohide_engaged(hwnd: HWND, edge: u32) -> bool {
     }
 }
 
+/// Names the current auto-hide slot owner for the refusal log: our own
+/// window (a re-registration raced something — the retry path re-attempts),
+/// an empty slot (the registration call itself failed), or another window
+/// with its class (e.g. the taskbar's `Shell_TrayWnd`, or a dead hwnd left
+/// behind by a killed process). "Another bar owns this edge" is unactionable
+/// without this — the holder decides whether to wait, move edges, or
+/// restart the shell.
+fn describe_autohide_owner(hwnd: HWND, edge: u32) -> String {
+    unsafe {
+        let mut data = appbar_data(hwnd, edge, empty_rect());
+        let owner = SHAppBarMessage(ABM_GETAUTOHIDEBAR, &mut data) as isize;
+        if owner == 0 {
+            return "slot empty — the registration call itself failed".into();
+        }
+        if owner == hwnd as isize {
+            return "slot already held by this window".into();
+        }
+        let mut class = [0u16; 256];
+        let len = GetClassNameW(
+            owner as HWND,
+            class.as_mut_ptr(),
+            class.len() as i32,
+        );
+        if len <= 0 {
+            return format!("slot held by a dead window (hwnd 0x{owner:X}) — a killed process left it behind");
+        }
+        let name = String::from_utf16_lossy(&class[..len as usize]);
+        format!("slot held by another window (hwnd 0x{owner:X}, class {name})")
+    }
+}
+
 /// Enables or disables the auto-hide *registration* at `edge` (ticket 63).
 /// Registration grants coordination only — exclusivity, z-order, work-area
 /// semantics — never motion; the slide itself is Sprout's driver in
@@ -1004,6 +1035,9 @@ pub fn set_autohide(hwnd: HWND, edge: u32, enabled: bool) -> Result<bool, String
         SHAppBarMessage(ABM_SETAUTOHIDEBAR, &mut data);
         let engaged = autohide_engaged(hwnd, edge);
         if enabled && !engaged {
+            // The user-facing message stays stable (the banner quotes it);
+            // the owner detail goes to the log, where it decides the remedy.
+            eprintln!("auto-hide: edge registration refused — {}", describe_autohide_owner(hwnd, edge));
             return Err("another auto-hide bar already owns this edge — the system refused auto-hide"
                 .into());
         }

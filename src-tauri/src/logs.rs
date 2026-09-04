@@ -630,6 +630,9 @@ mod tests {
                 clip_groups: settings::DEFAULT_GROUPS_FEATURE.to_string(),
                 reveal_dwell_ms: settings::DEFAULT_REVEAL_DWELL_MS,
                 reveal_sensitivity_px: settings::DEFAULT_REVEAL_SENSITIVITY_PX,
+                companion_url: None,
+                companion_height_ratio: settings::DEFAULT_COMPANION_HEIGHT_RATIO,
+                companion_url_list: Vec::new(),
             },
         )
         .unwrap();

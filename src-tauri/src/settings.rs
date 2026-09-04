@@ -74,6 +74,13 @@ pub const REVEAL_DWELL_MIN_MS: u64 = 0;
 pub const REVEAL_DWELL_MAX_MS: u64 = 1000;
 pub const REVEAL_SENSITIVITY_MIN_PX: i32 = 0;
 pub const REVEAL_SENSITIVITY_MAX_PX: i32 = 50;
+/// Companion pane (ticket 125): height ratio 25–60% — how much of the docked
+/// window's height the embedded web view occupies (bottom strip). Default
+/// 40% matches the ticket's 0.40 and sits comfortably at any dock height
+/// from 1080p to 4K (research 0012).
+pub const DEFAULT_COMPANION_HEIGHT_RATIO: f64 = 0.40;
+pub const COMPANION_HEIGHT_RATIO_MIN: f64 = 0.25;
+pub const COMPANION_HEIGHT_RATIO_MAX: f64 = 0.60;
 
 const KEY_TIMEOUT: &str = "settings.timeout_minutes";
 const KEY_RETENTION: &str = "settings.log_retention_days";
@@ -89,11 +96,14 @@ const KEY_DOCK_STATE: &str = "dock.state";
 const KEY_AUTOSTART: &str = "settings.autostart";
 const KEY_REVEAL_DWELL_MS: &str = "dock.reveal_dwell_ms";
 const KEY_REVEAL_SENSITIVITY_PX: &str = "dock.reveal_sensitivity_px";
+const KEY_COMPANION_URL: &str = "settings.companion_url";
+const KEY_COMPANION_HEIGHT_RATIO: &str = "settings.companion_height_ratio";
+const KEY_COMPANION_URL_LIST: &str = "settings.companion_url_list";
 
 /// The persisted knobs. `u32` fields keep the frontend's number inputs safe;
 /// validation lives in [`Settings::validate`]. `install_dir` is empty when
 /// winget should use its own default directory.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
     pub default_timeout_minutes: u32,
     pub log_retention_days: u32,
@@ -134,6 +144,20 @@ pub struct Settings {
     /// accumulated toward-edge motion inside the sliver must exceed this before
     /// the dwell starts. 0 needs no push.
     pub reveal_sensitivity_px: i32,
+    /// Companion active URL (ticket 125): the https URL rendered as a single
+    /// mobile web view in the bottom ~40% of the dock. `None` means the feature
+    /// is off — no pane, no splitter, no chrome (research 0004 rule 2 / 0006
+    /// pattern 11, content-gated).
+    pub companion_url: Option<String>,
+    /// Companion height ratio (ticket 125): fraction of dock height devoted to
+    /// the web view, clamped 0.25–0.60 (default 0.40). Live-draggable via the
+    /// horizontal splitter and persisted per monitor (falls back to this).
+    pub companion_height_ratio: f64,
+    /// Companion saved URL list (ticket 125): the URLs the main app's companion
+    /// manager edits; deduped trimmed case-insensitive on host+path, ordered by
+    /// the user. Machine-local, never in Preset exports/backups beyond the
+    /// settings row (ADR-0009 spirit).
+    pub companion_url_list: Vec<String>,
 }
 
 impl Default for Settings {
@@ -153,6 +177,9 @@ impl Default for Settings {
             clip_groups: DEFAULT_GROUPS_FEATURE.to_string(),
             reveal_dwell_ms: DEFAULT_REVEAL_DWELL_MS,
             reveal_sensitivity_px: DEFAULT_REVEAL_SENSITIVITY_PX,
+            companion_url: None,
+            companion_height_ratio: DEFAULT_COMPANION_HEIGHT_RATIO,
+            companion_url_list: Vec::new(),
         }
     }
 }
@@ -261,6 +288,98 @@ pub fn clamp_reveal_sensitivity_px(value: i32) -> i32 {
     value.clamp(REVEAL_SENSITIVITY_MIN_PX, REVEAL_SENSITIVITY_MAX_PX)
 }
 
+/// Validates the companion active URL (ticket 125): None = off, Some must be
+/// an https:// URL. Empty/whitespace-only is treated as None. Rejects
+/// non-https and malformed URLs.
+pub fn validate_companion_url(url: Option<&str>) -> std::result::Result<(), String> {
+    if let Some(raw) = url {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Ok(());
+        }
+        if !trimmed.to_ascii_lowercase().starts_with("https://") {
+            return Err("Companion URL must be an https:// URL".into());
+        }
+        // Minimal structural check: host part must exist
+        let after = trimmed[8..].trim();
+        if after.is_empty() || after.contains(' ') {
+            return Err("Companion URL must be a valid https:// URL".into());
+        }
+        // Use url crate-style check without adding dependency: ensure at least one dot or localhost token?
+        // Keep permissive: any non-empty host is accepted as long as it is https.
+    }
+    Ok(())
+}
+
+/// Normalizes a companion URL: trimmed, empty => None.
+pub fn normalize_companion_url(url: Option<&str>) -> Option<String> {
+    match url {
+        Some(raw) => {
+            let trimmed = raw.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        }
+        None => None,
+    }
+}
+
+/// Validates the companion height ratio (ticket 125): 0.25–0.60 inclusive.
+pub fn validate_companion_height_ratio(value: f64) -> std::result::Result<(), String> {
+    if !(COMPANION_HEIGHT_RATIO_MIN..=COMPANION_HEIGHT_RATIO_MAX).contains(&value) {
+        return Err(format!(
+            "Companion height ratio must be between {COMPANION_HEIGHT_RATIO_MIN:.2} and {COMPANION_HEIGHT_RATIO_MAX:.2}"
+        ));
+    }
+    if !value.is_finite() {
+        return Err("Companion height ratio must be a finite number".into());
+    }
+    Ok(())
+}
+
+/// Clamps a stored companion height ratio to the sane range (ticket 125).
+pub fn clamp_companion_height_ratio(value: f64) -> f64 {
+    if !value.is_finite() {
+        return DEFAULT_COMPANION_HEIGHT_RATIO;
+    }
+    value.clamp(COMPANION_HEIGHT_RATIO_MIN, COMPANION_HEIGHT_RATIO_MAX)
+}
+
+/// Dedups companion URL list (ticket 125): trimmed, case-insensitive on host+path,
+/// preserving first occurrence order. Empty entries are dropped. Only https URLs survive.
+/// Trailing slashes are ignored for dedup (https://a.com ↔ https://a.com/ are the same).
+pub fn dedup_companion_url_list(list: &[String]) -> Vec<String> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for raw in list {
+        let trimmed = raw.trim().to_string();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if validate_companion_url(Some(&trimmed)).is_err() {
+            continue;
+        }
+        // Dedup key: lowercased trimmed URL without trailing slash (host+path case-insensitive).
+        let key = trimmed.to_ascii_lowercase().trim_end_matches('/').to_string();
+        if seen.contains(&key) {
+            continue;
+        }
+        seen.insert(key);
+        out.push(trimmed);
+    }
+    out
+}
+
+/// Validates companion URL list (ticket 125): each entry must be https or empty list.
+pub fn validate_companion_url_list(list: &[String]) -> std::result::Result<(), String> {
+    for url in list {
+        validate_companion_url(Some(url))?;
+    }
+    Ok(())
+}
+
 impl Settings {
     /// Rejects values that would break a run or empty the log archive.
     /// Timeouts must be at least 1 minute and at most a day; retention at
@@ -288,6 +407,9 @@ impl Settings {
         validate_groups_feature(&self.clip_groups)?;
         validate_reveal_dwell_ms(self.reveal_dwell_ms)?;
         validate_reveal_sensitivity_px(self.reveal_sensitivity_px)?;
+        validate_companion_url(self.companion_url.as_deref())?;
+        validate_companion_height_ratio(self.companion_height_ratio)?;
+        validate_companion_url_list(&self.companion_url_list)?;
         Ok(())
     }
 }
@@ -322,6 +444,20 @@ pub fn load(conn: &Connection) -> Settings {
         raw(conn, key).filter(|value| check(value).is_ok())
     }
 
+    // Companion fields (ticket 125): tolerant parsing — broken values fall back
+    let companion_url = raw(conn, KEY_COMPANION_URL)
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .filter(|v| validate_companion_url(Some(v)).is_ok());
+    let companion_height_ratio = raw(conn, KEY_COMPANION_HEIGHT_RATIO)
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| validate_companion_height_ratio(*v).is_ok())
+        .unwrap_or(DEFAULT_COMPANION_HEIGHT_RATIO);
+    let companion_url_list = raw(conn, KEY_COMPANION_URL_LIST)
+        .and_then(|v| serde_json::from_str::<Vec<String>>(&v).ok())
+        .map(|list| dedup_companion_url_list(&list))
+        .unwrap_or_default();
+
     Settings {
         default_timeout_minutes: number(conn, KEY_TIMEOUT).unwrap_or(DEFAULT_TIMEOUT_MINUTES),
         log_retention_days: number(conn, KEY_RETENTION).unwrap_or(DEFAULT_RETENTION_DAYS),
@@ -351,6 +487,9 @@ pub fn load(conn: &Connection) -> Settings {
         reveal_sensitivity_px: number_i32(conn, KEY_REVEAL_SENSITIVITY_PX)
             .filter(|v| (REVEAL_SENSITIVITY_MIN_PX..=REVEAL_SENSITIVITY_MAX_PX).contains(v))
             .unwrap_or(DEFAULT_REVEAL_SENSITIVITY_PX),
+        companion_url,
+        companion_height_ratio,
+        companion_url_list,
     }
 }
 
@@ -377,6 +516,19 @@ pub fn save(conn: &Connection, settings: &Settings) -> std::result::Result<(), S
     upsert_meta(&tx, KEY_REVEAL_DWELL_MS, &settings.reveal_dwell_ms.to_string()).map_err(|e| e.to_string())?;
     upsert_meta(&tx, KEY_REVEAL_SENSITIVITY_PX, &settings.reveal_sensitivity_px.to_string())
         .map_err(|e| e.to_string())?;
+    // Companion (ticket 125): active URL stored as plain string (empty = null fallback),
+    // height ratio as f64 string, URL list as JSON array string.
+    if let Some(url) = &settings.companion_url {
+        upsert_meta(&tx, KEY_COMPANION_URL, url).map_err(|e| e.to_string())?;
+    } else {
+        // Remove key vs storing empty — store empty so load fallback works; also delete semantics via empty.
+        // Keep empty string as null-equivalent for backwards compat.
+        upsert_meta(&tx, KEY_COMPANION_URL, "").map_err(|e| e.to_string())?;
+    }
+    upsert_meta(&tx, KEY_COMPANION_HEIGHT_RATIO, &settings.companion_height_ratio.to_string())
+        .map_err(|e| e.to_string())?;
+    let list_json = serde_json::to_string(&settings.companion_url_list).map_err(|e| e.to_string())?;
+    upsert_meta(&tx, KEY_COMPANION_URL_LIST, &list_json).map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())
 }
 
@@ -426,6 +578,29 @@ pub fn save_groups_feature(
         crate::groups::Collection::Clip => KEY_CLIP_GROUPS,
     };
     upsert_meta(conn, key, value).map_err(|e| e.to_string())
+}
+
+/// Persists only the companion active URL (ticket 125) — null = empty string.
+pub fn save_companion_url(conn: &Connection, url: Option<&str>) -> std::result::Result<(), String> {
+    validate_companion_url(url)?;
+    let normalized = normalize_companion_url(url);
+    let stored = normalized.as_deref().unwrap_or("");
+    upsert_meta(conn, KEY_COMPANION_URL, stored).map_err(|e| e.to_string())
+}
+
+/// Persists only the companion height ratio (ticket 125) — clamped on read but
+/// rejected on save when out of range (explicit validation).
+pub fn save_companion_height_ratio(conn: &Connection, ratio: f64) -> std::result::Result<(), String> {
+    validate_companion_height_ratio(ratio)?;
+    upsert_meta(conn, KEY_COMPANION_HEIGHT_RATIO, &ratio.to_string()).map_err(|e| e.to_string())
+}
+
+/// Persists only the companion URL list (ticket 125) — deduped first, then stored as JSON.
+pub fn save_companion_url_list(conn: &Connection, list: &[String]) -> std::result::Result<(), String> {
+    validate_companion_url_list(list)?;
+    let deduped = dedup_companion_url_list(list);
+    let json = serde_json::to_string(&deduped).map_err(|e| e.to_string())?;
+    upsert_meta(conn, KEY_COMPANION_URL_LIST, &json).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -486,6 +661,9 @@ mod tests {
             clip_groups: "on".to_string(),
             reveal_dwell_ms: 350,
             reveal_sensitivity_px: 20,
+            companion_url: Some("https://music.youtube.com".to_string()),
+            companion_height_ratio: 0.55,
+            companion_url_list: vec!["https://music.youtube.com".to_string(), "https://open.spotify.com".to_string()],
         };
         {
             let conn = crate::db::init_at(&dir).unwrap();
@@ -772,6 +950,9 @@ mod tests {
             clip_groups: DEFAULT_GROUPS_FEATURE.to_string(),
             reveal_dwell_ms: DEFAULT_REVEAL_DWELL_MS,
             reveal_sensitivity_px: DEFAULT_REVEAL_SENSITIVITY_PX,
+            companion_url: None,
+            companion_height_ratio: DEFAULT_COMPANION_HEIGHT_RATIO,
+            companion_url_list: Vec::new(),
         };
         assert!(save(&conn, &bad).is_err());
         // Nothing was persisted.
@@ -859,5 +1040,106 @@ mod tests {
         let conn = crate::db::init_at(&dir).unwrap();
         assert_eq!(load(&conn).reveal_dwell_ms, 450);
         assert_eq!(load(&conn).reveal_sensitivity_px, 25);
+    }
+
+    #[test]
+    fn companion_validation_and_clamp_cover_sane_ranges() {
+        assert!(validate_companion_url(None).is_ok());
+        assert!(validate_companion_url(Some("")).is_ok());
+        assert!(validate_companion_url(Some("   ")).is_ok());
+        assert!(validate_companion_url(Some("https://music.youtube.com")).is_ok());
+        assert!(validate_companion_url(Some("https://open.spotify.com")).is_ok());
+        assert!(validate_companion_url(Some("http://music.youtube.com")).is_err());
+        assert!(validate_companion_url(Some("music.youtube.com")).is_err());
+        assert!(validate_companion_url(Some("https://")).is_err());
+        assert!(validate_companion_height_ratio(0.25).is_ok());
+        assert!(validate_companion_height_ratio(0.40).is_ok());
+        assert!(validate_companion_height_ratio(0.60).is_ok());
+        assert!(validate_companion_height_ratio(0.24).is_err());
+        assert!(validate_companion_height_ratio(0.61).is_err());
+        assert!(validate_companion_height_ratio(f64::NAN).is_err());
+        assert_eq!(clamp_companion_height_ratio(0.10), COMPANION_HEIGHT_RATIO_MIN);
+        assert_eq!(clamp_companion_height_ratio(0.55), 0.55);
+        assert_eq!(clamp_companion_height_ratio(0.90), COMPANION_HEIGHT_RATIO_MAX);
+        assert_eq!(clamp_companion_height_ratio(f64::NAN), DEFAULT_COMPANION_HEIGHT_RATIO);
+        let mut s = Settings::default();
+        s.companion_url = Some("http://bad".to_string());
+        assert!(s.validate().is_err());
+        s.companion_url = Some("https://ok.example.com".to_string());
+        s.companion_height_ratio = 0.90;
+        assert!(s.validate().is_err());
+        s.companion_height_ratio = 0.40;
+        s.companion_url_list = vec!["https://ok.example.com".to_string(), "http://bad".to_string()];
+        assert!(s.validate().is_err());
+        s.companion_url_list = vec!["https://ok.example.com".to_string()];
+        assert!(s.validate().is_ok());
+    }
+
+    #[test]
+    fn companion_url_list_dedup_is_case_insensitive_and_trimmed() {
+        let list = vec![
+            " https://Music.Youtube.com ".to_string(),
+            "https://music.youtube.com".to_string(),
+            "https://open.spotify.com".to_string(),
+            "HTTPS://OPEN.SPOTIFY.COM/ ".to_string(),
+            "http://bad.example.com".to_string(),
+            "  ".to_string(),
+        ];
+        let deduped = dedup_companion_url_list(&list);
+        assert_eq!(deduped, vec!["https://Music.Youtube.com".to_string(), "https://open.spotify.com".to_string()]);
+    }
+
+    #[test]
+    fn companion_settings_roundtrip() {
+        let dir = clean_dir();
+        let mut s = Settings::default();
+        s.companion_url = Some("https://music.youtube.com".to_string());
+        s.companion_height_ratio = 0.55;
+        s.companion_url_list = vec!["https://music.youtube.com".to_string(), "https://open.spotify.com".to_string()];
+        {
+            let conn = crate::db::init_at(&dir).unwrap();
+            save(&conn, &s).unwrap();
+            let loaded = load(&conn);
+            assert_eq!(loaded.companion_url, Some("https://music.youtube.com".to_string()));
+            assert!((loaded.companion_height_ratio - 0.55).abs() < 1e-9);
+            assert_eq!(loaded.companion_url_list, vec!["https://music.youtube.com".to_string(), "https://open.spotify.com".to_string()]);
+        }
+        let conn = crate::db::init_at(&dir).unwrap();
+        let loaded = load(&conn);
+        assert_eq!(loaded.companion_url, Some("https://music.youtube.com".to_string()));
+        assert!((loaded.companion_height_ratio - 0.55).abs() < 1e-9);
+    }
+
+    #[test]
+    fn invalid_stored_companion_values_fall_back_to_defaults() {
+        let conn = conn();
+        upsert_meta(&conn, KEY_COMPANION_URL, "http://bad").unwrap();
+        upsert_meta(&conn, KEY_COMPANION_HEIGHT_RATIO, "0.90").unwrap();
+        upsert_meta(&conn, KEY_COMPANION_URL_LIST, "not json").unwrap();
+        let loaded = load(&conn);
+        assert_eq!(loaded.companion_url, None);
+        assert!((loaded.companion_height_ratio - DEFAULT_COMPANION_HEIGHT_RATIO).abs() < 1e-9);
+        assert!(loaded.companion_url_list.is_empty());
+        upsert_meta(&conn, KEY_COMPANION_HEIGHT_RATIO, "fast").unwrap();
+        let loaded = load(&conn);
+        assert!((loaded.companion_height_ratio - DEFAULT_COMPANION_HEIGHT_RATIO).abs() < 1e-9);
+    }
+
+    #[test]
+    fn companion_url_saver_targets_one_knob_only() {
+        let conn = conn();
+        save_companion_url(&conn, Some("https://music.youtube.com")).unwrap();
+        assert_eq!(load(&conn).companion_url, Some("https://music.youtube.com".to_string()));
+        assert!((load(&conn).companion_height_ratio - DEFAULT_COMPANION_HEIGHT_RATIO).abs() < 1e-9);
+        save_companion_url(&conn, None).unwrap();
+        assert_eq!(load(&conn).companion_url, None);
+        assert!(save_companion_url(&conn, Some("http://bad")).is_err());
+        save_companion_height_ratio(&conn, 0.55).unwrap();
+        assert!((load(&conn).companion_height_ratio - 0.55).abs() < 1e-9);
+        assert!(save_companion_height_ratio(&conn, 0.90).is_err());
+        let list = vec!["https://a.example.com".to_string(), " https://A.example.com ".to_string(), "https://b.example.com".to_string()];
+        save_companion_url_list(&conn, &list).unwrap();
+        // deduped on save load cycle
+        assert_eq!(load(&conn).companion_url_list, vec!["https://a.example.com".to_string(), "https://b.example.com".to_string()]);
     }
 }

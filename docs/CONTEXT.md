@@ -114,6 +114,10 @@ _Avoid_: Quick copy, clipboard manager
 A machine-local, user-authored named command (PowerShell, optional working directory) run from the Quick Launch window's Quick Actions tab (e.g. "docker start" → `docker compose up -d`); runs hidden as the current user with no elevation and no status UI. Optionally **stoppable**: while its process runs, the Run button becomes Stop, which either runs the action's own stop command (e.g. `docker compose stop`) or kills the process tree; tracking covers foreground commands only — detached commands (e.g. `-d`) report as not running because the process exits while the service continues. Configured in the main app's Quick Actions page; never part of Presets, Plan, Run, or exports.
 _Avoid_: Action (a Plan term), command entry, script
 
+**Companion**:
+A machine-local, single-site web surface shown in the lower portion of the Quick Launch dock when the user chooses an active saved site. It is absent while the window floats or no site is active, and it is unrelated to Quick Actions, Presets, Plans, and Runs.
+_Avoid_: Browser pane, embedded app, mini window
+
 **Note**:
 Optional free-form text a user attaches to exactly one Quick Action, for whatever they want to record about it — the content and its purpose are the user's alone, and Sprout gives it no behavior (it never affects how the action runs). Short formatted text (bullets, numbered steps), authored in the main app and rendered read-only wherever shown; rows carrying one are marked so readers know the text exists before opening it. Machine-local; never part of Presets, Plan, Run, or exports.
 _Avoid_: Comment, description, remark

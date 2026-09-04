@@ -17,12 +17,18 @@
     listGroups,
     listLaunchEntries,
     listQuickActions,
+    openCompanionExternal,
     openSprout,
     runQuickAction,
     startLaunchEntry,
     startQuickLaunch,
     switchQuickLaunchDockEdge,
     toggleQuickLaunchDock,
+    setCompanionHeightRatio,
+    setCompanionHeightRatioForDisplay,
+    getCompanionHeightRatio,
+    listDisplays,
+    COMPANION_MOBILE_UA,
   } from "$lib/api";
   import {
     quickActionRuns,
@@ -37,12 +43,21 @@
   import type { QuickLaunchDockState } from "$lib/types";
   import { restoreTheme, type ThemeMode } from "$lib/theme.svelte";
   import { titleBarDragRegion } from "$lib/quickLaunchTitleBar";
+  import {
+    companionWebviewBounds,
+    companionZoomForWidth,
+  } from "$lib/companionPane";
   import Button from "$lib/components/Button.svelte";
   import GroupAccordion from "$lib/components/GroupAccordion.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import IconButton from "$lib/components/IconButton.svelte";
   import SproutMark from "$lib/components/SproutMark.svelte";
   import Tabs from "$lib/components/Tabs.svelte";
+  // Companion WebView2 (ticket 125): direct navigation so X-Frame-Options never blocks
+  // (learn.microsoft.com/webview2/concepts/frames). Use Webview API when in Tauri.
+  import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
+  import { Webview } from "@tauri-apps/api/webview";
 
   // The Quick Launch window (ticket 52): the tray's left-click target — a
   // miniature, frameless, read-only window. The backend owns its life cycle
@@ -115,6 +130,313 @@
         (dock.edge === "right" && !dock.right_eligible))
   );
   const showBlocked = $derived(dock.docked && (dock.blocked !== null || seamBlocked));
+
+  // Ticket 125 Companion: single-tab mobile web view in the dock's bottom ~40%.
+  // Content-gated (0004:2 / 0006:11) — companionUrl==null → no Webview, no splitter, no chrome;
+  // floating never shows the pane; per-monitor height ratio falls back to settings.
+  let companionUrl: string | null = $state(null);
+  let companionUrlList: string[] = $state([]);
+  let companionRatio = $state(0.40);
+  let companionCanGoBack = $state(false);
+  let companionCanGoForward = $state(false);
+  let companionHistory: string[] = $state([]);
+  let companionHistoryIndex = $state(-1);
+  let companionDragging = $state(false);
+  let qlwMainEl: HTMLDivElement | null = $state(null);
+  let companionFrameEl: HTMLIFrameElement | null = $state(null);
+  let companionFrameWrapEl: HTMLDivElement | null = $state(null);
+  let companionWebview: Webview | null = $state(null);
+  let companionSyncRunning = false;
+  let companionSyncPending = false;
+  let companionWebviewFailed = $state(false);
+  let companionFailedUrl: string | null = $state(null);
+  let companionFailureDetail = $state("");
+  let companionOpeningExternal = $state(false);
+  function hasCompanionUrl(url: string | null): url is string {
+    return typeof url === "string" && url.trim().length > 0;
+  }
+  const companionVisible = $derived(dock.docked && hasCompanionUrl(companionUrl));
+  // Browser preview uses an iframe; the Windows runtime uses WebView2 or the stable failure surface.
+  // Detect Tauri reliably — __TAURI_IPC__ is always present in Tauri webviews, __TAURI__ may be delayed
+  const isTauri = typeof window !== "undefined" && !!((window as any).__TAURI__ || (window as any).__TAURI_IPC__ || (window as any).__TAURI_INTERNALS__);
+  const useWebview = $derived(companionVisible && isTauri && !companionWebviewFailed);
+  // Splitter follows the 0.25–0.60 clamp (ticket 125) — single source with settings.rs
+  function clampCompanionRatio(v: number): number {
+    return Math.min(0.60, Math.max(0.25, v));
+  }
+  async function persistCompanionRatio() {
+    try {
+      const clamped = clampCompanionRatio(companionRatio);
+      await setCompanionHeightRatio(clamped);
+      try {
+        const displays = await listDisplays();
+        if (displays.length > 0) {
+          await setCompanionHeightRatioForDisplay(displays[0].device_name, clamped);
+        }
+      } catch {}
+    } catch (e) {
+      console.error(e);
+    }
+  }
+  async function refreshCompanion() {
+    try {
+      const s = await getSettings();
+      companionUrl = s.companion_url;
+      companionUrlList = s.companion_url_list ?? [];
+      const globalRatio = s.companion_height_ratio ?? 0.40;
+      // Per-monitor override: query the monitor the window sits on
+      let perMonitor: number | null = null;
+      try {
+        const displays = await listDisplays();
+        // Simplest: use first display as proxy for current monitor; the backend's
+        // dock memory already keys per-monitor, and the frontend's drag persists
+        // per monitor via setCompanionHeightRatioForDisplay with that display.
+        if (displays.length > 0) {
+          perMonitor = await getCompanionHeightRatio(displays[0].device_name);
+        }
+      } catch {}
+      companionRatio = clampCompanionRatio(perMonitor ?? globalRatio);
+      // Init history when url changes
+      if (companionUrl) {
+        if (companionHistory.length === 0 || companionHistory[0] !== companionUrl) {
+          companionHistory = [companionUrl];
+          companionHistoryIndex = 0;
+          companionCanGoBack = false;
+          companionCanGoForward = false;
+        }
+      } else {
+        companionHistory = [];
+        companionHistoryIndex = -1;
+        companionCanGoBack = false;
+        companionCanGoForward = false;
+      }
+      // Ensure native webview reflects new URL / ratio (direct navigation, not iframe, so X-Frame-Options never blocks)
+      void syncCompanionWebview();
+    } catch (e) {
+      console.error(e);
+    }
+  }
+  function companionGoBack() {
+    if (!companionFrameEl || companionHistoryIndex <= 0) return;
+    companionHistoryIndex -= 1;
+    const url = companionHistory[companionHistoryIndex];
+    companionCanGoBack = companionHistoryIndex > 0;
+    companionCanGoForward = companionHistoryIndex < companionHistory.length - 1;
+    if (companionFrameEl) companionFrameEl.src = url;
+  }
+  function companionGoForward() {
+    if (!companionFrameEl || companionHistoryIndex >= companionHistory.length - 1) return;
+    companionHistoryIndex += 1;
+    const url = companionHistory[companionHistoryIndex];
+    companionCanGoBack = companionHistoryIndex > 0;
+    companionCanGoForward = companionHistoryIndex < companionHistory.length - 1;
+    if (companionFrameEl) companionFrameEl.src = url;
+  }
+  async function companionOpenExternal() {
+    if (!companionUrl || companionOpeningExternal) return;
+    companionOpeningExternal = true;
+    try {
+      await openCompanionExternal(companionUrl);
+    } catch (e) {
+      error = `Couldn't open the companion in your browser — ${String(e)}`;
+    } finally {
+      companionOpeningExternal = false;
+    }
+  }
+  async function companionRetry() {
+    const webview = companionWebview;
+    companionWebview = null;
+    companionWebviewFailed = false;
+    companionFailedUrl = null;
+    companionFailureDetail = "";
+    if (webview) {
+      try { await webview.close(); } catch {}
+    }
+    await syncCompanionWebview();
+  }
+  function handleCompanionLoad() {
+    // Track in-pane navigation for Back/Forward (0004:2 show-if-you-can).
+    // For cross-origin iframes we cannot read contentWindow.location, so we
+    // synthesize history growth via load count — after first nav, Back appears.
+    // The current Tauri child-WebView surface does not expose native history state.
+    try {
+      const current = companionFrameEl?.src ?? companionUrl ?? "";
+      if (current && companionHistory[companionHistoryIndex] !== current) {
+        // Truncate forward history on new nav
+        companionHistory = companionHistory.slice(0, companionHistoryIndex + 1);
+        companionHistory.push(current);
+        companionHistoryIndex = companionHistory.length - 1;
+      }
+    } catch {}
+    companionCanGoBack = companionHistoryIndex > 0;
+    companionCanGoForward = companionHistoryIndex < companionHistory.length - 1;
+    // Simulate after first real navigation inside pane, Back appears — if we
+    // have only one entry, keep false until second load
+  }
+  function onCompanionSplitterPointerDown(e: PointerEvent) {
+    if (!qlwMainEl) return;
+    companionDragging = true;
+    (e.currentTarget as Element).setPointerCapture(e.pointerId);
+    const onMove = (ev: PointerEvent) => {
+      if (!qlwMainEl || !companionDragging) return;
+      const rect = qlwMainEl.getBoundingClientRect();
+      const offsetFromTop = ev.clientY - rect.top;
+      // Companion is bottom pane: ratio = 1 - (splitterPosition / height)
+      // Approximate splitter at 40%: top part height = total*(1-ratio)
+      const total = rect.height;
+      if (total <= 0) return;
+      let newRatio = 1 - offsetFromTop / total;
+      newRatio = clampCompanionRatio(newRatio);
+      companionRatio = newRatio;
+    };
+    const onUp = () => {
+      companionDragging = false;
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      void persistCompanionRatio();
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    // Keep native WebView bounds in sync during drag
+    void syncCompanionWebview();
+  }
+
+  function onCompanionSplitterKeyDown(e: KeyboardEvent) {
+    let next: number;
+    switch (e.key) {
+      case "ArrowUp":
+        next = companionRatio + 0.05;
+        break;
+      case "ArrowDown":
+        next = companionRatio - 0.05;
+        break;
+      case "Home":
+        next = 0.60;
+        break;
+      case "End":
+        next = 0.25;
+        break;
+      default:
+        return;
+    }
+    e.preventDefault();
+    companionRatio = clampCompanionRatio(next);
+    void syncCompanionWebview();
+    void persistCompanionRatio();
+  }
+
+  // Native WebView2 uses direct navigation so X-Frame-Options never blocks.
+  async function syncCompanionWebview() {
+    companionSyncPending = true;
+    if (companionSyncRunning) return;
+    companionSyncRunning = true;
+    try {
+      while (companionSyncPending) {
+        companionSyncPending = false;
+        await syncCompanionWebviewOnce();
+      }
+    } finally {
+      companionSyncRunning = false;
+      if (companionSyncPending) void syncCompanionWebview();
+    }
+  }
+
+  async function syncCompanionWebviewOnce() {
+    // In browser preview without Tauri, skip native webview and use iframe fallback
+    if (!isTauri) return;
+    if (companionWebviewFailed && companionFailedUrl === companionUrl) return;
+    if (companionFailedUrl !== companionUrl) {
+      companionWebviewFailed = false;
+      companionFailedUrl = null;
+      companionFailureDetail = "";
+    }
+    if (!companionVisible || !companionUrl) {
+      if (companionWebview) {
+        try { await companionWebview.close(); } catch {}
+        companionWebview = null;
+      }
+      companionWebviewFailed = false;
+      companionFailedUrl = null;
+      companionFailureDetail = "";
+      return;
+    }
+    if (!companionFrameWrapEl) return;
+    const bounds = companionWebviewBounds(companionFrameWrapEl.getBoundingClientRect());
+    // Recreate if URL changed or not yet created
+    const needsCreate = !companionWebview;
+    // For URL changes, easiest is to recreate the webview (Tauri Webview has no navigate API)
+    // We track lastUrl via a hidden prop
+    const lastUrl = (companionWebview as any)?._companionUrl as string | undefined;
+    const urlChanged = lastUrl !== companionUrl;
+    if (needsCreate || urlChanged) {
+      if (companionWebview) {
+        try { await companionWebview.close(); } catch {}
+        companionWebview = null;
+      }
+      const targetUrl = companionUrl;
+      try {
+        const win = getCurrentWindow();
+        // Ensure previous companion webview removed (idempotent)
+        try {
+          const existing = await Webview.getByLabel("companion");
+          if (existing) await existing.close();
+        } catch {}
+        const wv = new Webview(win, "companion", {
+          url: targetUrl,
+          x: bounds.x,
+          y: bounds.y,
+          width: bounds.width,
+          height: bounds.height,
+          userAgent: COMPANION_MOBILE_UA,
+          incognito: false,
+          dataDirectory: "companion",
+          transparent: false,
+          focus: false,
+          dragDropEnabled: false,
+        });
+        (wv as any)._companionUrl = targetUrl;
+        wv.once("tauri://created", () => {
+          if (companionWebview !== wv) return;
+          console.log("companion webview created", targetUrl);
+          void wv.setZoom(companionZoomForWidth(bounds.width)).catch((e) => {
+            console.error("syncCompanionWebview zoom failed", e);
+          });
+          companionWebviewFailed = false;
+          companionFailedUrl = null;
+          companionFailureDetail = "";
+        });
+        wv.once("tauri://error", (e) => {
+          if (companionWebview !== wv) return;
+          console.error("companion webview error", e);
+          void wv.close().catch(() => {});
+          companionWebview = null;
+          companionFailedUrl = targetUrl;
+          companionFailureDetail = String(e.payload ?? "");
+          companionWebviewFailed = true;
+        });
+        companionWebview = wv;
+        companionWebviewFailed = false;
+      } catch (e) {
+        console.error("syncCompanionWebview create failed", e);
+        companionWebview = null;
+        companionFailedUrl = targetUrl;
+        companionFailureDetail = String(e);
+        companionWebviewFailed = true;
+      }
+      return;
+    }
+    // Existing webview: update bounds live
+    const webview = companionWebview;
+    if (!webview) return;
+    try {
+      await webview.setPosition(new LogicalPosition(bounds.x, bounds.y));
+      await webview.setSize(new LogicalSize(bounds.width, bounds.height));
+      await webview.setZoom(companionZoomForWidth(bounds.width));
+    } catch (e) {
+      console.error("syncCompanionWebview bounds failed", e);
+    }
+  }
+
   // Ticket 79: one-click copy feedback — the copied row flashes "Copied"
   // for ~1.2 s and a polite live region announces it; silence reads as
   // breakage (research 0004 rule 5).
@@ -125,6 +447,7 @@
   onMount(() => {
     load();
     refreshDock();
+    refreshCompanion();
     // Ticket 42: the run finishes on the backend's background thread — the
     // summary lands as a system notification, this event releases the start
     // affordances (Start all plus ticket 93's entry rows) and posts the
@@ -145,9 +468,11 @@
     listen("quick-launch-changed", () => {
       load();
       refreshDock();
+      refreshCompanion();
     }).then((fn) => unlisteners.push(fn));
     listen("displays-changed", () => {
       refreshDock();
+      refreshCompanion();
     }).then((fn) => unlisteners.push(fn));
     // Ticket 61: a background dock failure — a shell-initiated re-assert
     // (ABN_POSCHANGED) or the drift watchdog — surfaces in the window's error
@@ -159,7 +484,31 @@
       unlisteners.forEach((fn) => fn());
       clearTimeout(copiedTimer);
       clearTimeout(runNoticeTimer);
+      // Cleanup companion webview on unmount
+      if (companionWebview) {
+        void companionWebview.close().catch(() => {});
+        companionWebview = null;
+      }
     };
+  });
+
+  // Keep native WebView bounds + url in sync whenever its inputs change (also handles X-Frame-Options avoidance)
+  $effect(() => {
+    void companionVisible;
+    void companionUrl;
+    void companionRatio;
+    void dock.docked;
+    void qlwMainEl;
+    void companionFrameWrapEl;
+    void syncCompanionWebview();
+  });
+
+  $effect(() => {
+    const frame = companionFrameWrapEl;
+    if (!frame || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => void syncCompanionWebview());
+    observer.observe(frame);
+    return () => observer.disconnect();
   });
 
   async function refreshDock() {
@@ -521,17 +870,19 @@
          free edge instead of silently pinning the strip forever.
          Ticket 119 reuses the same banner for a seam-docked strip. -->
     <div class="qlw__blocked" role="status">
-      <span class="qlw__blocked-icon" aria-hidden="true">
-        <Icon name="warn" size={15} />
-      </span>
-      <p class="qlw__blocked-text">
-        {#if seamBlocked}
-          {SEAM_REASON}
-        {:else}
-          {dock.blocked}. The strip stays pinned until that edge frees up —
-          hiding resumes on its own.
-        {/if}
-      </p>
+      <div class="qlw__blocked-top">
+        <span class="qlw__blocked-icon" aria-hidden="true">
+          <Icon name="warn" size={15} />
+        </span>
+        <p class="qlw__blocked-text">
+          {#if seamBlocked}
+            {SEAM_REASON}
+          {:else}
+            {dock.blocked}. Hiding still works — the strip slides on its own
+            while that edge stays busy.
+          {/if}
+        </p>
+      </div>
       <Button
         variant="ghost"
         onclick={() => switchEdge(dock.edge === "left" ? "right" : "left")}
@@ -644,13 +995,19 @@
     </li>
   {/snippet}
 
-  <div class="qlw__tabs">
-    <Tabs
-      tabs={qlTabs}
-      selected={tab}
-      onselect={(id) => (tab = id)}
-      ariaLabel="Quick Launch window sections"
+  <!-- Ticket 125 companion: single-tab mobile web view in dock's bottom ~40% — content-gated, dock-only -->
+  <div class="qlw__main" bind:this={qlwMainEl}>
+    <div
+      class="qlw__tabs-wrap"
+      style:flex={companionVisible ? (1 - companionRatio) + " 1 0%" : "1 1 0%"}
     >
+      <div class="qlw__tabs">
+        <Tabs
+          tabs={qlTabs}
+          selected={tab}
+          onselect={(id) => (tab = id)}
+          ariaLabel="Quick Launch window sections"
+        >
       {#snippet panel(id)}
         {#if id === "launch"}
           {#if loading && entries.length === 0}
@@ -809,7 +1166,82 @@
           {/if}
         {/if}
       {/snippet}
-    </Tabs>
+        </Tabs>
+      </div>
+    </div>
+    {#if companionVisible}
+      <!-- Splitter: horizontal draggable divider 0006:7 Disclosure-like but horizontal, clamped 25–60% -->
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex (a focusable ARIA separator is a range widget when it exposes aria-valuenow) -->
+      <!-- svelte-ignore a11y_no_noninteractive_element_interactions (the separator supports both pointer drag and keyboard arrows) -->
+      <div
+        class="qlw__splitter"
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label="Resize companion pane"
+        aria-valuemin="25"
+        aria-valuemax="60"
+        aria-valuenow={Math.round(companionRatio * 100)}
+        tabindex="0"
+        title="Drag or use arrow keys to resize companion pane (25%–60%)"
+        onpointerdown={onCompanionSplitterPointerDown}
+        onkeydown={onCompanionSplitterKeyDown}
+      ></div>
+      <div class="qlw__companion" style:flex={companionRatio + " 1 0%"}>
+        <div class="qlw__companion-bar">
+          {#if companionCanGoBack}
+            <IconButton icon="chevron-left" label="Back" quiet onclick={companionGoBack} />
+          {/if}
+          {#if companionCanGoForward}
+            <IconButton icon="chevron-right" label="Forward" quiet onclick={companionGoForward} />
+          {/if}
+          <span class="qlw__companion-url" title={companionUrl ?? ""}>{companionUrl}</span>
+          <span class="qlw__companion-spacer" aria-hidden="true"></span>
+          <IconButton
+            icon="external"
+            label={companionOpeningExternal ? "Opening externally" : "Open externally"}
+            quiet
+            disabled={companionOpeningExternal}
+            onclick={companionOpenExternal}
+          />
+        </div>
+        <div class="qlw__companion-frame-wrap" bind:this={companionFrameWrapEl}>
+          {#if companionWebviewFailed}
+            <div class="qlw__companion-failure" role="status">
+              <Icon name="monitor" size={20} />
+              <p>This site couldn’t load in Companion.</p>
+              <span>
+                {import.meta.env.DEV && companionFailureDetail
+                  ? companionFailureDetail
+                  : "It may block embedded browsers."}
+              </span>
+              <div class="qlw__companion-failure-actions">
+                <Button variant="secondary" onclick={() => void companionRetry()}>Try again</Button>
+                <Button onclick={() => void companionOpenExternal()}>Open externally</Button>
+              </div>
+            </div>
+          {:else if useWebview}
+            <!-- The placeholder reserves the content area while the native WebView2 is created. -->
+            <div class="qlw__companion-placeholder" aria-hidden="true">
+              <p class="qlw__companion-placeholder-text">Loading {companionUrl}…</p>
+            </div>
+          {:else}
+            <!-- Fallback iframe for browser preview / when Tauri not available.
+                 Note: many sites (YouTube, Spotify) send X-Frame-Options: SAMEORIGIN and will show
+                 "refused to connect" here — the native WebView (dock on Windows) does direct
+                 navigation and is not blocked. Use Open externally for those sites in preview. -->
+            <iframe
+              bind:this={companionFrameEl}
+              class="qlw__companion-frame"
+              src={companionUrl}
+              title="Companion"
+              allow="clipboard-read; clipboard-write; autoplay; encrypted-media; fullscreen"
+              sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
+              onload={handleCompanionLoad}
+            ></iframe>
+          {/if}
+        </div>
+      </div>
+    {/if}
   </div>
 
   {#if runNotice}
@@ -1273,19 +1705,28 @@
     overflow-wrap: anywhere;
   }
 
-  /* Ticket 63: the blocked-auto-hide banner — the shell refused the edge, so
-     the strip stays pinned and this says why. Shared warn tokens; `status`
-     (not `alert`) because nothing is broken — hiding simply waits for the
-     edge to free up. */
+  /* Ticket 63: the blocked-auto-hide banner — the shell refused the edge
+     registration, so this says what was refused. Shared warn tokens; `status`
+     (not `alert`) because nothing is broken — the driver still slides the
+     strip on its own while the edge stays busy (research 0004: fit must hold
+     at real device DPI). Stacked — same copy, same order, shared
+     Button untouched and full-width via stretch. */
   .qlw__blocked {
     display: flex;
-    align-items: center;
+    flex-direction: column;
+    align-items: stretch;
     gap: var(--space-2);
     margin: 0 var(--space-4) var(--space-2);
     padding: var(--space-2) var(--space-3);
     background: var(--warn-tint);
     border: 1px solid var(--warn-tint-border);
     border-radius: var(--radius);
+  }
+
+  .qlw__blocked-top {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
   }
 
   .qlw__blocked-icon {
@@ -1336,5 +1777,129 @@
      otherwise stylesheet order decides and every tab renders at once. */
   .qlw__tabs :global(.tabs__panel[hidden]) {
     display: none;
+  }
+
+  /* Ticket 125 companion: horizontal splitter + web view pane (0006:7 Disclosure-like but horizontal).
+     Content-gated — no URL means no pane, no splitter, no chrome; floating never shows it (constants/window.rs 460).
+     Ratio clamped 25–60% live while dragging, persists per monitor, survives toggleQuickLaunchDock + restart. */
+  .qlw__main {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .qlw__tabs-wrap {
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .qlw__splitter {
+    display: block;
+    width: 100%;
+    flex-shrink: 0;
+    height: 6px;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: var(--border);
+    cursor: row-resize;
+    touch-action: none;
+    transition: background var(--dur-fast) var(--ease-out);
+  }
+
+  .qlw__splitter:hover,
+  .qlw__splitter:active {
+    background: var(--accent-tint-border);
+  }
+
+  .qlw__splitter:focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: -2px;
+  }
+
+  .qlw__companion {
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-surface);
+    border-top: 1px solid var(--border);
+    overflow: hidden;
+  }
+
+  .qlw__companion-bar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: var(--space-1) var(--space-2);
+    flex-shrink: 0;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-card);
+  }
+
+  .qlw__companion-url {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+  }
+
+  .qlw__companion-spacer {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .qlw__companion-frame-wrap {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+    background: var(--bg-page);
+  }
+
+  .qlw__companion-placeholder,
+  .qlw__companion-failure {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    padding: var(--space-5);
+    color: var(--text-muted);
+    text-align: center;
+  }
+
+  .qlw__companion-placeholder-text,
+  .qlw__companion-failure p,
+  .qlw__companion-failure span {
+    margin: 0;
+    font-size: var(--text-xs);
+  }
+
+  .qlw__companion-failure p {
+    color: var(--text);
+    font-weight: 600;
+  }
+
+  .qlw__companion-failure-actions {
+    display: flex;
+    gap: var(--space-2);
+    margin-top: var(--space-2);
+  }
+
+  .qlw__companion-frame {
+    width: 100%;
+    height: 100%;
+    border: 0;
+    display: block;
+    background: var(--bg-page);
   }
 </style>

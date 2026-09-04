@@ -1,14 +1,14 @@
-# 120 — Round: foreground-on-tap, Store scan, dock header minimal, Run/Stop width, companion single-tab browser (spec)
+# 120 — Round: foreground-on-tap, Store scan, dock header minimal, Run/Stop width, Companion single-site browser (spec)
 
-**What to build:** One round fixing five surfaces as a coherent dock + quick-access move: (1) single-tap on a Launch entry foregrounds its existing window when already running (batch `Start all` keeps skip), at the same Z as normal windows so it appears above a Fixed dock; (2) the app picker surfaces Microsoft Store/MSIX apps via `PackageManager`→`AUMID` alongside Win32 `.lnk`/`.exe` without touching existing validation; (3) the Quick Launch window/dock header drops the `Quick Launch` wordmark and keeps only the `SproutMark` as drag affordance; (4) Run/Stop controls share one `min-width` so the button never jumps on state change (color is the signal); (5) a dock-only, content-gated, single-tab Companion WebView (any `https://` URL, mobile UA, fully isolated) lives in the bottom ~40% of the dock for music/video mini-UIs, with a draggable splitter per-monitor. Implemented via tickets 121–125, audited by closing pass. Research `docs/research/0012-companion-webview-feasibility.md` and glossary `docs/CONTEXT.md` Companion entry land with this round.
+**What to build:** One round fixing five surfaces as a coherent dock + quick-access move: (1) single-tap on a Launch entry foregrounds its existing window when already running (batch `Start all` keeps skip), at the same Z as normal windows so it appears above a Fixed dock; (2) the app picker surfaces Microsoft Store/MSIX apps via `PackageManager`→`AUMID` alongside Win32 `.lnk`/`.exe` without touching existing validation; (3) the Quick Launch window/dock header drops the `Quick Launch` wordmark and keeps only the `SproutMark` as drag affordance; (4) Run/Stop controls share one `min-width` so the button never jumps on state change (color is the signal); (5) a dock-only, content-gated, single-site Companion WebView directly navigates to a chosen HTTPS site in the lower portion of the dock, with a draggable splitter per monitor and an external-browser escape for unsupported sites. Implemented via tickets 121–125, audited by closing pass. Research `docs/research/0012-companion-webview-feasibility.md` and glossary `docs/CONTEXT.md` Companion entry land with this round.
 
 **Blocked by:** none (round spec; implemented via tickets 121–125)
 
-**Status:** ready-for-agent
+**Status:** implemented via tickets 121–125; Companion narrow-viewport visual follow-up remains
 
-## Problem Statement
+## Original Problem Statement
 
-Quick Launch today always spawns, even when the app is already visible — tapping the taskbar foregrounds, Sprout re-launches. The picker only knows Win32 `.lnk`/`.exe`, so Store apps (Calculator, Store-installed Spotify) require a hand-typed custom command. The dock header (`src/routes/quick-launch-window/+page.svelte:448`) at `340px` physical (`src-tauri/src/constants/window.rs:7` `WINDOW_WIDTH==DOCK_WIDTH==340`, `0004` constraint) wastes ~60px on the `Quick Launch` wordmark plus dock hint, pushing the Launch/Actions/Clips tabs into `full→short→icon` degradation sooner than needed. Run/Stop in the window and on `quick-actions/+page.svelte:152` change width on every `Run→Stop` flip (label length + gap), reading as jitter at dock width. And there is no companion surface for the asked music/video mini-UI: users want YouTube/Music/Spotify Web visible while the dock stays pinned, but embedding an arbitrary desktop `HWND` via `SetParent` is brittle for CEF/Chromium hosts.
+Before tickets 121–125, Quick Launch always spawned even when the app was already visible, the picker knew only Win32 `.lnk`/`.exe` apps, the dock header spent scarce width on its wordmark, Run/Stop controls changed width, and there was no Companion surface for a music/video site. This section records the pre-round problem; the implementation status and corrected Companion limits above describe the current product.
 
 ## Solution
 
@@ -20,7 +20,7 @@ Quick Launch today always spawns, even when the app is already visible — tappi
 
 **Run/Stop width (Q8).** Measure Run's rendered width, apply as `min-width` token to Stop (`Button.svelte:36` `btn` `gap`+`padding:8px 16px`, variants `primary`/`danger` `Button.svelte:59/79`) so Run→Stop→Stopping (`0004` feedback) never reflows at `340px`; color `accent`→`danger` is the only signal (`0006:6` one reserved accent, `0005:2` one primary).
 
-**Companion single-tab browser (b, Q11/12 + your `any web app, just 1, no multi-tab`).** One `WebView2` (`WebView2 preinstalled on Win11` `v2.tauri.app/reference/webview-versions`) hosted at `new Webview(window, "companion", {url, x:0,y:0.6*h,width:340,height:0.4*h})` (`v2.tauri.app/de/reference/javascript/api/namespacewebview`). Any `https://` URL (YouTube/`music.youtube.com`/`open.spotify.com`, etc.) — direct navigation, not iframe, so no `X-Frame-Options` block (`learn.microsoft.com/webview2/concepts/frames` `AdditionalAllowedFrameAncestors` only for iframes; `youtube/api-samples#140` `watch→embed` only matters for framing). In-page nav stays, Back/Forward `IconButton`s only when `canGoBack/Forward` (`0004:2`). Mobile UA (`iPhone` string) by default so 340px gets mobile layouts. Draggable horizontal splitter default 40% clamped 25–60%, per-monitor persisted in `settings` (like `dock_edge`), gated content-wise: no URL → no pane/splitter, hidden while floating (`WINDOW_HEIGHT 460` too short) (`0004:2`/`0006:11`). Fully isolated — separate WebView2 profile, no `__TAURI__`/`invoke`/`listen` bridge, `_blank`→`shell.open` external, not a `quick_actions` runner (`engine/windows` `hidden`/`powershell_argv` not involved). Desktop `SetParent` HWND embedding for arbitrary exe explicitly rejected (see research 0012: `electron/electron#10547`/`#26729`, `sweetwisdom/electron-native-windows` `WS_POPUP→WS_CHILD` before `SetParent`, `stackoverflow 170800` `AttachThreadInput` hangs — brittle for CEF hosts like Spotify desktop).
+**Companion single-site browser (b, Q11/12 + your `any web app, just 1, no multi-tab`).** One child WebView2 navigates directly to the chosen HTTPS URL at bounds measured from the dock's content frame. It uses an Android Chrome identity that matches WebView2's Chromium engine and a persistent isolated `companion` data directory. Direct navigation avoids iframe-only `X-Frame-Options` failures but cannot guarantee that every site or authentication flow permits embedded browsers, so a stable failure state offers Retry and Open externally. The splitter defaults to 40%, clamps to 25–60%, persists per monitor, and is absent while floating or when no site is active. Active site and height live in Settings; the separate manager owns saved-site CRUD only. Native history and `_blank` interception from the proposal are not claimed by the shipped Tauri child-WebView surface.
 
 ## User Stories
 
@@ -42,7 +42,7 @@ Quick Launch today always spawns, even when the app is already visible — tappi
 
 **Companion**
 
-8. As a dock user, I want to pick any web app URL in main-app Settings (saved list, one active) and see it in the bottom ~40% of the dock as a mini mobile UI, so music/video plays while the dock stays pinned.
+8. As a dock user, I want to pick one saved HTTPS site in main-app Settings and see its narrow responsive layout in the lower portion of the dock, with a clear browser escape when the site refuses embedding.
 9. As a user, I want the companion pane and its splitter hidden when no URL is set and when the window is floating, so empty chrome never occupies space.
 10. As a user, I want the splitter draggable (default 40% clamped 25–60%) remembered per-monitor, so 1080p and 4K both feel right.
 11. As a user with no need for a browser, I want the app unchanged — no pane, no extra buttons — until I set a URL.
@@ -53,14 +53,14 @@ Quick Launch today always spawns, even when the app is already visible — tappi
 - **Store seam:** new `store::enumerate_uwp()` behind `launch::list_candidates()`, merged before sort; `shell:AppsFolder` target shape already handled by existing icon extraction (`icons.rs`) for Win32 — UWP path adds `ActivateApplication` launcher branch.
 - **Header:** conditional `{#if dock.docked}` wordmark removal only; `titleBarDragRegion(dock.docked)` (`+page.svelte:450`) stays on header+mark; floating window keeps wordmark for discoverability (one-header caveat documented).
 - **Run width:** measure once in `QuickActionRunControl.svelte` (`run` label `Run`/`Starting…` longest), set `--run-w` token, `Stop`/`Stopping` use `min-width:var(--run-w)`; `Button` geometry untouched.
-- **Companion:** single `Webview` label `companion`, `x/y/width/height` derived from dock monitor rect (per-monitor, `display arrangement` `docs/CONTEXT.md:89`), mobile `UserAgent`, separate partition, `DecidePolicy` for `_blank`. Settings key `companionUrl` (string|null) + `companionHeightRatio` (float). No `group_id`/`position` — not an ordered list (`ordered_list.rs` not involved).
+- **Companion:** single child `Webview` label `companion`, bounds derived from the measured content frame, Android Chrome identity, persistent isolated data directory, and explicit OS-default-browser escape. Settings own `companionUrl` + `companionHeightRatio`; the manager owns the ordered saved URL list.
 
 ## Testing Decisions
 
 - Foreground: `FakeLauncher` (`launch.rs:1103`) windows-per-desktop + `handed_off` — new `foregounds_single_on_same_desktop`, `batch_skips_without_foreground`, `unassigned_foregounds_on_current_desktop`, `dead_desktop_frees_without_foreground`.
 - Store: enumeration filtered count test, picker merge dedup test, activation branch mocked via `Launcher::activate_uwp` on `FakeLauncher`.
 - Header/width: `svelte-check` 0/0 + manual 340px DPI check (`0004` physical-px); no cargo path.
-- Companion: backend settings round-trip test for `companionUrl`/`companionHeightRatio`; frontend manual pass: no URL→no pane, URL→pane, splitter drag persists, floating→hidden, back/forward appears only with history. No `cargo test` for WebView creation (OS surface).
+- Companion: backend settings round-trip coverage plus frontend source/geometry regression tests; manual pass covers no URL→no pane, URL→native pane, stable failure actions, splitter persistence, floating→hidden, and fixed-dock restore. Native creation remains an OS-level smoke test.
 
 ## Out of Scope
 
@@ -73,5 +73,4 @@ Quick Launch today always spawns, even when the app is already visible — tappi
 ## Further Notes
 
 - Evidence base: `0004-progressive-disclosure` rules 2–4, `0005-page-chrome-consistency` rules 1–2, `0006-notion-patterns` 1/5/8/11–12, `0003-appbar` one-auto-hide-per-edge, `0011-natural-edge-reveal` dwell/seam, plus 0012 companion WebView2 vs `SetParent` sources (`v2.tauri.app`, `WebView2 docs`, `electron#10547`/`#26729`, `sweetwisdom`).
-- Glossary touch-up: `docs/CONTEXT.md` gains **Companion** (the 40% WebView) alongside `Quick Launch window`/`Quick Launch dock`.
-
+- The glossary now defines **Companion** alongside `Quick Launch window` and `Quick Launch dock` without leaking implementation details into domain language.
