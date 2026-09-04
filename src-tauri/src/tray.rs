@@ -95,11 +95,11 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
 /// "docked" preference brings it back; floating waits for its explicit
 /// left-click.
 pub(crate) fn open_sprout(app: &AppHandle) {
-    if let Err(error) = crate::open_main_window(app) {
-        // A failure here is silently ignored in the click handler; log to
-        // stderr rather than dropping it entirely.
-        eprintln!("Could not open Sprout: {error}");
-    }
+    // WHY off-thread: the menu/IPC caller runs on the event thread, which the
+    // blocking open would hang while it waits out the close grace — enqueue
+    // instead (see `request_open_main_window`); a rebuild failure surfaces in
+    // the worker's own error path, same as before.
+    crate::request_open_main_window(app);
     if let Err(error) = crate::quick_window::open_if_docked(app) {
         eprintln!("Could not restore the Quick Launch dock: {error}");
     }

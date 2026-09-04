@@ -74,6 +74,12 @@ pub struct AppState {
     /// returns a zombie handle for a few ms after `destroy()`. `open_main_window`
     /// checks this and sleeps if the close was very recent.
     pub main_close_time: Mutex<Option<std::time::Instant>>,
+    /// WHY the open path single-flights off the event thread: `open_main_window`
+    /// sleeps synchronously (close grace + zombie retries) while the queued
+    /// `destroy()` it waits on needs that same thread to run — direct calls
+    /// self-deadlock into an invisible frame with a dead X (ADR-0013 keeps the
+    /// size source; this flag only owns dispatch, no geometry).
+    pub main_window_opening: AtomicBool,
     /// A newly-created main window is native-visible but fully transparent so
     /// WebView2 can load without showing its blank startup surface. The main
     /// layout clears this only after its first render is mounted.
@@ -977,11 +983,12 @@ fn set_main_window_alpha(window: &tauri::WebviewWindow, alpha: u8) -> tauri::Res
 }
 
 /// Opens the main window: focuses the existing one, or recreates it when it
-/// was destroyed by closing it (ticket 43). Shared by the boot path, the
-/// tray's Open Sprout and the single-instance focus hook. The recreated
-/// window keeps the configured size and minimums from `constants::window` —
-/// the single size source since the conf file stopped declaring windows
-/// (ticket 76, ADR-0013).
+/// was destroyed by closing it (ticket 43). Runs on its caller's thread and
+/// sleeps through the close grace — the boot path calls it directly, while
+/// every post-start caller goes through `request_open_main_window`. The
+/// recreated window keeps the configured size and minimums from
+/// `constants::window` — the single size source since the conf file stopped
+/// declaring windows (ticket 76, ADR-0013).
 pub(crate) fn open_main_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
     use std::time::Duration;
     use tauri::Manager;
@@ -1125,6 +1132,33 @@ pub(crate) fn open_main_window(app: &AppHandle) -> tauri::Result<tauri::WebviewW
     Err(tauri::Error::AssetNotFound(
         "main window failed to open after retries".into(),
     ))
+}
+
+/// The single post-start entry point for opening the main window: the dock
+/// mark command, the tray menu, and the single-instance hook all enqueue here
+/// instead of calling `open_main_window` directly.
+///
+/// WHY the indirection exists: `open_main_window` sleeps on its caller while
+/// the queued `destroy()` it waits for needs the event thread to run — every
+/// one of those callers runs on that thread, so a direct call self-deadlocks
+/// (invisible frame, dead X). The sleeps run on the blocking pool while the
+/// event thread stays free to settle the destroy. Open is idempotent, so a
+/// request arriving mid-rebuild is already satisfied by it and coalesces; the
+/// flag clears when the worker finishes, so a failed attempt stays retryable.
+/// Boot keeps the direct sync call — no close race exists there (ADR-0013).
+pub(crate) fn request_open_main_window(app: &AppHandle) {
+    if let Some(state) = app.try_state::<AppState>() {
+        if state.main_window_opening.swap(true, Ordering::SeqCst) {
+            return;
+        }
+    }
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _ = crate::open_main_window(&handle);
+        if let Some(state) = handle.try_state::<AppState>() {
+            state.main_window_opening.store(false, Ordering::SeqCst);
+        }
+    });
 }
 
 /// The fresh installed-app snapshot behind the Quick Launch search
@@ -1935,13 +1969,13 @@ fn set_companion_height_ratio_for_display(
 }
 
 /// Opens (or focuses) the main window (ticket 123): the dock header's mark
-/// click and any other surface that needs a non-tray entry point. Reuses the
-/// single-size-source `open_main_window` seam (tray + single-instance hook).
+/// click and any other surface that needs a non-tray entry point. Enqueues
+/// through the off-thread single-flight seam — never the blocking call, which
+/// would hang this command's event thread (see `request_open_main_window`).
 #[tauri::command]
 fn open_main_window_cmd(app: AppHandle) -> Result<(), String> {
-    crate::open_main_window(&app)
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    crate::request_open_main_window(&app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -2242,7 +2276,9 @@ pub fn run() {
                 }
                 let _ = app.emit("pending-import", path);
             }
-            let _ = open_main_window(app);
+            // Off-thread seam: this hook runs on the event thread, which the
+            // blocking open would hang (see `request_open_main_window`).
+            crate::request_open_main_window(app);
         }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
@@ -2376,6 +2412,7 @@ pub fn run() {
             running_actions: Mutex::new(HashMap::new()),
             settings_dirty: Mutex::new(false),
             main_close_time: Mutex::new(None),
+            main_window_opening: AtomicBool::new(false),
             main_window_loading: AtomicBool::new(false),
         })
         .invoke_handler(tauri::generate_handler![

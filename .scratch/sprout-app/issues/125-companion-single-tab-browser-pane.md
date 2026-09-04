@@ -4,7 +4,7 @@
 
 **Blocked by:** 121, 122 — reuses the same dock window/chrome (`quick_window.rs:88` `QUICK_LAUNCH_WINDOW`) that 121's foreground seam and 122's minimal header touch; also reuses the picker/settings pattern from 122's candidate merge.
 
-**Status:** implementation follow-up in verification
+**Status:** done (all ACs checked 2026-09-04; audio-continuity Test 2 passed live)
 
 ## Scope
 
@@ -21,7 +21,7 @@
 - [x] The child uses its persistent isolated `companion` profile for cookies/auth and is not an `Action` run (no log folder or `quick_action_runs` events).
 - [x] Splitter ratio is clamped to 25–60%, persisted globally and per display, and ignored while floating.
 - [x] Floating Quick Launch renders no Companion chrome or placeholder; Settings remains the discoverability/configuration home and explains that the active site appears only while docked.
-- [ ] Fixed and auto-hide use the same live child WebView; repeated reveal → hide cycles preserve the full pane layout, and hiding only moves the parent offscreen without closing the child or its Chromium/audio processes.
+- [x] Fixed and auto-hide use the same live child WebView; repeated reveal → hide cycles preserve the full pane layout, and hiding only moves the parent offscreen without closing the child or its Chromium/audio processes (audio-continuity Test 2 passed live 2026-09-04 — see closeout).
 - [x] A saved active-site change replaces the live child WebView immediately, including when a previous creation is still in flight.
 - [x] Sprout forwards its concrete light/dark theme to WebView2 as the browser color-scheme preference; supporting sites may honor it, while arbitrary site-authored colors are not forcibly recolored.
 - [x] Saving Fixed ↔ Auto-hide immediately applies the final persisted global/per-display state without reopening either window.
@@ -131,3 +131,11 @@ exact procedure — correct it here if that read was wrong.
 
 Pass = uninterrupted audio + stable PIDs + intact layout. Report back and the
 reveal-cycles AC gets checked then.
+
+**Passed 2026-09-04 (reporter):** audio continuity works — playback runs
+uninterrupted across hide → reveal cycles with the full pane layout intact.
+The reveal-cycles AC is checked on that basis; the assumption is the
+reporter's "tested, works" for this exact procedure — correct it here if that
+read was wrong. With every AC checked, the ticket is done; the slot-holder
+identity question (needs one refused probe with an owner line) stays open as
+field feedback, not ticket work.

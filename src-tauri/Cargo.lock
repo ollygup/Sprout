@@ -3617,7 +3617,7 @@ dependencies = [
 
 [[package]]
 name = "sprout"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "base64 0.22.1",
  "dirs 6.0.0",

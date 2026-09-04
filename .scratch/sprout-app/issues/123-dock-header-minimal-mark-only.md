@@ -73,6 +73,7 @@
 - [x] No decorative dock-hint icon is rendered in either docked edge; current edge is still perceivable via window position + disabled chevron state.
 - [x] Floating palette still shows `Quick Launch` text.
 - [x] `npm.cmd run check` 0 errors, `cargo check` 0 errors.
+- [x] Regression 2026-09-04: close→reopen via any post-start entry point never blocks the event thread — all route through the off-thread single-flight seam (`tools/repro-123-event-thread.ps1` GREEN).
 
 ## Verification
 
@@ -80,3 +81,11 @@
 - `tools/repro-main-window-lifecycle.ps1` GREEN — no `IsHungAppWindow`, `main Count==1` after close→reopen sequence (tray/dock/single-instance all via `request_open_main_window`); keep `tools/repro-*` harness (paired with `lib.rs:66` stress harness precedent) unless explicitly retiring.
 - Visual: dock on left/right, resize to 340px, screenshot before/after; tab labels stay `full` with 2 tabs. No `qlw__dock-hint` in DOM when docked.
 - Interaction: with main window open (including minimized via taskbar), click dock mark → main shows/unminimizes/focuses. Destroy main (X), click dock mark (and again floating mark) → main recreates at `MAIN_WINDOW_*` and focuses, tray not used. Rapid double-click mark (2 clicks ≤200 ms) → main still loads, no white. Close→immediate reopen (≤800 ms) via any of dock/tray/second launch → no hang, `destroy` settles on freed event thread. Keyboard: Tab to mark → Enter/Space opens main. Hover shows `Open Sprout` tooltip + bg-hover. Drag header (floating) still moves window; clicking mark doesn't.
+
+## Regression (2026-09-04 — invisible frame + dead X)
+
+- **Report:** clicking the docked header's mark opened the main app as an invisible frame, and the main window then ignored X.
+- **Root cause:** the validated off-thread seam (`request_open_main_window`: `main_window_opening` single-flight + `spawn_blocking`) was absent from the code — `open_main_window_cmd`, `tray::open_sprout` (tray menu + `open_sprout_cmd`, i.e. the dock-mark handler), and the single-instance hook all called the sleeping `open_main_window` synchronously on the event thread (800 ms close-grace + up to 7×120 ms zombie retries). That thread must also process the queued `destroy()` the retry loop waits on — a self-deadlock: the rebuilt window never revealed and `CloseRequested` never processed.
+- **Fix:** restored the seam as one small-interface module (`lib.rs` `request_open_main_window`; `AppState.main_window_opening`; all three post-start callers enqueue through it; boot stays on the direct sync call — no close race there, ADR-0013 size source untouched). Frontend unchanged: its single-flight guard plus backend coalescing cover double-click, and `open_if_docked` no-ops from the dock.
+- **Evidence:** `tools/repro-123-event-thread.ps1` (kept per the harness convention above) went RED pre-fix (no seam, all 3 entry points blocking) → GREEN post-fix; `cargo test` 427 passed / 0 failed / 3 ignored; `npm.cmd run check` 0 errors / 0 warnings; `cargo check` clean (pre-existing `walker.rs` warnings only).
+- **Not yet run:** `tools/repro-main-window-lifecycle.ps1` end-to-end (needs all Sprout processes closed + Vite on :1420); run it when convenient and expect `GREEN … event loop remained responsive`.
