@@ -88,3 +88,11 @@ failing the immediate-effect contract in rule 2's own source). The rules stand;
 Groups remain their live applied case, and the annotation-vs-structure
 classification in 0006 pattern 12 now decides which future knobs get a switch
 at all.
+
+Applied history, 2026-09 quick-access round: a blanket checkbox → toggle
+conversion was proposed and refused under rule 2 — in-dialog flags (stoppable,
+auto-run) and the export scope checklist (research 0007) apply on
+Save/confirm, so switches there would lie about immediacy. Convention set:
+each ticket audits the checkboxes on the surfaces it touches and converts
+instant-effect ones only (ticket 128 step 0), instead of a standalone
+conversion pass.

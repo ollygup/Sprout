@@ -50,3 +50,13 @@ must be measured at runtime or tested per-DPI.
   and management affordances all stay absent until at least one group exists;
   the feature switch (page-features menu per research 0008) plus a New group
   button are the only chrome while the collection has no groups.
+- **Compact action cards (2026-09, tickets 127–132 round)**: rule 4 — the
+  dock/window Run/Stop degrades to icon-only (tooltip + `aria-label` ride
+  along) at the constrained 340px width while the roomy main-app page keeps
+  icon+text; rule 5 — the spinner alone carries the Stopping feedback with no
+  label reflow. Rejected: entire-card-is-Run (breaks the 0006:13 row-click →
+  details grammar, nests interactives, single-click-runs arbitrary commands
+  with no confirm) and hover-reveal button (no touch/keyboard target, hides
+  scent, fights the 0011 auto-hide reveal that already owns hover). Target
+  sizing per NN/g 1cm / WCAG 2.5.8 AA 24px holds via the full-height
+  fixed-width hit area, not the glyph.
