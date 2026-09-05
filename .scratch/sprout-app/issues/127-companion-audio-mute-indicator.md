@@ -4,7 +4,7 @@
 
 **Blocked by:** none — can start immediately.
 
-**Status:** ready-for-agent (reopened — mixer shortcut folds in; AC3 superseded)
+**Status:** done (user-validated keyboard + mixer 2026-09-05)
 
 ## Scope
 
@@ -25,3 +25,9 @@
 - `npm.cmd run check`, related `npm.cmd test -- --run`
 - Manual: play → indicator on → mute → mixer shows muted → unmute → indicator/audio back; hide/reveal keeps state.
 - Manual (mixer shortcut): docked → shortcut opens the Volume mixer page; playing session adjustable there; keyboard-only run-through.
+
+## Implementation notes
+
+- Backend: `src-tauri/src/companion_audio.rs` (persisted mute + `IsMuted` / `IsDocumentPlayingAudio` live read, heals drifted WebView); `set_companion_muted` / `get_companion_audio_state` + `open_volume_mixer` (`ms-settings:apps-volume`, honest error) in `src-tauri/src/lib.rs`.
+- Frontend: docked Companion toolbar only (`src/routes/quick-launch-window/+page.svelte`) — `IconButton` mute (`aria-pressed`, `Mute/Unmute companion audio`) + mixer shortcut (`Open volume mixer`) + external; native `<button>` so Tab reaches each in order, Enter/Space activates; playing indicator is `role="img"` status-only, never a control; floating/no-URL gains no chrome.
+- Results: user-validated 2026-09-05 — Tab to mute/mixer and open works; play → indicator → mute → mixer-muted → unmute cycle works.

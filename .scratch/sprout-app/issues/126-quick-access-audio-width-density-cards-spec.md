@@ -4,7 +4,7 @@
 
 **Blocked by:** none (round spec; implemented via tickets 127–132)
 
-**Status:** ready-for-agent (spec; implementation in 127–132)
+**Status:** done (implemented via tickets 127–132 + 133–134; user-validated 2026-09-05)
 
 ## Problem Statement
 

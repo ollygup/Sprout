@@ -35,10 +35,4 @@
 
 - Automated: `npm.cmd run check` 0 errors; `cargo test` 433 passed / 0 failed; `npm.cmd test` 89 passed.
 - Manual (user, 2026-09-05): docked + fixed mode — each density changes list fonts correctly, persists via Settings save.
-- Still open (not yet run by eye — pick these up on the next pass):
-  - Wide dock (width slider toward 30%) at Large: long names truncate with ellipsis, Run/Stop and clip controls never clipped or pushed out at 340px or wide.
-  - Auto-hide mode: reveal still clean at each density; densities apply after reveal without reopening.
-  - Floating window: undock and confirm all three densities render there too.
-  - All three tabs (Launch / Actions / Clips) at Compact and Large — Actions rows keep button height until ticket 130 (expected), text scales.
-  - Restart persistence: set Compact or Large → restart Sprout → dock (and floating, if left floating) recalls it.
-  - Keyboard-only: Tab to the List density `Select`, change with arrows, Save via keyboard; dirty bar appears and clears; focus ring visible throughout.
+- Manual (user, 2026-09-05): all remaining matrix validated — wide dock (toward 30%) at Large truncates with ellipsis, Run/Stop and clip controls never clipped at 340px or wide; auto-hide reveal clean at each density without reopening; floating window renders all three densities; all three tabs (Launch / Actions / Clips) at Compact and Large; restart recalls Compact/Large in dock (and floating if left floating); keyboard-only Tab to List density `Select`, arrows + Save, dirty bar appears/clears with visible focus ring.
