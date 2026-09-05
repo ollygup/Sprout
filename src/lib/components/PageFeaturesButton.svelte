@@ -152,7 +152,7 @@
                 <span class="feature__knob"></span>
               </span>
             </span>
-          </button>
+            </button>
         {/each}
       </div>
     {/if}

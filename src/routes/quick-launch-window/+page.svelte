@@ -40,6 +40,8 @@
     syncQuickActionRuns,
   } from "$lib/quickActionRuns.svelte";
   import QuickActionRunControl from "$lib/components/QuickActionRunControl.svelte";
+  import QuickActionDetailsDialog from "$lib/components/QuickActionDetailsDialog.svelte";
+  import QuickLaunchRow from "$lib/components/QuickLaunchRow.svelte";
   import { clipTitle, launchReportSummary } from "$lib/format";
   import { hasNote } from "$lib/noteFormat";
   import { appIcons, lazyIcon } from "$lib/lazyIcon.svelte";
@@ -92,6 +94,11 @@
   let launchGroupsOn = $state(false);
   let actionGroupsOn = $state(false);
   let clipGroupsOn = $state(false);
+  // The window lists' density (Compact/Default/Large): picked on the main
+  // app's Quick Launch page, read here from the same Settings. Default is
+  // today's sizing; anything unrecognized falls back to it so a broken value
+  // never leaves the lists unstyled.
+  let density = $state("default");
   let launchGroups = $state<Group[]>([]);
   let actionGroups = $state<Group[]>([]);
   let clipGroups = $state<Group[]>([]);
@@ -502,6 +509,10 @@
   // for ~1.2 s and a polite live region announces it; silence reads as
   // breakage (research 0004 rule 5).
   let copiedId = $state<number | null>(null);
+  // Ticket 130: the row's text side opens the action's details read-only
+  // (research 0006:13 one grammar per surface; 0004:3 level 1 here, full
+  // configuration stays in the main app) — the icon button alone runs/stops.
+  let detailsAction: QuickAction | null = $state(null);
   let copiedAnnouncement = $state("");
   let copiedTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -673,11 +684,26 @@
       entries = entriesResult;
       actions = actionsResult;
       clips = clipsResult;
+      // Ticket 130: keep an open details dialog live across background
+      // reloads (`quick-launch-changed` fires on main-app edits) — a
+      // deleted action closes it instead of showing a ghost.
+      if (detailsAction) {
+        const openId = detailsAction.id;
+        detailsAction = actionsResult.find((a) => a.id === openId) ?? null;
+      }
       // The same settings read carries the theme and all three Groups
       // features — every one live-updates through `quick-launch-changed`.
       launchGroupsOn = settings.launch_groups === "on";
       actionGroupsOn = settings.action_groups === "on";
       clipGroupsOn = settings.clip_groups === "on";
+      // The same read carries the list density the main page's features menu
+      // writes — the window owns no configuration surface of its own, so it
+      // re-reads here on every `quick-launch-changed`.
+      density =
+        settings.dock_density === "compact" ||
+        settings.dock_density === "large"
+          ? settings.dock_density
+          : "default";
       const mode = settings.theme as ThemeMode;
       if (mode === "system" || mode === "light" || mode === "dark") {
         restoreTheme(mode);
@@ -898,6 +924,8 @@
   class:qlw--docked={dock.docked}
   class:qlw--docked-left={dock.docked && dock.edge === "left"}
   class:qlw--docked-right={dock.docked && dock.edge === "right"}
+  class:qlw--density-compact={density === "compact"}
+  class:qlw--density-large={density === "large"}
 >
   <header
     class="qlw__bar"
@@ -983,102 +1011,111 @@
   {/if}
 
   {#snippet launchRow(entry: LaunchEntry)}
-    <!-- Ticket 93: one entry, one click. The whole row starts just that entry;
-         the accessible name carries the verb so screen readers hear what the
-         click does ("Start Spotify", not "Spotify, button"). -->
-    <li>
-      <button
-        type="button"
-        class="qlw__entry"
-        aria-label={`Start ${entry.name}`}
-        disabled={startInFlight}
-        onclick={() => startEntry(entry)}
+    <!-- Ticket 93: one entry, one click. The accessible name carries the verb so screen readers hear what the
+         click does ("Start Spotify", not "Spotify, button").
+         Ticket 134: thin adapter over the shared QuickLaunchRow shell — badge, name and Starting…
+         stay collection content; the shell owns the card box, states and layout. The lazy icon
+         observes the badge (a stable ancestor of the icon slot); no tooltip, as before. -->
+    <QuickLaunchRow
+      mainLabel={`Start ${entry.name}`}
+      disabled={startInFlight}
+      onmain={() => startEntry(entry)}
+    >
+      <span
+        class="qlw__entry-badge"
+        aria-hidden="true"
         use:lazyIcon={entry.kind === "app" ? entry.target : ""}
       >
-        <span class="qlw__entry-badge" aria-hidden="true">
-          {#if entry.kind === "app" && appIcons[entry.target]}
-            <!-- Ticket 97: the app's real icon, lazily extracted; kind
-                 glyphs stay for commands and unresolvable targets. -->
-            <img
-              class="qlw__entry-icon"
-              src={appIcons[entry.target]}
-              alt=""
-              width={16}
-              height={16}
-            />
-          {:else}
-            <Icon
-              name={entry.kind === "app" ? "rocket" : "terminal"}
-              size={14}
-            />
-          {/if}
-        </span>
-        <span class="qlw__entry-name">{entry.name}</span>
-        {#if startingEntries.has(entry.id)}
-          <span class="qlw__entry-starting">Starting…</span>
+        {#if entry.kind === "app" && appIcons[entry.target]}
+          <!-- Ticket 97: the app's real icon, lazily extracted; kind
+               glyphs stay for commands and unresolvable targets. -->
+          <img
+            class="qlw__entry-icon"
+            src={appIcons[entry.target]}
+            alt=""
+            width={16}
+            height={16}
+          />
+        {:else}
+          <Icon
+            name={entry.kind === "app" ? "rocket" : "terminal"}
+            size={14}
+          />
         {/if}
-      </button>
-    </li>
+      </span>
+      <span
+        class="qlw__entry-name"
+        class:qlw__entry-name--muted={startInFlight}
+      >
+        {entry.name}
+      </span>
+      {#if startingEntries.has(entry.id)}
+        <span class="qlw__entry-starting">Starting…</span>
+      {/if}
+    </QuickLaunchRow>
   {/snippet}
 
   {#snippet actionRow(action: QuickAction)}
-    <li class="qlw__action">
+    <!-- Ticket 130: `[flex text | fixed full-height icon Run/Stop]` — the text side opens the
+         details dialog, the icon button alone runs/stops. Two sibling buttons, never nested.
+         Ticket 134: thin adapter over the shared QuickLaunchRow shell — the details verb, the
+         content-gated note glyph and the tooltip text stay collection content; the shell owns
+         the card box, the split layout and the tip anchoring. -->
+    <QuickLaunchRow
+      mainLabel={hasNote(action.note)
+        ? `About ${action.name} (has note)`
+        : `About ${action.name}`}
+      tipId={`qlw-tip-action-${action.id}`}
+      tipName={action.name}
+      tipBody={action.command}
+      onmain={() => (detailsAction = action)}
+    >
       <span class="qlw__action-name">{action.name}</span>
       {#if hasNote(action.note)}
         <!-- Content-gated note glyph only — no note content on constrained surfaces (research 0004 rule 3, 0006 pattern 14) -->
-        <span class="qlw__note" aria-label="Has note" title="Has note">
+        <span class="qlw__note" aria-hidden="true" title="Has note">
           <Icon name="note" size={12} />
         </span>
       {/if}
-      <!-- Ticket 93: hover/focus tooltip — the bold name plus the command,
-           truncated to one line. The tip stays in the DOM (opacity only), so
-           `aria-describedby` below gives keyboard and screen-reader users
-           the same content. -->
-      <span class="qlw__tip" id={`qlw-tip-action-${action.id}`}>
-        <span class="qlw__tip-name">{action.name}</span>
-        <span class="qlw__tip-body">{action.command}</span>
-      </span>
-      <!-- Ticket 98: the three-state control is shared with the main app's
-           Quick Actions page — one markup, one spinner, one vocabulary. -->
-      <QuickActionRunControl
-        name={action.name}
-        stoppable={action.stoppable}
-        running={quickActionRuns.running.has(action.id)}
-        stopping={quickActionRuns.stopping.has(action.id)}
-        onrun={() => run(action)}
-        onstop={() => stop(action)}
-        describedby={`qlw-tip-action-${action.id}`}
-      />
-    </li>
+      {#snippet trailing()}
+        <!-- Ticket 98: the three-state control is shared with the main app's
+             Quick Actions page — one vocabulary, one spinner; here in ticket
+             130's compact icon-only form while the roomy page keeps icon+text. -->
+        <QuickActionRunControl
+          compact
+          name={action.name}
+          stoppable={action.stoppable}
+          running={quickActionRuns.running.has(action.id)}
+          stopping={quickActionRuns.stopping.has(action.id)}
+          onrun={() => run(action)}
+          onstop={() => stop(action)}
+          describedby={`qlw-tip-action-${action.id}`}
+        />
+      {/snippet}
+    </QuickLaunchRow>
   {/snippet}
 
   {#snippet clipRow(clip: Clip)}
     {@const title = clipTitle(clip.name, clip.content)}
-    <li class="qlw__clip-row">
-      <button
-        type="button"
-        class="qlw__clip"
-        aria-label={`Copy ${title} to the clipboard`}
-        aria-describedby={`qlw-tip-clip-${clip.id}`}
-        onclick={() => copy(clip)}
-      >
-        <span class="qlw__clip-badge" aria-hidden="true">
-          <Icon name={copiedId === clip.id ? "check" : "copy"} size={14} />
-        </span>
-        <span class="qlw__clip-name">{title}</span>
-        {#if copiedId === clip.id}
-          <span class="qlw__clip-copied">Copied</span>
-        {:else}
-          <span class="qlw__clip-excerpt">{clip.content}</span>
-        {/if}
-      </button>
-      <!-- Ticket 93: same tooltip contract as the action rows — bold name
-           plus the full content on one truncated line. -->
-      <span class="qlw__tip" id={`qlw-tip-clip-${clip.id}`}>
-        <span class="qlw__tip-name">{title}</span>
-        <span class="qlw__tip-body">{clip.content}</span>
+    <!-- Ticket 134: thin adapter over the shared QuickLaunchRow shell — badge, title, excerpt
+         and the tooltip text stay collection content; the shell owns the card box and tip. -->
+    <QuickLaunchRow
+      mainLabel={`Copy ${title} to the clipboard`}
+      tipId={`qlw-tip-clip-${clip.id}`}
+      tipName={title}
+      tipBody={clip.content}
+      onmain={() => copy(clip)}
+    >
+      <span class="qlw__clip-badge" aria-hidden="true">
+        <Icon name={copiedId === clip.id ? "check" : "copy"} size={14} />
       </span>
-    </li>
+      <span class="qlw__clip-name">{title}</span>
+      {#if copiedId === clip.id}
+        <span class="qlw__clip-copied">Copied</span>
+      {:else}
+        <span class="qlw__clip-excerpt">{clip.content}</span>
+      {/if}
+    </QuickLaunchRow>
   {/snippet}
 
   <!-- Ticket 125 companion: single-tab mobile web view in dock's bottom ~40% — content-gated, dock-only -->
@@ -1377,6 +1414,19 @@
   <div class="sr-only" role="status" aria-live="polite">
     {copiedAnnouncement}
   </div>
+
+  <!-- Ticket 130: the row's text side lands here — read-only details (no
+       Edit; full configuration lives in the main app per research 0004:3),
+       with the same Run/Stop control the row carries. -->
+  <QuickActionDetailsDialog
+    open={detailsAction !== null}
+    action={detailsAction}
+    onclose={() => (detailsAction = null)}
+    onrun={(a) => run(a)}
+    onstop={(a) => stop(a)}
+    running={detailsAction ? quickActionRuns.running.has(detailsAction.id) : false}
+    stopping={detailsAction ? quickActionRuns.stopping.has(detailsAction.id) : false}
+  />
 </div>
 
 <style>
@@ -1386,6 +1436,27 @@
     height: 100vh;
     background: var(--bg-page);
     border: 1px solid var(--border);
+    /* List density: one type-token step down/up from today's sizing —
+       existing `--text-*` tokens only, never ad-hoc sizes. The base is
+       Default (no modifier); Compact and Large only re-point these three
+       aliases, so every row below rescales together. Row geometry
+       (truncation, `min-w-0`, badges, controls) is untouched — larger text
+       truncates earlier, it never clips. */
+    --qlw-name: var(--text-sm);
+    --qlw-meta: var(--text-xs);
+    --qlw-micro: var(--text-2xs);
+  }
+
+  .qlw--density-compact {
+    --qlw-name: var(--text-xs);
+    --qlw-meta: var(--text-2xs);
+    --qlw-micro: var(--text-2xs);
+  }
+
+  .qlw--density-large {
+    --qlw-name: var(--text-base);
+    --qlw-meta: var(--text-sm);
+    --qlw-micro: var(--text-xs);
   }
 
   .qlw__bar {
@@ -1511,7 +1582,7 @@
 
   .qlw__count {
     margin: 0;
-    font-size: var(--text-sm);
+    font-size: var(--qlw-name);
     color: var(--text-muted);
   }
 
@@ -1522,40 +1593,6 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
-  }
-
-  .qlw__entry {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-    width: 100%;
-    padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    color: inherit;
-    font: inherit;
-    text-align: left;
-    cursor: pointer;
-    transition: border-color var(--dur-fast) var(--ease-out);
-  }
-
-  .qlw__entry:hover:not(:disabled),
-  .qlw__entry:focus-visible {
-    border-color: var(--accent-tint-border);
-  }
-
-  .qlw__entry:focus-visible {
-    outline: 2px solid var(--ring);
-    outline-offset: -2px;
-  }
-
-  .qlw__entry:disabled {
-    cursor: default;
-  }
-
-  .qlw__entry:disabled .qlw__entry-name {
-    color: var(--text-muted);
   }
 
   .qlw__entry-badge {
@@ -1578,15 +1615,21 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     font-family: var(--font-display);
-    font-size: var(--text-sm);
+    font-size: var(--qlw-name);
     font-weight: 600;
     color: var(--text);
+  }
+
+  /* Single-flight (ticket 93): every start affordance waits together — the
+     name mutes with the disabled control, exactly as before. */
+  .qlw__entry-name--muted {
+    color: var(--text-muted);
   }
 
   .qlw__entry-starting {
     flex-shrink: 0;
     font-family: var(--font-mono);
-    font-size: var(--text-xs);
+    font-size: var(--qlw-meta);
     letter-spacing: var(--tracking-mono);
     color: var(--text-muted);
   }
@@ -1600,17 +1643,6 @@
     gap: var(--space-2);
   }
 
-  .qlw__action {
-    position: relative;
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-    padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-  }
-
   .qlw__action-name {
     flex: 1;
     min-width: 0;
@@ -1618,7 +1650,7 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     font-family: var(--font-display);
-    font-size: var(--text-sm);
+    font-size: var(--qlw-name);
     font-weight: 600;
     color: var(--text);
   }
@@ -1642,31 +1674,6 @@
     gap: var(--space-2);
   }
 
-  .qlw__clip {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-    width: 100%;
-    padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    color: inherit;
-    font: inherit;
-    text-align: left;
-    cursor: pointer;
-    transition: border-color var(--dur-fast) var(--ease-out);
-  }
-
-  .qlw__clip:hover {
-    border-color: var(--accent-tint-border);
-  }
-
-  .qlw__clip:focus-visible {
-    outline: 2px solid var(--ring);
-    outline-offset: -2px;
-  }
-
   .qlw__clip-badge {
     display: inline-flex;
     flex-shrink: 0;
@@ -1680,7 +1687,7 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     font-family: var(--font-display);
-    font-size: var(--text-sm);
+    font-size: var(--qlw-name);
     font-weight: 600;
     color: var(--text);
   }
@@ -1692,74 +1699,16 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     font-family: var(--font-mono);
-    font-size: var(--text-xs);
+    font-size: var(--qlw-meta);
     color: var(--text-muted);
   }
 
   .qlw__clip-copied {
     flex-shrink: 0;
     font-family: var(--font-mono);
-    font-size: var(--text-xs);
+    font-size: var(--qlw-meta);
     letter-spacing: var(--tracking-mono);
     color: var(--accent);
-  }
-
-  .qlw__clip-row {
-    position: relative;
-  }
-
-  /* Ticket 93/97: hover/focus tooltips on the action and clip rows — the
-     bold name plus the row's content (command / clip text) truncated to one
-     line. Anchored BELOW the row so the scrollport never clips it at the
-     top; each `.qlw__list` carries bottom runway on its last child so a
-     last-row tooltip fits at full scroll. The tip is hidden with opacity
-     only — never display/visibility — so `aria-describedby` still exposes
-     its content to assistive tech, and keyboard focus (`:focus-within`)
-     raises exactly what hovering does. */
-  .qlw__tip {
-    position: absolute;
-    z-index: 30;
-    top: calc(100% + var(--space-2));
-    left: 0;
-    max-width: 100%;
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-1);
-    padding: var(--space-2) var(--space-3);
-    background: var(--bg-surface);
-    border: 1px solid var(--border-strong);
-    border-radius: var(--radius);
-    box-shadow: var(--shadow-dialog);
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity var(--dur-fast) var(--ease-out);
-  }
-
-  .qlw__action:hover .qlw__tip,
-  .qlw__action:focus-within .qlw__tip,
-  .qlw__clip-row:hover .qlw__tip,
-  .qlw__clip-row:focus-within .qlw__tip {
-    opacity: 1;
-  }
-
-  .qlw__tip-name {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-family: var(--font-display);
-    font-size: var(--text-xs);
-    font-weight: 600;
-    color: var(--text);
-  }
-
-  .qlw__tip-body {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-family: var(--font-mono);
-    font-size: var(--text-2xs);
-    letter-spacing: var(--tracking-mono);
-    color: var(--text-muted);
   }
 
   /* The live region is the shared `.sr-only` utility (tokens.css). */

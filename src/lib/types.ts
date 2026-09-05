@@ -283,6 +283,10 @@ export interface Settings {
    *  default 18. Docked only — floating stays 340 — shared by fixed and
    *  auto-hide, with per-monitor memory falling back here. */
   dock_width_pct: number;
+  /** The Quick Launch window's list density: "compact", "default", or
+   *  "large" (default). Rescales the docked and floating lists only — the
+   *  main app keeps its own sizing. */
+  dock_density: string;
   /** Whether Sprout starts with Windows (ticket 75): "on" or "off" — the
    *  Run-key registration is reconciled beside every toggle. */
   autostart: string;

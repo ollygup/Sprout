@@ -96,3 +96,12 @@ Save/confirm, so switches there would lie about immediacy. Convention set:
 each ticket audits the checkboxes on the surfaces it touches and converts
 instant-effect ones only (ticket 128 step 0), instead of a standalone
 conversion pass.
+
+Applied history, dock-density round (ticket 129): the first cut put the
+density choice in the Quick Launch page's features menu per 0006 pattern 8 —
+review refused it under rule 1's classifier. One knob reshaping all three
+window tabs is a window-global concern, not a view-scoped switch (the
+per-collection Groups switches are the view-scoped ones), so it moved to
+Settings beside the other dock knobs, deferred to Save like them. Lesson
+recorded: classify by scope — how many surfaces the knob reshapes — not by
+the nearest menu.

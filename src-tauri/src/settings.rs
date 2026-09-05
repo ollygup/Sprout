@@ -81,6 +81,11 @@ pub const REVEAL_SENSITIVITY_MAX_PX: i32 = 50;
 pub const DEFAULT_DOCK_WIDTH_PCT: u32 = crate::constants::window::DOCK_WIDTH_DEFAULT_PCT;
 pub const DOCK_WIDTH_PCT_MIN: u32 = crate::constants::window::DOCK_WIDTH_MIN_PCT;
 pub const DOCK_WIDTH_PCT_MAX: u32 = crate::constants::window::DOCK_WIDTH_MAX_PCT;
+/// Dock list density: how large the Quick Launch window's list text renders —
+/// "compact" steps each row down one type token, "default" is today's sizing,
+/// "large" steps each row up one token. Stored as a plain string so a broken
+/// value reads back as the default instead of breaking the window.
+pub const DEFAULT_DOCK_DENSITY: &str = "default";
 /// Companion pane (ticket 125): height ratio 25–60% — how much of the docked
 /// window's height the embedded web view occupies (bottom strip). Default
 /// 40% matches the ticket's 0.40 and sits comfortably at any dock height
@@ -105,6 +110,7 @@ const KEY_DOCK_MODE: &str = "dock.mode";
 const KEY_DOCK_EDGE: &str = "dock.edge";
 const KEY_DOCK_STATE: &str = "dock.state";
 const KEY_DOCK_WIDTH_PCT: &str = "dock.width_pct";
+const KEY_DOCK_DENSITY: &str = "dock.density";
 const KEY_AUTOSTART: &str = "settings.autostart";
 const KEY_REVEAL_DWELL_MS: &str = "dock.reveal_dwell_ms";
 const KEY_REVEAL_SENSITIVITY_PX: &str = "dock.reveal_sensitivity_px";
@@ -141,6 +147,10 @@ pub struct Settings {
     /// default 18. Docked only — floating stays 340 — shared by fixed and
     /// auto-hide, with per-monitor memory falling back to this.
     pub dock_width_pct: u32,
+    /// The Quick Launch window's list density: "compact", "default", or
+    /// "large". Applies to the docked and floating lists only — the main app
+    /// keeps its own sizing. "default" is today's rendering.
+    pub dock_density: String,
     /// Whether Sprout starts with Windows (ADR-0013, ticket 75): "on" or
     /// "off". The Run-key registration is reconciled with this value by the
     /// autostart module; the setting itself only records the preference.
@@ -193,6 +203,7 @@ impl Default for Settings {
             dock_edge: DEFAULT_DOCK_EDGE.to_string(),
             dock_state: DEFAULT_DOCK_STATE.to_string(),
             dock_width_pct: DEFAULT_DOCK_WIDTH_PCT,
+            dock_density: DEFAULT_DOCK_DENSITY.to_string(),
             autostart: DEFAULT_AUTOSTART.to_string(),
             launch_groups: DEFAULT_GROUPS_FEATURE.to_string(),
             action_groups: DEFAULT_GROUPS_FEATURE.to_string(),
@@ -274,6 +285,15 @@ pub fn validate_dock_width_pct(value: u32) -> std::result::Result<(), String> {
 #[allow(dead_code)]
 pub fn clamp_dock_width_pct(value: u32) -> u32 {
     value.clamp(DOCK_WIDTH_PCT_MIN, DOCK_WIDTH_PCT_MAX)
+}
+
+/// Accepts only the three list densities the Quick Launch features menu
+/// offers: a smaller step, today's sizing, or a larger step.
+pub fn validate_dock_density(value: &str) -> std::result::Result<(), String> {
+    match value {
+        "compact" | "default" | "large" => Ok(()),
+        _ => Err("Dock density must be \"compact\", \"default\", or \"large\"".into()),
+    }
 }
 
 /// Accepts only the two auto-start states the Settings toggle writes
@@ -444,6 +464,7 @@ impl Settings {
         validate_dock_edge(&self.dock_edge)?;
         validate_dock_state(&self.dock_state)?;
         validate_dock_width_pct(self.dock_width_pct)?;
+        validate_dock_density(&self.dock_density)?;
         validate_autostart(&self.autostart)?;
         validate_groups_feature(&self.launch_groups)?;
         validate_groups_feature(&self.action_groups)?;
@@ -524,6 +545,11 @@ pub fn load(conn: &Connection) -> Settings {
         dock_width_pct: number(conn, KEY_DOCK_WIDTH_PCT)
             .filter(|v| (DOCK_WIDTH_PCT_MIN..=DOCK_WIDTH_PCT_MAX).contains(v))
             .unwrap_or(DEFAULT_DOCK_WIDTH_PCT),
+        // WHY validated-shape like the other string knobs: a leftover from an
+        // older build reads back as today's sizing instead of breaking the
+        // window's list.
+        dock_density: validated(conn, KEY_DOCK_DENSITY, validate_dock_density)
+            .unwrap_or_else(|| DEFAULT_DOCK_DENSITY.to_string()),
         autostart: validated(conn, KEY_AUTOSTART, validate_autostart)
             .unwrap_or_else(|| DEFAULT_AUTOSTART.to_string()),
         launch_groups: validated(conn, KEY_LAUNCH_GROUPS, validate_groups_feature)
@@ -562,6 +588,7 @@ pub fn save(conn: &Connection, settings: &Settings) -> std::result::Result<(), S
     upsert_meta(&tx, KEY_DOCK_EDGE, &settings.dock_edge).map_err(|e| e.to_string())?;
     upsert_meta(&tx, KEY_DOCK_STATE, &settings.dock_state).map_err(|e| e.to_string())?;
     upsert_meta(&tx, KEY_DOCK_WIDTH_PCT, &settings.dock_width_pct.to_string()).map_err(|e| e.to_string())?;
+    upsert_meta(&tx, KEY_DOCK_DENSITY, &settings.dock_density).map_err(|e| e.to_string())?;
     upsert_meta(&tx, KEY_AUTOSTART, &settings.autostart).map_err(|e| e.to_string())?;
     upsert_meta(&tx, KEY_LAUNCH_GROUPS, &settings.launch_groups).map_err(|e| e.to_string())?;
     upsert_meta(&tx, KEY_ACTION_GROUPS, &settings.action_groups).map_err(|e| e.to_string())?;
@@ -733,6 +760,7 @@ mod tests {
             dock_edge: "right".to_string(),
             dock_state: "docked".to_string(),
             dock_width_pct: 24,
+            dock_density: "large".to_string(),
             autostart: "off".to_string(),
             launch_groups: "on".to_string(),
             action_groups: "off".to_string(),
@@ -800,6 +828,14 @@ mod tests {
         assert!(s.validate().is_err());
         s.dock_width_pct = DEFAULT_DOCK_WIDTH_PCT;
         assert!(s.validate().is_ok());
+        s.dock_density = "huge".to_string();
+        assert!(s.validate().is_err());
+        s.dock_density = "compact".to_string();
+        assert!(s.validate().is_ok());
+        s.dock_density = "large".to_string();
+        assert!(s.validate().is_ok());
+        s.dock_density = DEFAULT_DOCK_DENSITY.to_string();
+        assert!(s.validate().is_ok());
         s.autostart = "maybe".to_string();
         assert!(s.validate().is_err());
         s.autostart = DEFAULT_AUTOSTART.to_string();
@@ -818,6 +854,24 @@ mod tests {
         assert!(s.validate().is_err());
         s.clip_groups = "on".to_string();
         assert!(s.validate().is_ok());
+    }
+
+    #[test]
+    fn invalid_stored_dock_density_falls_back_to_default() {
+        let conn = conn();
+        // A broken value must never reach the window — it reads back as
+        // today's sizing.
+        upsert_meta(&conn, KEY_DOCK_DENSITY, "huge").unwrap();
+        assert_eq!(load(&conn).dock_density, DEFAULT_DOCK_DENSITY);
+        upsert_meta(&conn, KEY_DOCK_DENSITY, "").unwrap();
+        assert_eq!(load(&conn).dock_density, DEFAULT_DOCK_DENSITY);
+        // Every offered size persists through the ordinary save path.
+        let mut s = Settings::default();
+        for density in ["compact", "default", "large"] {
+            s.dock_density = density.to_string();
+            save(&conn, &s).unwrap();
+            assert_eq!(load(&conn).dock_density, density);
+        }
     }
 
     #[test]
@@ -1054,6 +1108,7 @@ mod tests {
             dock_edge: DEFAULT_DOCK_EDGE.to_string(),
             dock_state: DEFAULT_DOCK_STATE.to_string(),
             dock_width_pct: DEFAULT_DOCK_WIDTH_PCT,
+            dock_density: DEFAULT_DOCK_DENSITY.to_string(),
             autostart: DEFAULT_AUTOSTART.to_string(),
             launch_groups: DEFAULT_GROUPS_FEATURE.to_string(),
             action_groups: DEFAULT_GROUPS_FEATURE.to_string(),

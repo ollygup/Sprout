@@ -18,7 +18,10 @@
     open: boolean;
     action: QuickAction | null;
     onclose: () => void;
-    onedit: (action: QuickAction) => void;
+    /** Omitted where the surface owns no configuration (ticket 130): the
+     *  Quick Launch window/dock shows details read-only — full configuration
+     *  lives in the main app (research 0004:3 level 1 vs level 2). */
+    onedit?: (action: QuickAction) => void;
     onrun: (action: QuickAction) => void;
     onstop: (action: QuickAction) => void;
     running?: boolean;
@@ -61,12 +64,20 @@
         <div class="note">{@html rendered}</div>
       </div>
     {:else}
-      <p class="details__hint">No note — edit the action to add one.</p>
+      <p class="details__hint">
+        {#if onedit}
+          No note — edit the action to add one.
+        {:else}
+          No note.
+        {/if}
+      </p>
     {/if}
 
     <div class="details__actions">
       <Button variant="secondary" onclick={onclose}>Close</Button>
-      <Button variant="secondary" onclick={() => onedit(action)}>Edit</Button>
+      {#if onedit}
+        <Button variant="secondary" onclick={() => onedit(action)}>Edit</Button>
+      {/if}
       <QuickActionRunControl
         name={action.name}
         stoppable={action.stoppable}

@@ -60,6 +60,12 @@
     { value: "docked", label: "Docked" },
   ];
 
+  const dockDensityOptions: { value: string; label: string }[] = [
+    { value: "compact", label: "Compact" },
+    { value: "default", label: "Default" },
+    { value: "large", label: "Large" },
+  ];
+
   const autostartOptions: { value: string; label: string }[] = [
     { value: "on", label: "On" },
     { value: "off", label: "Off" },
@@ -83,6 +89,10 @@
   const DOCK_WIDTH_DEFAULT_PCT = 18;
   const DOCK_WIDTH_FLOOR_PX = 340;
   let dockWidthPct = $state(DOCK_WIDTH_DEFAULT_PCT);
+  // List density: the Quick Launch window's list text size across all three
+  // tabs — Compact steps rows down one type token, Large steps them up one,
+  // Default is today's sizing. Deferred to Save beside the other dock knobs.
+  let dockDensity = $state("default");
   let revealDwellMs = $state(200);
   let revealSensitivityPx = $state(12);
   let companionOpen = $state(false);
@@ -120,6 +130,7 @@
     dockEdge: string;
     dockState: string;
     dockWidthPct: number;
+    dockDensity: string;
     revealDwellMs: number;
     revealSensitivityPx: number;
     companionUrl: string | null;
@@ -149,6 +160,12 @@
     const n = Math.floor(Number(v));
     if (!Number.isFinite(n)) return DOCK_WIDTH_DEFAULT_PCT;
     return Math.min(DOCK_WIDTH_MAX_PCT, Math.max(DOCK_WIDTH_MIN_PCT, n));
+  }
+  /** A stored density the menu does not offer reads back as today's sizing —
+   *  the same fallback the backend applies, so a broken value never leaves
+   *  the knob in an unrepresentable state. */
+  function validDensity(value: unknown): string {
+    return value === "compact" || value === "large" ? (value as string) : "default";
   }
   /** Effective strip px for `monitorWidth` at `pct` % (ticket 128): mirrors
    * the backend `dock_width_px` — % of monitor, floored at 340, capped at
@@ -190,6 +207,7 @@
     if (dockEdge !== baseline.dockEdge) return true;
     if (dockState !== baseline.dockState) return true;
     if (clampWidthPct(dockWidthPct) !== baseline.dockWidthPct) return true;
+    if (dockDensity !== baseline.dockDensity) return true;
     if (clampDwell(revealDwellMs) !== baseline.revealDwellMs) return true;
     if (clampSens(revealSensitivityPx) !== baseline.revealSensitivityPx) return true;
     if ((companionUrl ?? null) !== (baseline.companionUrl ?? null)) return true;
@@ -331,6 +349,7 @@
       // Ticket 128: width % falls back to the shipped default when the stored
       // value is broken (Settings::load).
       dockWidthPct = clampWidthPct(loaded.dock_width_pct ?? DOCK_WIDTH_DEFAULT_PCT);
+      dockDensity = validDensity(loaded.dock_density);
       // Ticket 113: reveal tuning knobs default to shipped gate constants;
       // fall back to defaults when the stored value is broken (Settings::load).
       revealDwellMs = loaded.reveal_dwell_ms ?? 200;
@@ -352,6 +371,7 @@
         dockEdge: loaded.dock_edge,
         dockState: loaded.dock_state,
         dockWidthPct: clampWidthPct(loaded.dock_width_pct ?? DOCK_WIDTH_DEFAULT_PCT),
+        dockDensity: validDensity(loaded.dock_density),
         revealDwellMs: loaded.reveal_dwell_ms ?? 200,
         revealSensitivityPx: loaded.reveal_sensitivity_px ?? 12,
         companionUrl: loaded.companion_url ?? null,
@@ -516,6 +536,7 @@
     dockEdge = baseline.dockEdge;
     dockState = baseline.dockState;
     dockWidthPct = baseline.dockWidthPct;
+    dockDensity = baseline.dockDensity;
     revealDwellMs = baseline.revealDwellMs;
     revealSensitivityPx = baseline.revealSensitivityPx;
     companionUrl = baseline.companionUrl;
@@ -560,6 +581,11 @@
         dock_edge: dockEdge,
         dock_state: dockState,
         dock_width_pct: clampedWidthPct,
+        // The window's list density lives here with the other dock knobs —
+        // one knob reshaping all three window tabs is a window-global
+        // concern (research 0008 rule 1), deferred to Save like its
+        // neighbors; broken stored values already fell back on load.
+        dock_density: validDensity(dockDensity),
         autostart,
         // Not this screen's knobs either — each list page owns its
         // collection's Groups toggle (ticket 89); loaded values pass through.
@@ -630,6 +656,7 @@
       retention = Math.max(1, Math.floor(retention) || 1);
       launchConcurrency = Math.min(50, Math.max(1, Math.floor(launchConcurrency) || 1));
       dockWidthPct = clampWidthPct(dockWidthPct);
+      dockDensity = validDensity(dockDensity);
       for (const d of displays) {
         if (displayWidths[d.device_name] !== undefined) {
           displayWidths[d.device_name] = clampWidthPct(displayWidths[d.device_name]);
@@ -650,6 +677,7 @@
         dockEdge,
         dockState,
         dockWidthPct,
+        dockDensity,
         revealDwellMs,
         revealSensitivityPx,
         companionUrl,
@@ -673,6 +701,7 @@
         dock_edge: dockEdge,
         dock_state: dockState,
         dock_width_pct: dockWidthPct,
+        dock_density: dockDensity,
         theme: theme.mode,
         autostart,
         reveal_dwell_ms: revealDwellMs,
@@ -1049,6 +1078,23 @@
                   : "")
             }
           </span>
+        </div>
+      </article>
+
+      <article class="knob">
+        <div class="knob__body">
+          <label class="knob__label" for="dock-density">List density</label>
+          <p class="knob__hint">
+            List text size in the Quick Launch window and dock, across all
+            three tabs. Compact fits more rows; Large reads easier.
+          </p>
+        </div>
+        <div class="knob__input">
+          <Select id="dock-density" variant="small" value={dockDensity} onchange={(v) => (dockDensity = v)}>
+            {#each dockDensityOptions as option (option.value)}
+              <option value={option.value}>{option.label}</option>
+            {/each}
+          </Select>
         </div>
       </article>
 

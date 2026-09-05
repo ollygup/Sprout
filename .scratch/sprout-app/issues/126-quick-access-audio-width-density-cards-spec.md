@@ -52,4 +52,4 @@ From the user's perspective: the docked Companion toolbar gains a mute toggle, a
 ## Further Notes
 
 - Evidence: 0004 (rules 1/2/4/5), 0005 (rules 1/2), 0006 (patterns 1/2/5/6/8/11–14), 0007 (dialog vs switch classification), 0008 (rules 1–3), 0011 (reveal/hover ownership), 0012 (Companion isolation, splitter 25–60%, floating-vs-docked gate), 0013 (parked alternatives); NN/g touch-target 1cm + WCAG 2.5.8/2.5.5 + WIG icon-button/focus/keyboard rules; WebView2 `IsMuted` mute-only API.
-- Ticket map: 127 audio → 128 width (+switch-audit step 0) → 129 density → 130 cards (width-agnostic) → 131 group picker → 132 auto-run (blocked by 131, same dialog).
+- Ticket map: 127 audio → 128 width (+switch-audit step 0) → 129 density → 130 cards (width-agnostic) → 131 group picker → 132 auto-run (blocked by 131, same dialog) → 134 row-shell convergence (shared `QuickLaunchRow` shell + uniform density-following heights; 130's 44px floor retired per user decision, Compact clears AA).

@@ -11,6 +11,7 @@
     onrun,
     onstop,
     describedby,
+    compact = false,
   }: {
     name: string;
     stoppable: boolean;
@@ -21,6 +22,14 @@
     /** The row tooltip this control describes (Quick Launch window rows);
      *  omitted where a surface has no tooltip to point at. */
     describedby?: string;
+    /** Compact icon-only mode (ticket 130, converged in 134): the Quick
+     *  Launch window/dock rows render `[flex text | fixed full-height icon
+     *  Run/Stop]` — one content-driven height per density across all three
+     *  tabs — while the roomy main-app page keeps icon+text. Fixed width by
+     *  construction (icon + the shared Button padding, no text to measure),
+     *  so Run→Stop→Stopping never reflows; the 44px width floor keeps the
+     *  AAA target on the horizontal axis (research 0004:4, NN/g target size). */
+    compact?: boolean;
   } = $props();
 
   // Ticket 124: Run→Stop must never change button width; color carries the meaning.
@@ -32,6 +41,10 @@
   let runW: number | null = $state(null);
 
   onMount(async () => {
+    // Ticket 130's compact mode is fixed-width by construction (icon-only +
+    // the shared Button padding) — there is nothing to measure and no
+    // --run-w to set; every state is the same outer box.
+    if (compact) return;
     await tick();
     if (typeof document === "undefined") return;
 
@@ -125,9 +138,48 @@
 <span
   bind:this={root}
   class="qa-run"
-  style={runW ? `--run-w:${runW}px` : undefined}
+  class:qa-run--compact={compact}
+  style={runW && !compact ? `--run-w:${runW}px` : undefined}
 >
-  {#if stopping}
+  {#if compact}
+    <!-- Ticket 130's dock/window grammar: icon-only, fixed-width,
+         full-card-height Run/Stop. The text side of the row owns the
+         details dialog (research 0006:13 one grammar per surface); this
+         button only runs/stops. `title` mirrors `aria-label` so pointer,
+         keyboard, touch and screen-reader users get the same verb + name
+         with no hover dependency (research 0004:4, WIG). -->
+    {#if stopping}
+      <Button
+        variant="secondary"
+        disabled
+        aria-label={`Stopping ${name}`}
+        title={`Stopping ${name}`}
+        aria-describedby={describedby}
+      >
+        <span class="spin spin--compact" aria-hidden="true"></span>
+      </Button>
+    {:else if stoppable && running}
+      <Button
+        variant="danger"
+        onclick={onstop}
+        aria-label={`Stop ${name}`}
+        title={`Stop ${name}`}
+        aria-describedby={describedby}
+      >
+        <Icon name="stop" size={15} />
+      </Button>
+    {:else}
+      <Button
+        variant="primary"
+        onclick={onrun}
+        aria-label={`Run ${name}`}
+        title={`Run ${name}`}
+        aria-describedby={describedby}
+      >
+        <Icon name="play" size={15} />
+      </Button>
+    {/if}
+  {:else if stopping}
     <!-- Ticket 92's contract, owned once since ticket 98: Stop in flight —
          disabled and muted until the exit event lands; the spinner is the
          honest "something is happening" (research 0004 rule 5). -->
@@ -178,6 +230,43 @@
        first paint and the Stop→Stopping flip never reflow at 340px. JS
        refines it per locale once on mount. */
     --run-w: 118px;
+  }
+
+  /* Ticket 130's compact box, converged in ticket 134: the icon-only Button
+     keeps its own padding (8px 16px) and border, so the outer box is fixed
+     by construction — ~49px wide (16 + 15 icon + 16 + 2 border) at every
+     state, never reflowed by a label change and never squeezing under text
+     pressure. It fills the row height (`height: 100%` — the row is
+     content-driven like the Launch/Clip cards, so every tab shares one
+     height per density); the 44px width floor keeps the AAA target on the
+     horizontal axis (research 0004:4, NN/g target size). */
+  .qa-run--compact {
+    display: flex;
+    align-self: stretch;
+    flex-shrink: 0;
+  }
+
+  .qa-run--compact :global(.btn) {
+    flex: 1;
+    min-width: 44px;
+    height: 100%;
+    padding: 8px 16px;
+    border-radius: 0 var(--radius) var(--radius) 0;
+  }
+
+  .qa-run--compact :global(.btn:focus-visible) {
+    outline: 2px solid var(--ring);
+    outline-offset: -2px;
+  }
+
+  /* The compact spinner rides the same 15px icon box as play/stop so the
+     Stopping flip changes nothing outside the glyph (research 0004:5 —
+     the spinner alone carries the feedback, no label reflow). Border-box
+     keeps the 2px ring inside the 15px, exactly the icon's outer box.
+     Doubled class beats the base `.spin` width below regardless of order. */
+  .spin.spin--compact {
+    width: 15px;
+    height: 15px;
   }
 
   /* Ticket 98: the Stopping spinner — token families only (border track,

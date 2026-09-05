@@ -1117,11 +1117,21 @@ fn apply_width(app: &AppHandle, settings: &settings::Settings) -> Result<(), Str
         }
         return Ok(());
     }
-    let Some(work) = appbar::work_area(hwnd) else {
+    // Explicit resize, not drift: the early return above proved the live
+    // width differs from the requested one. Anchor the proposal at the
+    // monitor edge — the work area still excludes the bar's own old
+    // reservation, so deriving from it keeps the stale rect here (a no-op
+    // that leaves memory and geometry disagreeing) and then marches the
+    // strip one old-width into the screen, stranding a dead strip.
+    // `reserve()` reconciles other bars and taskbars from this proposal;
+    // overlapping our own stale registration reads as a move, not an
+    // addition — the same derivation a fresh dock and the auto-hide
+    // retarget already use.
+    let Some(monitor) = appbar::monitor_rect(hwnd) else {
         return Ok(());
     };
-    let actual = appbar::window_rect(hwnd).unwrap_or(work);
-    let desired = appbar::desired_rect(edge_u32, work, actual, width);
+    let actual = appbar::window_rect(hwnd).unwrap_or(monitor);
+    let desired = appbar::appbar_rect(monitor, edge_u32, width);
     if !appbar::rects_diverged(desired, actual, 0) {
         record_last_rect(app, Some(actual));
         return Ok(());
@@ -1906,7 +1916,9 @@ mod tests {
     /// 66): the same composition `settle_mode` runs, as pure inputs so the
     /// syscall-free seam is testable. Ticket 119: hidden is off-screen, so a
     /// width check alone misses it — also treat an off-screen strip as hidden.
-    fn settle_fixed_desired(edge: u32, work: RECT, actual: RECT) -> RECT {
+    /// `width` is a parameter (not the build constant) so arrivals at
+    /// non-default widths are expressible too.
+    fn settle_fixed_desired(edge: u32, work: RECT, actual: RECT, width: i32) -> RECT {
         // Hidden off-screen detection needs the monitor, not just work; the
         // tests all use the 0..2560 monitor, so we can infer it from the
         // known monitor width (2560) for the pure helper. Production uses the
@@ -1918,11 +1930,20 @@ mod tests {
             x if x == ABE_RIGHT => actual.left >= monitor_right,
             _ => false,
         };
-        if is_hidden || actual.right - actual.left < DOCK_WIDTH as i32 {
-            appbar::appbar_rect(work, edge, DOCK_WIDTH as i32)
+        if is_hidden || actual.right - actual.left < width {
+            appbar::appbar_rect(work, edge, width)
         } else {
-            appbar::desired_rect(edge, work, actual, DOCK_WIDTH as i32)
+            appbar::desired_rect(edge, work, actual, width)
         }
+    }
+
+    /// The placement composition `apply_width`'s fixed branch runs on an
+    /// explicit resize: its early return proved the live width differs from
+    /// the requested one, so the proposal anchors the new-width strip at the
+    /// monitor edge. Deriving from the work area instead keeps the stale
+    /// rect (the no-op half of the width-change bug) — see the test below.
+    fn apply_width_fixed_desired(monitor: RECT, edge: u32, width: i32) -> RECT {
+        appbar::appbar_rect(monitor, edge, width)
     }
 
     #[test]
@@ -1932,7 +1953,7 @@ mod tests {
         // the flush-keep rule must not apply to a sub-thickness window.
         let work = RECT { left: 2, top: 0, right: 2560, bottom: 1848 };
         let sliver = RECT { left: 0, top: 0, right: AUTOHIDE_SLIVER_PX as i32, bottom: 1848 };
-        let desired = settle_fixed_desired(ABE_LEFT, work, sliver);
+        let desired = settle_fixed_desired(ABE_LEFT, work, sliver, DOCK_WIDTH as i32);
         assert_eq!(desired.right - desired.left, DOCK_WIDTH as i32);
         assert_eq!(desired.left, work.left); // anchored against the (sliver-shrunk) edge
         // Mirrored on the right edge.
@@ -1943,7 +1964,7 @@ mod tests {
             right: 2560,
             bottom: 1848,
         };
-        let desired = settle_fixed_desired(ABE_RIGHT, work, sliver);
+        let desired = settle_fixed_desired(ABE_RIGHT, work, sliver, DOCK_WIDTH as i32);
         assert_eq!(desired.right - desired.left, DOCK_WIDTH as i32);
     }
 
@@ -1955,7 +1976,7 @@ mod tests {
         // one width into the screen (the ticket-61 bug).
         let work = RECT { left: 0, top: 0, right: 2220, bottom: 1848 };
         let placed = RECT { left: 0, top: 0, right: DOCK_WIDTH as i32, bottom: 1848 };
-        let desired = settle_fixed_desired(ABE_LEFT, work, placed);
+        let desired = settle_fixed_desired(ABE_LEFT, work, placed, DOCK_WIDTH as i32);
         assert_eq!((desired.left, desired.right), (placed.left, placed.right));
         // The reservation the shell then grants for `desired` is the bar's
         // own rect — a place(desired) is a no-op, not a move.
@@ -1975,15 +1996,63 @@ mod tests {
         // align against the real edge.
         let work = RECT { left: 340, top: 0, right: 2560, bottom: 1848 };
         let overlay = RECT { left: 0, top: 0, right: DOCK_WIDTH as i32, bottom: 1848 };
-        let desired = settle_fixed_desired(ABE_LEFT, work, overlay);
+        let desired = settle_fixed_desired(ABE_LEFT, work, overlay, DOCK_WIDTH as i32);
         assert_eq!(desired.left, work.left - DOCK_WIDTH as i32 + 340 - 340); // == 0
         assert_eq!(desired.right, work.left);
         // Mirrored on the right edge.
         let work = RECT { left: 0, top: 0, right: 2220, bottom: 1848 };
         let overlay = RECT { left: 2560 - DOCK_WIDTH as i32, top: 0, right: 2560, bottom: 1848 };
-        let desired = settle_fixed_desired(ABE_RIGHT, work, overlay);
+        let desired = settle_fixed_desired(ABE_RIGHT, work, overlay, DOCK_WIDTH as i32);
         assert_eq!(desired.left, work.right);
         assert_eq!(desired.right, work.right + DOCK_WIDTH as i32);
+    }
+
+    #[test]
+    fn fixed_width_change_anchors_the_new_strip_at_the_monitor_edge() {
+        // Width-change regression: with a live self-reservation in the work
+        // area (fixed bar flush at its old width), the explicit-resize
+        // proposal must anchor the new-width strip at the monitor edge.
+        // Deriving from the self-shrunk work area kept the stale rect (a
+        // no-op leaving memory and geometry disagreeing) and then marched
+        // the strip one old-width into the screen, stranding a dead strip.
+        // 1920-wide monitor; old 18% strip (345) flush right, work shrunk
+        // by it; requested 30% (576).
+        let monitor = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
+        let work = RECT { left: 0, top: 0, right: 1575, bottom: 1080 };
+        let actual = RECT { left: 1575, top: 0, right: 1920, bottom: 1080 };
+        let widened = apply_width_fixed_desired(monitor, ABE_RIGHT, 576);
+        assert_eq!((widened.left, widened.right), (1344, 1920));
+        // The old derivation kept the stale rect entirely (the no-op half).
+        let stale = appbar::desired_rect(ABE_RIGHT, work, actual, 576);
+        assert_eq!((stale.left, stale.right), (actual.left, actual.right));
+        // Narrowing mirrors it: 30%→18% lands flush at the new width.
+        let work = RECT { left: 0, top: 0, right: 1344, bottom: 1080 };
+        let actual = RECT { left: 1344, top: 0, right: 1920, bottom: 1080 };
+        let narrowed = apply_width_fixed_desired(monitor, ABE_RIGHT, 345);
+        assert_eq!((narrowed.left, narrowed.right), (1575, 1920));
+        let stale = appbar::desired_rect(ABE_RIGHT, work, actual, 345);
+        assert_eq!((stale.left, stale.right), (actual.left, actual.right));
+        // Left edge mirrors both directions.
+        let widened = apply_width_fixed_desired(monitor, ABE_LEFT, 576);
+        assert_eq!((widened.left, widened.right), (0, 576));
+        let narrowed = apply_width_fixed_desired(monitor, ABE_LEFT, 345);
+        assert_eq!((narrowed.left, narrowed.right), (0, 345));
+    }
+
+    #[test]
+    fn settle_fixed_keeps_a_bar_converged_at_a_non_default_width() {
+        // Once `apply_width` placed the resized strip and the reservation
+        // matches it, the driver's settle pass must keep it — the widths
+        // agree, so neither the narrow-branch re-derivation nor the drift
+        // keep can move it.
+        let work = RECT { left: 0, top: 0, right: 1344, bottom: 1080 };
+        let placed = RECT { left: 1344, top: 0, right: 1920, bottom: 1080 };
+        let desired = settle_fixed_desired(ABE_RIGHT, work, placed, 576);
+        assert_eq!((desired.left, desired.right), (placed.left, placed.right));
+        let work = RECT { left: 576, top: 0, right: 1920, bottom: 1080 };
+        let placed = RECT { left: 0, top: 0, right: 576, bottom: 1080 };
+        let desired = settle_fixed_desired(ABE_LEFT, work, placed, 576);
+        assert_eq!((desired.left, desired.right), (placed.left, placed.right));
     }
 
     #[test]
