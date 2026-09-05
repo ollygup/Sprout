@@ -33,17 +33,12 @@
 //! The syscall surface (`SHAppBarMessage`) is not unit-testable on CI; the
 //! geometry math is factored into pure functions tested below.
 
-use std::collections::HashMap;
+mod display;
+
 use std::mem::size_of;
 use std::sync::{Mutex, OnceLock};
 
-use windows_sys::Win32::Devices::Display::{
-    DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QueryDisplayConfig,
-    DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
-    DISPLAYCONFIG_DEVICE_INFO_HEADER, DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO,
-    DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME, QDC_ONLY_ACTIVE_PATHS,
-};
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LUID, RECT};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
     EnumDisplayDevicesW, EnumDisplayMonitors, GetMonitorInfoW, MonitorFromWindow, DISPLAY_DEVICEW,
     HDC, HMONITOR, MONITORINFOEXW, MONITOR_DEFAULTTONEAREST,
@@ -56,6 +51,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetClassNameW, GetWindowRect, RegisterWindowMessageW, SetWindowPos, SWP_NOACTIVATE,
     SWP_NOSENDCHANGING, SWP_NOZORDER, HWND_TOPMOST,
 };
+use display::{display_identity, query_display_map};
 
 /// The registered AppBar callback message (ticket 60). `RegisterWindowMessage`
 /// hands out a unique id in the 0xC000–0xFFFF range, registered once per
@@ -311,74 +307,6 @@ fn collect_monitor_rects() -> Vec<(String, RECT, HMONITOR)> {
     ctx.items
 }
 
-/// The identity + friendly-name map from a single QueryDisplayConfig
-/// snapshot (ticket 110 & 111 single source).
-fn query_display_map() -> HashMap<String, (Option<String>, String)> {
-    let mut map: HashMap<String, (Option<String>, String)> = HashMap::new();
-    unsafe {
-        let mut num_paths = 0u32;
-        let mut num_modes = 0u32;
-        if GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut num_paths, &mut num_modes) != 0 {
-            return map;
-        }
-        if num_paths == 0 {
-            return map;
-        }
-        let mut paths: Vec<DISPLAYCONFIG_PATH_INFO> = vec![std::mem::zeroed(); num_paths as usize];
-        let mut modes: Vec<DISPLAYCONFIG_MODE_INFO> = vec![std::mem::zeroed(); num_modes as usize];
-        if QueryDisplayConfig(
-            QDC_ONLY_ACTIVE_PATHS,
-            &mut num_paths,
-            paths.as_mut_ptr(),
-            &mut num_modes,
-            modes.as_mut_ptr(),
-            std::ptr::null_mut(),
-        ) != 0
-        {
-            return map;
-        }
-        paths.truncate(num_paths as usize);
-        for path in &paths {
-            let mut source: DISPLAYCONFIG_SOURCE_DEVICE_NAME = std::mem::zeroed();
-            source.header = device_info_header(
-                DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
-                path.sourceInfo.adapterId,
-                path.sourceInfo.id,
-                size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32,
-            );
-            if DisplayConfigGetDeviceInfo(&mut source.header) != 0 {
-                continue;
-            }
-            let s_len = source.viewGdiDeviceName.iter().position(|&c| c == 0).unwrap_or(source.viewGdiDeviceName.len());
-            let source_name = String::from_utf16_lossy(&source.viewGdiDeviceName[..s_len]);
-            if source_name.is_empty() {
-                continue;
-            }
-            let mut target: DISPLAYCONFIG_TARGET_DEVICE_NAME = std::mem::zeroed();
-            target.header = device_info_header(
-                DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
-                path.targetInfo.adapterId,
-                path.targetInfo.id,
-                size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32,
-            );
-            if DisplayConfigGetDeviceInfo(&mut target.header) != 0 {
-                // No target info — still insert with no identity/friendly.
-                map.entry(source_name.to_ascii_lowercase()).or_insert((None, String::new()));
-                continue;
-            }
-            let identity = if target.edidManufactureId == 0 && target.edidProductCodeId == 0 {
-                None
-            } else {
-                Some(edid_identity(target.edidManufactureId.into(), target.edidProductCodeId.into()))
-            };
-            let f_len = target.monitorFriendlyDeviceName.iter().position(|&c| c == 0).unwrap_or(target.monitorFriendlyDeviceName.len());
-            let friendly = String::from_utf16_lossy(&target.monitorFriendlyDeviceName[..f_len]).trim().to_string();
-            map.insert(source_name.to_ascii_lowercase(), (identity, friendly));
-        }
-    }
-    map
-}
-
 /// Returns the eligibility for `device_name` + `edge` from the live
 /// snapshot, or `Ok(true)` when the display cannot be found (single
 /// monitor fallback — treat as eligible so validation never blocks fresh
@@ -485,101 +413,6 @@ pub fn monitor_identity(hwnd: HWND) -> Option<String> {
         name
     };
     display_identity(&device)
-}
-
-/// The EDID make+product of the active display-config path whose source GDI
-/// device name is `device`. Syscall-side by module convention; the pieces it
-/// composes ([`edid_identity`], [`wide_matches`]) are pure and tested below.
-fn display_identity(device: &str) -> Option<String> {
-    unsafe {
-        let mut num_paths = 0u32;
-        let mut num_modes = 0u32;
-        if GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut num_paths, &mut num_modes) != 0 {
-            return None;
-        }
-        if num_paths == 0 {
-            return None;
-        }
-        let mut paths: Vec<DISPLAYCONFIG_PATH_INFO> = vec![std::mem::zeroed(); num_paths as usize];
-        let mut modes: Vec<DISPLAYCONFIG_MODE_INFO> = vec![std::mem::zeroed(); num_modes as usize];
-        if QueryDisplayConfig(
-            QDC_ONLY_ACTIVE_PATHS,
-            &mut num_paths,
-            paths.as_mut_ptr(),
-            &mut num_modes,
-            modes.as_mut_ptr(),
-            std::ptr::null_mut(),
-        ) != 0
-        {
-            return None;
-        }
-        paths.truncate(num_paths as usize);
-        for path in &paths {
-            let mut source: DISPLAYCONFIG_SOURCE_DEVICE_NAME = std::mem::zeroed();
-            source.header = device_info_header(
-                DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
-                path.sourceInfo.adapterId,
-                path.sourceInfo.id,
-                size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32,
-            );
-            if DisplayConfigGetDeviceInfo(&mut source.header) != 0 {
-                continue;
-            }
-            if !wide_matches(&source.viewGdiDeviceName, device) {
-                continue;
-            }
-            let mut target: DISPLAYCONFIG_TARGET_DEVICE_NAME = std::mem::zeroed();
-            target.header = device_info_header(
-                DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
-                path.targetInfo.adapterId,
-                path.targetInfo.id,
-                size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32,
-            );
-            if DisplayConfigGetDeviceInfo(&mut target.header) != 0 {
-                continue;
-            }
-            // An all-zero EDID pair carries no identity — two different
-            // virtual displays would collide on one key — so treat it as
-            // "no usable identity" rather than a shared bucket.
-            if target.edidManufactureId == 0 && target.edidProductCodeId == 0 {
-                return None;
-            }
-            return Some(edid_identity(
-                target.edidManufactureId.into(),
-                target.edidProductCodeId.into(),
-            ));
-        }
-        None
-    }
-}
-
-/// The request header [`DisplayConfigGetDeviceInfo`] keys on.
-fn device_info_header(
-    kind: i32,
-    adapter_id: LUID,
-    id: u32,
-    size: u32,
-) -> DISPLAYCONFIG_DEVICE_INFO_HEADER {
-    DISPLAYCONFIG_DEVICE_INFO_HEADER {
-        r#type: kind,
-        size,
-        adapterId: adapter_id,
-        id,
-    }
-}
-
-/// The storage-suffix form of an EDID make+product pair: deterministic hex so
-/// the same physical panel always yields the same string.
-fn edid_identity(manufacture_id: u32, product_code: u32) -> String {
-    format!("edid-{manufacture_id:04X}-{product_code:04X}")
-}
-
-/// Whether a NUL-terminated wide string equals `expected`, case-insensitively
-/// (GDI device names compare without case in practice).
-fn wide_matches(raw: &[u16], expected: &str) -> bool {
-    let len = raw.iter().position(|&c| c == 0).unwrap_or(raw.len());
-    let text = String::from_utf16_lossy(&raw[..len]);
-    text.eq_ignore_ascii_case(expected)
 }
 
 /// The rect to re-assert a docked bar at (ticket 61): the shell recomputes
@@ -1368,30 +1201,6 @@ mod tests {
         // The hide direction mirrors it.
         let back = slide_rect(to, from, 0.5);
         assert_eq!(back.left, 298); // 340*0.875 = 297.5 → rounds away from zero
-    }
-
-    #[test]
-    fn edid_identity_is_deterministic_hex() {
-        // Ticket 110: the storage suffix is stable across calls and machines —
-        // fixed-width uppercase hex so the same panel always yields the same
-        // string.
-        assert_eq!(edid_identity(0x1234, 0x5678), "edid-1234-5678");
-        assert_eq!(edid_identity(0xA, 0xB), "edid-000A-000B");
-        assert_eq!(edid_identity(1, 2), edid_identity(1, 2));
-        assert_ne!(edid_identity(1, 2), edid_identity(2, 1));
-    }
-
-    #[test]
-    fn wide_matches_compares_nul_terminated_wide_strings_without_case() {
-        let mut raw: Vec<u16> = r"\\.\DISPLAY1".encode_utf16().collect();
-        raw.push(0);
-        assert!(wide_matches(&raw, r"\\.\DISPLAY1"));
-        // Windows device names compare without case in practice.
-        assert!(wide_matches(&raw, r"\\.\display1"));
-        assert!(!wide_matches(&raw, r"\\.\DISPLAY2"));
-        // A buffer with no terminator compares up to its full length.
-        let unterminated: Vec<u16> = "DISPLAY".encode_utf16().collect();
-        assert!(wide_matches(&unterminated, "display"));
     }
 
     #[test]

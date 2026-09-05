@@ -82,45 +82,7 @@ pub fn worker_run_id(args: &[String]) -> Option<String> {
         .map(|pair| pair[1].clone())
 }
 
-/// Relaunches `exe` with `args` elevated, via `ShellExecuteW`'s `runas` verb —
-/// the single UAC prompt of the run phase (ADR-0003). Returns an error when
-/// the launch failed, which covers the user declining the prompt.
-pub fn launch_elevated(exe: &Path, args: &[&str]) -> Result<(), String> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::UI::Shell::ShellExecuteW;
-    use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
-
-    fn wide(text: &str) -> Vec<u16> {
-        text.encode_utf16().chain(std::iter::once(0)).collect()
-    }
-    let mut file: Vec<u16> = exe.as_os_str().encode_wide().collect();
-    file.push(0);
-    let parameters = wide(&args.join(" "));
-    let operation = wide("runas");
-
-    // > 32 means the verb was handed off; <= 32 is an error code (5 = access
-    // denied / declined, 1223 = cancelled).
-    let result = unsafe {
-        ShellExecuteW(
-            std::ptr::null_mut(),
-            operation.as_ptr(),
-            file.as_ptr(),
-            parameters.as_ptr(),
-            std::ptr::null(),
-            SW_HIDE,
-        )
-    };
-    let code = result as isize;
-    if code > 32 {
-        Ok(())
-    } else {
-        Err(match code {
-            5 => "the UAC prompt was declined or blocked".to_string(),
-            1223 => "the UAC prompt was cancelled".to_string(),
-            _ => format!("Windows rejected the relaunch (error {code})"),
-        })
-    }
-}
+pub use crate::windows_execution::launch_elevated;
 
 /// The elevated worker's entry point: read the request, execute the Plan
 /// streaming progress to `status.jsonl`, persist the Run, and finish with

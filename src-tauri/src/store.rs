@@ -337,9 +337,6 @@ fn fallback_display_name(raw: &str, package_name: &str, aumid: &str) -> String {
 }
 
 fn enumerate_via_powershell() -> Option<Vec<StoreApp>> {
-    use std::os::windows::process::CommandExt;
-    use std::process::Command;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     // PowerShell one-liner: emit JSON with AUMID, DisplayName, Publisher.
     // We call Get-AppxPackage then Get-AppxPackageManifest to get App Ids.
     let script = r#"
@@ -360,10 +357,7 @@ foreach ($pkg in $pkgs) {
 }
 $out | ConvertTo-Json -Compress
 "#;
-    let mut cmd = Command::new("powershell");
-    cmd.args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .creation_flags(CREATE_NO_WINDOW);
-    let output = cmd.output().ok()?;
+    let output = crate::windows_execution::capture_powershell(script).ok()?;
     if !output.status.success() {
         return None;
     }

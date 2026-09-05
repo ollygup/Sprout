@@ -20,7 +20,7 @@ use rusqlite::{params, Connection, OptionalExtension, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::engine::{LauncherEngine, Spawned};
-use crate::engine::windows::{powershell_argv, run_timed_process_in};
+use crate::windows_execution::{powershell_argv, run_timed_process_in};
 
 /// The Test-click timebox (ticket 41): long enough for a normal startup,
 /// short enough that an interactive command is reported honestly as not

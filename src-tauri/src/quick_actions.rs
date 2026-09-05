@@ -13,14 +13,14 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Child;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use rusqlite::{params, Connection, OptionalExtension, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::engine::windows::{hidden, powershell_argv};
+use crate::windows_execution::powershell_argv;
 use crate::launch::{TestResult, TEST_TIMEOUT, timed_test_result};
 
 /// The editable shape of a Quick Action, as the frontend sends it. The stored
@@ -388,25 +388,7 @@ pub fn spawn_quick_action(
     action: &QuickActionInput,
     output: Option<&File>,
 ) -> std::result::Result<Child, String> {
-    let (exe, args) = powershell_argv(&action.command);
-    let mut command = hidden(Command::new(&exe));
-    command.args(&args);
-    if let Some(cwd) = normalized_cwd(action) {
-        command.current_dir(&cwd);
-    }
-    if let Some(output) = output {
-        let stdout = output
-            .try_clone()
-            .map_err(|e| format!("cannot attach the run log: {e}"))?;
-        let stderr = output
-            .try_clone()
-            .map_err(|e| format!("cannot attach the run log: {e}"))?;
-        command.stdout(Stdio::from(stdout));
-        command.stderr(Stdio::from(stderr));
-    }
-    command
-        .spawn()
-        .map_err(|e| format!("failed to start '{exe}': {e}"))
+    crate::windows_execution::spawn_action(&action.command, normalized_cwd(action).as_deref(), output)
 }
 
 /// Spawns the action's stop command (ticket 62) through the same hidden
@@ -421,24 +403,7 @@ pub fn spawn_stop_command(
     cwd: Option<&str>,
     output: Option<&File>,
 ) -> std::result::Result<(), String> {
-    let (exe, args) = powershell_argv(stop_command);
-    let mut command = hidden(Command::new(&exe));
-    command.args(&args);
-    if let Some(cwd) = cwd.map(str::trim).filter(|c| !c.is_empty()) {
-        command.current_dir(cwd);
-    }
-    if let Some(output) = output {
-        if let Ok(stdout) = output.try_clone() {
-            command.stdout(Stdio::from(stdout));
-        }
-        if let Ok(stderr) = output.try_clone() {
-            command.stderr(Stdio::from(stderr));
-        }
-    }
-    command
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| format!("failed to start '{exe}': {e}"))
+    crate::windows_execution::spawn_action_stop(stop_command, cwd, output)
 }
 
 /// The stop-command watchdog (ticket 92): waits out [`STOP_WATCHDOG`] for the
@@ -461,7 +426,7 @@ pub fn enforce_stop_watchdog(pid: u32, log_path: Option<&Path>, exited: &ExitSig
             ),
         );
     }
-    crate::engine::windows::kill_tree(pid);
+    crate::windows_execution::kill_tree(pid);
 }
 
 // ---------------------------------------------------------------------------

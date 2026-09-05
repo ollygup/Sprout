@@ -26,6 +26,7 @@ mod tray;
 mod update;
 mod walker;
 mod winget;
+mod windows_execution;
 mod worker;
 
 pub use worker::run_worker;
@@ -1687,7 +1688,7 @@ fn stop_quick_action(state: State<'_, AppState>, id: i64) -> Result<(), String> 
             if let Some(p) = &tracked.log_path {
                 quick_actions::write_run_log_stop(p, "tree kill (taskkill /T /F)");
             }
-            crate::engine::windows::kill_tree(tracked.pid);
+            crate::windows_execution::kill_tree(tracked.pid);
             Ok(())
         }
     }
