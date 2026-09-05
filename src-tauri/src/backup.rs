@@ -517,6 +517,7 @@ mod tests {
             stoppable: false,
             stop_command: None,
             note: None,
+            auto_run: false,
         }
     }
 
@@ -1137,5 +1138,41 @@ mod tests {
         assert_eq!(plain2.action.note, None);
         let noted2 = listed2.iter().find(|a| a.action.name == "Noted").unwrap();
         assert_eq!(noted2.action.note.as_deref(), Some("hello note\nsecond line"));
+    }
+
+    #[test]
+    fn quick_action_auto_run_survives_backup_roundtrip() {
+        // The flag is machine-local backup data: exported, imported, and
+        // preserved alongside the action's other fields — and never part of
+        // Preset documents, which carry requirements only.
+        let source = conn();
+        let mut flagged = action("Starter");
+        flagged.command = "echo starter".into();
+        flagged.auto_run = true;
+        quick_actions::create_quick_action(&source, &flagged).unwrap();
+        let mut manual = action("Manual");
+        manual.command = "echo manual".into();
+        quick_actions::create_quick_action(&source, &manual).unwrap();
+
+        let dir = tempfile::tempdir().unwrap().into_path();
+        let file = write_file(&dir, "backup.json", "");
+        export_backup(&source, &file, &BackupSelection::all()).unwrap();
+
+        // The file carries the flag.
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+        let actions = on_disk["quick_actions"].as_array().unwrap();
+        assert_eq!(actions.len(), 2);
+        let starter = actions.iter().find(|a| a["name"] == "Starter").unwrap();
+        assert_eq!(starter["auto_run"], true);
+        let manual = actions.iter().find(|a| a["name"] == "Manual").unwrap();
+        assert_eq!(manual["auto_run"], false);
+
+        let target = conn();
+        import_backup(&target, &file).unwrap();
+        let listed = quick_actions::list_quick_actions(&target).unwrap();
+        assert_eq!(listed.len(), 2);
+        assert!(listed.iter().find(|a| a.action.name == "Starter").unwrap().action.auto_run);
+        assert!(!listed.iter().find(|a| a.action.name == "Manual").unwrap().action.auto_run);
     }
 }

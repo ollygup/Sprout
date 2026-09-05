@@ -1537,6 +1537,21 @@ fn run_quick_action(app: AppHandle, state: State<'_, AppState>, id: i64) -> Resu
             "This quick action is no longer in the list — refresh and try again".to_string()
         })?;
     drop(conn);
+    start_tracked_run(&app, &state, &action)
+}
+
+/// Starts one stored action's tracked run: hidden PowerShell, working
+/// directory honored, current user, no elevation — the one path behind both
+/// the Run command and the once-per-start auto-run, so a flagged action at
+/// boot behaves exactly as if Run were clicked (same logs, same registry,
+/// same run-state events). A stoppable action that is already running is
+/// rejected — stop it first.
+fn start_tracked_run(
+    app: &AppHandle,
+    state: &AppState,
+    action: &quick_actions::QuickAction,
+) -> Result<(), String> {
+    let id = action.id;
     if action.action.stoppable
         && state
             .running_actions
@@ -1592,6 +1607,7 @@ fn run_quick_action(app: AppHandle, state: State<'_, AppState>, id: i64) -> Resu
     // (only if this run is still the tracked one — a Stop already removed
     // it), and tells the window. PIDs die with the boot anyway, so the
     // registry stays per-session.
+    let thread_app = app.clone();
     std::thread::spawn(move || {
         let mut child = child;
         let status = child.wait().ok();
@@ -1599,14 +1615,14 @@ fn run_quick_action(app: AppHandle, state: State<'_, AppState>, id: i64) -> Resu
             quick_actions::write_run_log_exit(p, status.and_then(|s| s.code()));
         }
         exited.signal();
-        if let Some(state) = app.try_state::<AppState>() {
+        if let Some(state) = thread_app.try_state::<AppState>() {
             if let Ok(mut registry) = state.running_actions.lock() {
                 if registry.get(&id).map(|r| r.pid) == Some(pid) {
                     registry.remove(&id);
                 }
             }
         }
-        let _ = app.emit(
+        let _ = thread_app.emit(
             "quick-action-run-state-changed",
             quick_actions::QuickActionRunState { id, running: false },
         );
@@ -2439,6 +2455,46 @@ pub fn run() {
                 if let Err(e) = open_main_window(app.handle()) {
                     eprintln!("Could not open the main window: {e}");
                 }
+            }
+            // The once-per-start Quick Action auto-run: every flagged action
+            // fires once, in list order, through the same tracked path as a
+            // Run click — same logs, same registry, same run-state events, so
+            // Stop keeps working from any surface. One failure never blocks
+            // the rest; each is reported and the loop continues. A background
+            // thread so a slow spawn never holds up window creation. Both
+            // boots reach this setup exactly once per process, so login
+            // auto-start and manual launches are covered alike. Runs hidden
+            // as the current user with no elevation, like every Quick Action.
+            {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    let Some(state) = handle.try_state::<AppState>() else {
+                        return;
+                    };
+                    let flagged = match state.db.lock() {
+                        Ok(conn) => match quick_actions::list_auto_run_actions(&conn) {
+                            Ok(actions) => actions,
+                            Err(e) => {
+                                eprintln!(
+                                    "Quick Action auto-run: could not list flagged actions: {e}"
+                                );
+                                return;
+                            }
+                        },
+                        Err(_) => {
+                            eprintln!("Quick Action auto-run: could not lock the db");
+                            return;
+                        }
+                    };
+                    for action in &flagged {
+                        if let Err(e) = start_tracked_run(&handle, &state, action) {
+                            eprintln!(
+                                "Quick Action auto-run: '{}' did not start: {e}",
+                                action.action.name
+                            );
+                        }
+                    }
+                });
             }
             // The once-per-launch self-update check (ADR-0012, ticket 73):
             // background thread, single `update-available` event on a newer

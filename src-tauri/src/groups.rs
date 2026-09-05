@@ -459,6 +459,7 @@ mod tests {
             stoppable: false,
             stop_command: None,
             note: None,
+            auto_run: false,
         }
     }
 

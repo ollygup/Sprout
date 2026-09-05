@@ -124,6 +124,7 @@ fn migrate(conn: &Connection) -> Result<()> {
             stop_command TEXT,
             note         TEXT,
             notes        TEXT,
+            auto_run     INTEGER NOT NULL DEFAULT 0,
             position     INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS clips (
@@ -138,6 +139,7 @@ fn migrate(conn: &Connection) -> Result<()> {
     ensure_product_install_dir(conn)?;
     ensure_quick_action_stoppable(conn)?;
     ensure_quick_action_note(conn)?;
+    ensure_quick_action_auto_run(conn)?;
     ensure_item_group_columns(conn)
 }
 
@@ -279,6 +281,23 @@ fn ensure_quick_action_note(conn: &Connection) -> Result<()> {
         "UPDATE quick_actions SET note = notes WHERE note IS NULL AND notes IS NOT NULL",
         [],
     );
+    Ok(())
+}
+
+/// Upgrades databases created before the Quick Action auto-run flag existed:
+/// adds the nullable-when-read `auto_run` column, defaulting every existing
+/// row to manual. Fresh databases already have it. Idempotent — re-runs
+/// change nothing. Default-off matters: nothing the user never flagged may
+/// start firing after an upgrade.
+fn ensure_quick_action_auto_run(conn: &Connection) -> Result<()> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('quick_actions') WHERE name = 'auto_run')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        conn.execute_batch("ALTER TABLE quick_actions ADD COLUMN auto_run INTEGER NOT NULL DEFAULT 0")?;
+    }
     Ok(())
 }
 
@@ -1967,6 +1986,7 @@ mod tests {
             stoppable: false,
             stop_command: None,
             note: None,
+            auto_run: false,
         };
         crate::quick_actions::create_quick_action(&conn, &action).unwrap();
         assert_eq!(crate::quick_actions::list_quick_actions(&conn).unwrap().len(), 1);
@@ -2017,6 +2037,7 @@ mod tests {
             stoppable: true,
             stop_command: Some("docker compose stop".into()),
             note: None,
+            auto_run: false,
         };
         crate::quick_actions::create_quick_action(&conn, &tracked).unwrap();
         let list = crate::quick_actions::list_quick_actions(&conn).unwrap();

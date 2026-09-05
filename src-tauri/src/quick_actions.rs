@@ -42,6 +42,12 @@ pub struct QuickActionInput {
     /// becomes `None` so a cleared note leaves no ghost glyph (ticket 118).
     #[serde(default, alias = "notes")]
     pub note: Option<String>,
+    /// Whether the action runs once per Sprout start, in list order, exactly
+    /// as if Run were clicked. Machine-local like the rest of the record —
+    /// carried by whole-app backup, never by Presets or exports. Defaults off
+    /// so existing records and old backup files stay manual until flagged.
+    #[serde(default)]
+    pub auto_run: bool,
 }
 
 /// A Quick Action as stored: the input plus its library id. Position is
@@ -246,15 +252,19 @@ fn action_from_row(row: &rusqlite::Row) -> Result<QuickAction> {
             stoppable: row.get::<_, i64>(4)? != 0,
             stop_command: row.get(5)?,
             note,
+            // Why read defensively: databases migrated from builds predating
+            // the flag have no such column value yet the same reader serves
+            // them — a missing value means manual, never auto-run.
+            auto_run: row.get::<_, i64>(8).unwrap_or(0) != 0,
         },
-        group_id: row.get(8)?,
+        group_id: row.get(9)?,
     })
 }
 
 /// Every Quick Action in list order (position, then insertion order).
 pub fn list_quick_actions(conn: &Connection) -> Result<Vec<QuickAction>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, command, cwd, stoppable, stop_command, note, notes, group_id
+        "SELECT id, name, command, cwd, stoppable, stop_command, note, notes, auto_run, group_id
          FROM quick_actions ORDER BY position, id",
     )?;
     let rows = stmt.query_map([], action_from_row)?;
@@ -264,7 +274,7 @@ pub fn list_quick_actions(conn: &Connection) -> Result<Vec<QuickAction>> {
 /// Fetches one action by id — the runner's lookup (ticket 50).
 pub fn get_quick_action(conn: &Connection, id: i64) -> Result<Option<QuickAction>> {
     conn.query_row(
-        "SELECT id, name, command, cwd, stoppable, stop_command, note, notes, group_id
+        "SELECT id, name, command, cwd, stoppable, stop_command, note, notes, auto_run, group_id
          FROM quick_actions WHERE id = ?1",
         params![id],
         action_from_row,
@@ -272,11 +282,21 @@ pub fn get_quick_action(conn: &Connection, id: i64) -> Result<Option<QuickAction
     .optional()
 }
 
+/// The flagged subset of [`list_quick_actions`], same order — what one Sprout
+/// start fires, each exactly as if Run were clicked. Kept beside the list so
+/// the ordering rule lives in one place instead of spreading across callers.
+pub fn list_auto_run_actions(conn: &Connection) -> Result<Vec<QuickAction>> {
+    Ok(list_quick_actions(conn)?
+        .into_iter()
+        .filter(|action| action.action.auto_run)
+        .collect())
+}
+
 /// The one INSERT shape for a Quick Action, position as the trailing
 /// placeholder — shared by `create_quick_action` and `append_action`.
 const INSERT_ACTION_SQL: &str =
-    "INSERT INTO quick_actions (name, command, cwd, stoppable, stop_command, note, notes, position)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
+    "INSERT INTO quick_actions (name, command, cwd, stoppable, stop_command, note, notes, auto_run, position)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)";
 
 /// Appends an action at the end of the list (the next free position).
 pub fn create_quick_action(conn: &Connection, action: &QuickActionInput) -> Result<QuickAction> {
@@ -292,6 +312,7 @@ pub fn create_quick_action(conn: &Connection, action: &QuickActionInput) -> Resu
             &normalized_stop_command(action),
             &note,
             &note,
+            &action.auto_run,
         ],
     )?;
     Ok(get_quick_action(conn, id)?.expect("just inserted"))
@@ -313,6 +334,7 @@ pub(crate) fn append_action(conn: &Connection, action: &QuickActionInput) -> Res
                 &normalized_stop_command(action),
                 &note,
                 &note,
+                &action.auto_run,
             ],
         )
         .map(|_| ())
@@ -325,8 +347,9 @@ pub fn update_quick_action(conn: &Connection, action: &QuickAction) -> Result<()
     let note = normalized_note(&action.action);
     conn.execute(
         "UPDATE quick_actions
-         SET name = ?1, command = ?2, cwd = ?3, stoppable = ?4, stop_command = ?5, note = ?6, notes = ?6
-         WHERE id = ?7",
+         SET name = ?1, command = ?2, cwd = ?3, stoppable = ?4, stop_command = ?5, note = ?6, notes = ?6,
+             auto_run = ?7
+         WHERE id = ?8",
         params![
             action.action.name.trim(),
             action.action.command.trim(),
@@ -334,6 +357,7 @@ pub fn update_quick_action(conn: &Connection, action: &QuickAction) -> Result<()
             action.action.stoppable,
             normalized_stop_command(&action.action),
             note,
+            action.action.auto_run,
             action.id,
         ],
     )?;
@@ -676,6 +700,7 @@ mod tests {
             stoppable: false,
             stop_command: None,
             note: None,
+            auto_run: false,
         }
     }
 
@@ -949,6 +974,7 @@ mod tests {
             stoppable: false,
             stop_command: None,
             note: None,
+            auto_run: false,
         };
         let mut child = spawn_quick_action(&action, None).expect("spawned");
         let _ = child.wait();
@@ -1078,6 +1104,7 @@ mod tests {
             stoppable: false,
             stop_command: None,
             note: None,
+            auto_run: false,
         };
         let mut child = spawn_quick_action(&action, Some(&output)).expect("spawned");
         let _ = child.wait();
@@ -1364,5 +1391,145 @@ mod tests {
                 .as_deref(),
             Some("migrated note")
         );
+    }
+
+    #[test]
+    fn auto_run_defaults_off_and_roundtrips_across_reopen() {
+        let dir = tempfile::tempdir().unwrap().into_path();
+        {
+            let conn = crate::db::init_at(&dir).unwrap();
+            // Unset means manual: the default-built record never fires.
+            create_quick_action(&conn, &input("manual")).unwrap();
+            let mut flagged = input("docker-start");
+            flagged.command = "docker compose up -d".into();
+            flagged.auto_run = true;
+            create_quick_action(&conn, &flagged).unwrap();
+            let listed = list_quick_actions(&conn).unwrap();
+            assert!(!listed[0].action.auto_run);
+            assert!(listed[1].action.auto_run);
+            // Flipping the flag in place keeps the position.
+            let mut edited = listed[1].clone();
+            edited.action.auto_run = false;
+            update_quick_action(&conn, &edited).unwrap();
+            assert!(!get_quick_action(&conn, edited.id).unwrap().unwrap().action.auto_run);
+            let mut relit = edited.clone();
+            relit.action.auto_run = true;
+            update_quick_action(&conn, &relit).unwrap();
+        }
+        // Re-open: the flag survives the connection.
+        let conn = crate::db::init_at(&dir).unwrap();
+        let listed = list_quick_actions(&conn).unwrap();
+        assert!(!listed[0].action.auto_run);
+        assert!(listed[1].action.auto_run);
+    }
+
+    #[test]
+    fn auto_run_listing_returns_only_flagged_actions_in_list_order() {
+        let conn = conn();
+        let mut first = input("first");
+        first.command = "echo first".into();
+        first.auto_run = true;
+        create_quick_action(&conn, &first).unwrap();
+        let mut manual = input("manual");
+        manual.command = "echo manual".into();
+        create_quick_action(&conn, &manual).unwrap();
+        let mut second = input("second");
+        second.command = "echo second".into();
+        second.auto_run = true;
+        create_quick_action(&conn, &second).unwrap();
+        let flagged = list_auto_run_actions(&conn).unwrap();
+        assert_eq!(
+            flagged.iter().map(|a| a.action.name.as_str()).collect::<Vec<_>>(),
+            vec!["first", "second"]
+        );
+        // Reordering the list reorders what a start fires.
+        move_quick_action(&conn, flagged[1].id, 0).unwrap();
+        let flagged = list_auto_run_actions(&conn).unwrap();
+        assert_eq!(
+            flagged.iter().map(|a| a.action.name.as_str()).collect::<Vec<_>>(),
+            vec!["second", "first"]
+        );
+    }
+
+    #[test]
+    fn auto_run_does_not_affect_dedup_identity() {
+        let conn = conn();
+        let mut a = input("first");
+        a.command = "docker compose up -d".into();
+        a.auto_run = true;
+        create_quick_action(&conn, &a).unwrap();
+        // Same command+cwd collides regardless of the flag.
+        let mut twin = input("second");
+        twin.command = "docker compose up -d".into();
+        twin.auto_run = false;
+        assert_eq!(
+            colliding_action(&conn, &twin, None).unwrap().as_deref(),
+            Some("first")
+        );
+    }
+
+    #[test]
+    fn auto_run_migrates_old_databases_as_manual_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap().into_path();
+        std::fs::create_dir_all(&dir).unwrap();
+        // Simulate a database from before the flag existed: the table without
+        // `auto_run`, holding one row.
+        {
+            let conn = rusqlite::Connection::open(dir.join("sprout.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE quick_actions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    command TEXT NOT NULL,
+                    cwd TEXT,
+                    stoppable INTEGER NOT NULL DEFAULT 0,
+                    stop_command TEXT,
+                    note TEXT,
+                    notes TEXT,
+                    position INTEGER NOT NULL DEFAULT 0
+                );
+                INSERT INTO quick_actions (name, command, cwd, position)
+                VALUES ('legacy', 'echo hi', NULL, 0);",
+            )
+            .unwrap();
+        }
+        let conn = crate::db::init_at(&dir).unwrap();
+        let has: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('quick_actions') WHERE name = 'auto_run'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(has, 1, "column auto_run must exist after migration");
+        // Pre-existing rows read back as manual — nothing starts firing that
+        // the user never flagged.
+        let listed = list_quick_actions(&conn).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert!(!listed[0].action.auto_run);
+        // New rows can store the flag.
+        let mut flagged = input("flagged");
+        flagged.command = "echo flagged".into();
+        flagged.auto_run = true;
+        create_quick_action(&conn, &flagged).unwrap();
+        assert!(list_quick_actions(&conn).unwrap()[1].action.auto_run);
+        // Idempotent: re-running init changes nothing and keeps data.
+        drop(conn);
+        let conn = crate::db::init_at(&dir).unwrap();
+        let listed = list_quick_actions(&conn).unwrap();
+        assert_eq!(listed.len(), 2);
+        assert!(!listed[0].action.auto_run);
+        assert!(listed[1].action.auto_run);
+    }
+
+    #[test]
+    fn auto_run_defaults_off_for_backup_files_written_before_the_flag() {
+        // Backup files from before the flag carry no such key — they must
+        // still restore, as manual actions.
+        let input: QuickActionInput = serde_json::from_str(
+            r#"{"name":"legacy","command":"echo hi","cwd":null,"stoppable":false,"stop_command":null,"note":null}"#,
+        )
+        .unwrap();
+        assert!(!input.auto_run);
     }
 }

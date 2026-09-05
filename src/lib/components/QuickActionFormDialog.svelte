@@ -11,6 +11,7 @@
   import Dialog from "./Dialog.svelte";
   import Button from "./Button.svelte";
   import TextInput from "./TextInput.svelte";
+  import Disclosure from "./Disclosure.svelte";
   import InfoTip from "./InfoTip.svelte";
   import Select from "./Select.svelte";
   import TestResult from "./TestResult.svelte";
@@ -45,6 +46,8 @@
   let note = $state("");
   let stoppable = $state(false);
   let stopCommand = $state("");
+  let autoRun = $state(false);
+  let advancedOpen = $state(false);
   let saving = $state(false);
   let error = $state("");
   let testing = $state(false);
@@ -64,6 +67,8 @@
       note = action?.note ?? "";
       stoppable = action?.stoppable ?? false;
       stopCommand = action?.stop_command ?? "";
+      autoRun = action?.auto_run ?? false;
+      advancedOpen = false;
       saving = false;
       error = "";
       // Default ungrouped; an edit preselects its current group when that
@@ -127,6 +132,7 @@
           stoppable,
           stop_command: stoppable ? stopCommand.trim() || null : null,
           note: trimmedNote,
+          auto_run: autoRun,
         });
         // Group membership rides outside the edit payload (ticket 89) — the
         // same assign/unassign the row menu uses.
@@ -151,6 +157,7 @@
           stoppable,
           stop_command: stoppable ? stopCommand.trim() || null : null,
           note: trimmedNote,
+          auto_run: autoRun,
         });
         if (placing) {
           if (creatingGroup) {
@@ -322,6 +329,34 @@
       </div>
     {/if}
 
+    <!-- Rare startup flag behind the shared Advanced disclosure (research
+         0004 rule 2 — frequent fields stay up front; 0006 pattern 7 keeps the
+         layout scannable without a new page). A checkbox, not a switch: the
+         choice applies on Save, never immediately (research 0008 rule 2). -->
+    <div class="advanced">
+      <Disclosure
+        open={advancedOpen}
+        controls="qa-advanced-body"
+        label="Advanced"
+        onclick={() => (advancedOpen = !advancedOpen)}
+      />
+
+      <div id="qa-advanced-body" class="advanced__body" hidden={!advancedOpen}>
+        <label class="stoppable">
+          <input
+            type="checkbox"
+            class="stoppable__check"
+            checked={autoRun}
+            onchange={(e) => (autoRun = (e.target as HTMLInputElement).checked)}
+          />
+          <span class="stoppable__title">Run at Sprout start</span>
+          <InfoTip label="What running at start does">
+            <p>Runs once each time Sprout starts, in list order, as if Run were clicked.</p>
+          </InfoTip>
+        </label>
+      </div>
+    </div>
+
     <TestResult
       {open}
       {command}
@@ -440,6 +475,27 @@
     font-size: var(--text-sm);
     font-weight: 600;
     color: var(--text);
+  }
+
+  /* Advanced-collapsed rare options (research 0004 rule 2): the same flat
+     disclosure treatment as the product form's Advanced — no frame, body
+     separated by a dashed rule. `hidden` needs its own rule or the flex
+     display above keeps the panel permanently open. */
+  .advanced {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .advanced__body {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+    padding-top: var(--space-3);
+    border-top: 1px dashed var(--border);
+  }
+
+  .advanced__body[hidden] {
+    display: none;
   }
 
   .form__error {

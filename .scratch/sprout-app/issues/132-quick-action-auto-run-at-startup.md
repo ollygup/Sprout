@@ -4,7 +4,7 @@
 
 **Blocked by:** 131 (same create/edit dialog file — stacks the second Advanced field cleanly).
 
-**Status:** ready-for-agent
+**Status:** done
 
 ## Scope
 
@@ -12,9 +12,9 @@
 
 ## ACs
 
-- [ ] Flagged actions auto-run once per start in order; one failure doesn't block the rest; Stop works for stoppable auto-runs; unflagged actions never fire.
-- [ ] Flag persists across restart and backup/restore; Preset exports never contain it.
-- [ ] `npm.cmd run check` 0 errors; `cargo test` quick-actions slice green.
+- [x] Flagged actions auto-run once per start in order; one failure doesn't block the rest; Stop works for stoppable auto-runs; unflagged actions never fire.
+- [x] Flag persists across restart and backup/restore; Preset exports never contain it.
+- [x] `npm.cmd run check` 0 errors; `cargo test` quick-actions slice green.
 
 ## Verification
 

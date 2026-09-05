@@ -428,6 +428,10 @@ export interface QuickActionInput {
   /** Optional free-form note (ticket 117): formatted text for whatever the
    *  writer wants. Trimmed on save; empty/whitespace-only => null. */
   note?: string | null;
+  /** Runs once per Sprout start, in list order, as if Run were clicked.
+   *  Machine-local — carried by whole-app backup, never by Presets or
+   *  exports. Default off. */
+  auto_run: boolean;
 }
 
 /** A Quick Action as stored: the input plus its library id. `group_id` is
