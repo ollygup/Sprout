@@ -1,5 +1,7 @@
 # Tray-resident lean backend, virtual-desktop launch, cap+queue (ticket 37)
 
+> Status: amended 2026-09-05 — original text preserved below; corrections are in the Amendment section.
+
 Backfilled from ticket 37's promised ADR (its "Further Notes" referenced this number, but it was never written). Sprout stays resident in the tray when the window is closed: closing destroys the window and webview, leaving only the lean Rust backend, and the tray icon is the one-click Quick Launch surface. Launches move apps to their assigned virtual desktops after their window appears, the virtual-desktop surface is gated to Windows 11 24H2+ (undocumented COM, build 26100.2605+), and launches run under a configurable concurrency cap with a queue.
 
 ## Why
@@ -18,3 +20,7 @@ Quick Launch's job is the morning routine: start the configured apps with one cl
 - The Quick Launch window (ADR-0011) inherits these rules: its Start button and the tray's Start all converge on the same capped runner.
 - Windows may briefly flash on the current desktop when a launch is placed elsewhere — accepted and documented.
 - Below 24H2 the desktop-group surface silently disappears; nothing else changes.
+
+## Amendment — 2026-09-05 (codebase accuracy pass)
+
+Three wording fixes, no behavior change: the gate is major build 26100 (the code reads `CurrentBuild` and cannot see the `.2605` UBR revision); the second-Start refusal is a command error, not a system notification; and "desktop-group surface" is retired terminology — assignment vs Groups is owned by ADR-0015. Residency, move-after-launch, GUID storage, and cap+queue numbers are verified unchanged.

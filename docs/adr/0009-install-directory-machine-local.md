@@ -1,5 +1,7 @@
 # Install directory — machine-local global default (ticket 34)
 
+> Status: amended 2026-09-05 — original text preserved below; the correction is in the Amendment section.
+
 A Settings value, `settings.install_dir`, names the directory installs and upgrades should land in. Empty means winget's own default. Runs pass it to winget as `--location`, the Plan says where software will go, and run results report where it actually landed — calling out installers that ignore the request. The value is machine-local: it is never part of a Preset, a Plan payload, a Run record, or an export.
 
 ## Why
@@ -23,3 +25,7 @@ Software installs scatter across `C:\Program Files`, per-user folders, and drive
 - Users with installers that ignore `--location` see exactly where each product landed, in the run results on the Plan and in History.
 - The Plan's "Ready to apply" group and summary name the target directory when one is set, so the machine's intent is visible before anything runs.
 - Ticket 36 (per-product override) extends this design: a per-product directory wins over the global default in the run pipeline; exports still never carry either.
+
+## Amendment — 2026-09-05 (codebase accuracy pass)
+
+Ticket 36 has shipped, so the future-tense above is now present-tense: `Product.install_dir` (`domain.rs`) is a machine-local override of the global default, resolved per Requirement as `product.install_dir.or(global)` in `run.rs` and passed into the engine seam for both install and upgrade. The "not in the domain model" rationale in the Decisions section is superseded — the field IS in the model now — but the portability guarantee holds by explicit stripping instead: preset export/import strip it (`import_export.rs` both directions) and whole-app backup strips it both ways (`backup.rs` normalize). The Run record still carries no directory column; the honesty note lives in the outcome detail.
