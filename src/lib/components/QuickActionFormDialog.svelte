@@ -1,21 +1,40 @@
 <script lang="ts">
-  import type { QuickAction } from "$lib/types";
-  import { createQuickAction, testQuickAction, updateQuickAction } from "$lib/api";
+  import type { Group, QuickAction } from "$lib/types";
+  import {
+    assignToGroup,
+    createGroup,
+    createQuickAction,
+    testQuickAction,
+    unassignFromGroup,
+    updateQuickAction,
+  } from "$lib/api";
   import Dialog from "./Dialog.svelte";
   import Button from "./Button.svelte";
   import TextInput from "./TextInput.svelte";
   import InfoTip from "./InfoTip.svelte";
+  import Select from "./Select.svelte";
   import TestResult from "./TestResult.svelte";
 
   let {
     open,
     action,
+    groups = [],
+    groupsEnabled = false,
     onsave,
     oncancel,
   }: {
     open: boolean;
     /** The action being edited; null = adding a new action. */
     action: QuickAction | null;
+    /** Live `action`-collection groups (ticket 131): empty = no group field
+     *  at all (research 0004 rule 2, 0006 patterns 2/11); otherwise an
+     *  optional picker defaulting to ungrouped, with a create-and-place
+     *  `New group…` entry (0006 pattern 10). */
+    groups?: Group[];
+    /** The collection's Groups switch (ticket 89): off is fully dormant —
+     *  stored groups are never shown or touched, so the picker stays absent
+     *  even while groups exist (0006 pattern 12). */
+    groupsEnabled?: boolean;
     onsave: (message: string) => void | Promise<void>;
     oncancel: () => void;
   } = $props();
@@ -29,6 +48,11 @@
   let saving = $state(false);
   let error = $state("");
   let testing = $state(false);
+  /** Group picker selection: "" = ungrouped, a group id, or NEW_GROUP. */
+  let groupPick = $state("");
+  let newGroupName = $state("");
+
+  const NEW_GROUP = "__new__";
 
   const editing = $derived(action !== null);
 
@@ -42,6 +66,14 @@
       stopCommand = action?.stop_command ?? "";
       saving = false;
       error = "";
+      // Default ungrouped; an edit preselects its current group when that
+      // group is still live.
+      groupPick =
+        action?.group_id != null &&
+        groups.some((g) => g.id === action.group_id)
+          ? String(action.group_id)
+          : "";
+      newGroupName = "";
     }
   });
 
@@ -71,6 +103,17 @@
       error = badCwd;
       return;
     }
+    // Group placement (ticket 131): the picker exists only while the Groups
+    // switch is on and live groups do, and the New-group entry needs a name
+    // — validated inline like the GroupNameDialog's, before anything is
+    // created.
+    const placing = groupsEnabled && groups.length > 0;
+    const creatingGroup = placing && groupPick === NEW_GROUP;
+    const trimmedGroupName = newGroupName.trim();
+    if (creatingGroup && !trimmedGroupName) {
+      error = "Give the new group a name.";
+      return;
+    }
     saving = true;
     error = "";
     try {
@@ -85,9 +128,23 @@
           stop_command: stoppable ? stopCommand.trim() || null : null,
           note: trimmedNote,
         });
+        // Group membership rides outside the edit payload (ticket 89) — the
+        // same assign/unassign the row menu uses.
+        if (placing) {
+          if (creatingGroup) {
+            const created = await createGroup("action", trimmedGroupName);
+            await assignToGroup("action", action.id, created.id);
+          } else if (groupPick === "") {
+            if (action.group_id !== null) {
+              await unassignFromGroup("action", action.id);
+            }
+          } else if (Number(groupPick) !== action.group_id) {
+            await assignToGroup("action", action.id, Number(groupPick));
+          }
+        }
         await onsave(`${name.trim()} saved.`);
       } else {
-        await createQuickAction({
+        const created = await createQuickAction({
           name: name.trim(),
           command: command.trim(),
           cwd: cwd.trim() || null,
@@ -95,6 +152,14 @@
           stop_command: stoppable ? stopCommand.trim() || null : null,
           note: trimmedNote,
         });
+        if (placing) {
+          if (creatingGroup) {
+            const group = await createGroup("action", trimmedGroupName);
+            await assignToGroup("action", created.id, group.id);
+          } else if (groupPick !== "") {
+            await assignToGroup("action", created.id, Number(groupPick));
+          }
+        }
         await onsave(`${name.trim()} added to Quick Actions.`);
       }
     } catch (e) {
@@ -165,6 +230,38 @@
         <p>Working directory; empty = the app's folder.</p>
       {/snippet}
     </TextInput>
+
+    {#if groupsEnabled && groups.length > 0}
+      <div class="field">
+        <div class="field__label-row">
+          <label class="field__label" for="qa-group">Group</label>
+          <InfoTip label="How groups work">
+            <p>Optional — ungrouped by default. Pick a group or create one to place this action in.</p>
+          </InfoTip>
+        </div>
+        <Select
+          id="qa-group"
+          value={groupPick}
+          onchange={(v) => (groupPick = v)}
+        >
+          <option value="">Ungrouped</option>
+          {#each groups as group (group.id)}
+            <option value={String(group.id)}>{group.name}</option>
+          {/each}
+          <option value={NEW_GROUP}>New group…</option>
+        </Select>
+        {#if groupPick === NEW_GROUP}
+          <TextInput
+            id="qa-new-group"
+            label="New group name"
+            required
+            placeholder="e.g. Docker maintenance"
+            value={newGroupName}
+            onchange={(v) => (newGroupName = v)}
+          />
+        {/if}
+      </div>
+    {/if}
 
     <div class="field">
       <div class="field__label-row">

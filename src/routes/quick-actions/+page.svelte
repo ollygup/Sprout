@@ -534,6 +534,8 @@
 <QuickActionFormDialog
   open={formOpen}
   action={formAction}
+  groups={groups.groups}
+  groupsEnabled={groups.enabled}
   onsave={async (message) => {
     formOpen = false;
     flash(message);
