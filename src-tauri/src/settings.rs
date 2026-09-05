@@ -74,6 +74,13 @@ pub const REVEAL_DWELL_MIN_MS: u64 = 0;
 pub const REVEAL_DWELL_MAX_MS: u64 = 1000;
 pub const REVEAL_SENSITIVITY_MIN_PX: i32 = 0;
 pub const REVEAL_SENSITIVITY_MAX_PX: i32 = 50;
+/// Dock width (ticket 128): % of the docked monitor's full width, 10–30%
+/// (default 18 ≈ 346px on 1920). The effective pixel width floors at today's
+/// 340 and caps at 30% of the monitor — single size source via
+/// `constants::window` (see `dock_width_px` for the ultrawide cap math).
+pub const DEFAULT_DOCK_WIDTH_PCT: u32 = crate::constants::window::DOCK_WIDTH_DEFAULT_PCT;
+pub const DOCK_WIDTH_PCT_MIN: u32 = crate::constants::window::DOCK_WIDTH_MIN_PCT;
+pub const DOCK_WIDTH_PCT_MAX: u32 = crate::constants::window::DOCK_WIDTH_MAX_PCT;
 /// Companion pane (ticket 125): height ratio 25–60% — how much of the docked
 /// window's height the embedded web view occupies (bottom strip). Default
 /// 40% matches the ticket's 0.40 and sits comfortably at any dock height
@@ -97,6 +104,7 @@ const KEY_CLIP_GROUPS: &str = "clips.groups";
 const KEY_DOCK_MODE: &str = "dock.mode";
 const KEY_DOCK_EDGE: &str = "dock.edge";
 const KEY_DOCK_STATE: &str = "dock.state";
+const KEY_DOCK_WIDTH_PCT: &str = "dock.width_pct";
 const KEY_AUTOSTART: &str = "settings.autostart";
 const KEY_REVEAL_DWELL_MS: &str = "dock.reveal_dwell_ms";
 const KEY_REVEAL_SENSITIVITY_PX: &str = "dock.reveal_sensitivity_px";
@@ -129,6 +137,10 @@ pub struct Settings {
     /// "docked" — what the window reopens as, and what the in-window dock
     /// toggle writes back.
     pub dock_state: String,
+    /// The docked strip's width as % of its monitor (ticket 128): 10–30,
+    /// default 18. Docked only — floating stays 340 — shared by fixed and
+    /// auto-hide, with per-monitor memory falling back to this.
+    pub dock_width_pct: u32,
     /// Whether Sprout starts with Windows (ADR-0013, ticket 75): "on" or
     /// "off". The Run-key registration is reconciled with this value by the
     /// autostart module; the setting itself only records the preference.
@@ -180,6 +192,7 @@ impl Default for Settings {
             dock_mode: DEFAULT_DOCK_MODE.to_string(),
             dock_edge: DEFAULT_DOCK_EDGE.to_string(),
             dock_state: DEFAULT_DOCK_STATE.to_string(),
+            dock_width_pct: DEFAULT_DOCK_WIDTH_PCT,
             autostart: DEFAULT_AUTOSTART.to_string(),
             launch_groups: DEFAULT_GROUPS_FEATURE.to_string(),
             action_groups: DEFAULT_GROUPS_FEATURE.to_string(),
@@ -242,6 +255,25 @@ pub fn validate_dock_state(state: &str) -> std::result::Result<(), String> {
         "floating" | "docked" => Ok(()),
         _ => Err("Dock state must be \"floating\" or \"docked\"".into()),
     }
+}
+
+/// Accepts only the dock-width % the Settings slider offers (ticket 128):
+/// 10–30% inclusive. The pixel floor/cap live in `dock_width_px`, so this
+/// only guards the stored %.
+pub fn validate_dock_width_pct(value: u32) -> std::result::Result<(), String> {
+    if (DOCK_WIDTH_PCT_MIN..=DOCK_WIDTH_PCT_MAX).contains(&value) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Dock width must be between {DOCK_WIDTH_PCT_MIN} and {DOCK_WIDTH_PCT_MAX} %"
+        ))
+    }
+}
+
+/// Clamps a width % into the slider range (ticket 128).
+#[allow(dead_code)]
+pub fn clamp_dock_width_pct(value: u32) -> u32 {
+    value.clamp(DOCK_WIDTH_PCT_MIN, DOCK_WIDTH_PCT_MAX)
 }
 
 /// Accepts only the two auto-start states the Settings toggle writes
@@ -411,6 +443,7 @@ impl Settings {
         validate_dock_mode(&self.dock_mode)?;
         validate_dock_edge(&self.dock_edge)?;
         validate_dock_state(&self.dock_state)?;
+        validate_dock_width_pct(self.dock_width_pct)?;
         validate_autostart(&self.autostart)?;
         validate_groups_feature(&self.launch_groups)?;
         validate_groups_feature(&self.action_groups)?;
@@ -488,6 +521,9 @@ pub fn load(conn: &Connection) -> Settings {
             .unwrap_or_else(|| DEFAULT_DOCK_EDGE.to_string()),
         dock_state: validated(conn, KEY_DOCK_STATE, validate_dock_state)
             .unwrap_or_else(|| DEFAULT_DOCK_STATE.to_string()),
+        dock_width_pct: number(conn, KEY_DOCK_WIDTH_PCT)
+            .filter(|v| (DOCK_WIDTH_PCT_MIN..=DOCK_WIDTH_PCT_MAX).contains(v))
+            .unwrap_or(DEFAULT_DOCK_WIDTH_PCT),
         autostart: validated(conn, KEY_AUTOSTART, validate_autostart)
             .unwrap_or_else(|| DEFAULT_AUTOSTART.to_string()),
         launch_groups: validated(conn, KEY_LAUNCH_GROUPS, validate_groups_feature)
@@ -525,6 +561,7 @@ pub fn save(conn: &Connection, settings: &Settings) -> std::result::Result<(), S
     upsert_meta(&tx, KEY_DOCK_MODE, &settings.dock_mode).map_err(|e| e.to_string())?;
     upsert_meta(&tx, KEY_DOCK_EDGE, &settings.dock_edge).map_err(|e| e.to_string())?;
     upsert_meta(&tx, KEY_DOCK_STATE, &settings.dock_state).map_err(|e| e.to_string())?;
+    upsert_meta(&tx, KEY_DOCK_WIDTH_PCT, &settings.dock_width_pct.to_string()).map_err(|e| e.to_string())?;
     upsert_meta(&tx, KEY_AUTOSTART, &settings.autostart).map_err(|e| e.to_string())?;
     upsert_meta(&tx, KEY_LAUNCH_GROUPS, &settings.launch_groups).map_err(|e| e.to_string())?;
     upsert_meta(&tx, KEY_ACTION_GROUPS, &settings.action_groups).map_err(|e| e.to_string())?;
@@ -695,6 +732,7 @@ mod tests {
             dock_mode: "fixed".to_string(),
             dock_edge: "right".to_string(),
             dock_state: "docked".to_string(),
+            dock_width_pct: 24,
             autostart: "off".to_string(),
             launch_groups: "on".to_string(),
             action_groups: "off".to_string(),
@@ -753,6 +791,14 @@ mod tests {
         s.dock_state = DEFAULT_DOCK_STATE.to_string();
         assert!(s.validate().is_ok());
         s.dock_state = "docked".to_string();
+        assert!(s.validate().is_ok());
+        s.dock_state = DEFAULT_DOCK_STATE.to_string();
+        assert!(s.validate().is_ok());
+        s.dock_width_pct = DOCK_WIDTH_PCT_MIN - 1;
+        assert!(s.validate().is_err());
+        s.dock_width_pct = DOCK_WIDTH_PCT_MAX + 1;
+        assert!(s.validate().is_err());
+        s.dock_width_pct = DEFAULT_DOCK_WIDTH_PCT;
         assert!(s.validate().is_ok());
         s.autostart = "maybe".to_string();
         assert!(s.validate().is_err());
@@ -824,6 +870,28 @@ mod tests {
         assert_eq!(load(&conn).dock_edge, DEFAULT_DOCK_EDGE);
         upsert_meta(&conn, KEY_DOCK_STATE, "minimized").unwrap();
         assert_eq!(load(&conn).dock_state, DEFAULT_DOCK_STATE);
+        upsert_meta(&conn, KEY_DOCK_WIDTH_PCT, "99").unwrap();
+        assert_eq!(load(&conn).dock_width_pct, DEFAULT_DOCK_WIDTH_PCT);
+        upsert_meta(&conn, KEY_DOCK_WIDTH_PCT, "wide").unwrap();
+        assert_eq!(load(&conn).dock_width_pct, DEFAULT_DOCK_WIDTH_PCT);
+    }
+
+    #[test]
+    fn dock_width_validation_covers_the_slider_range() {
+        // Ticket 128: 10–30 inclusive, matching the Settings slider.
+        assert!(validate_dock_width_pct(DOCK_WIDTH_PCT_MIN).is_ok());
+        assert!(validate_dock_width_pct(DOCK_WIDTH_PCT_MAX).is_ok());
+        assert!(validate_dock_width_pct(DEFAULT_DOCK_WIDTH_PCT).is_ok());
+        assert!(validate_dock_width_pct(DOCK_WIDTH_PCT_MIN - 1).is_err());
+        assert!(validate_dock_width_pct(DOCK_WIDTH_PCT_MAX + 1).is_err());
+        assert_eq!(clamp_dock_width_pct(5), DOCK_WIDTH_PCT_MIN);
+        assert_eq!(clamp_dock_width_pct(18), 18);
+        assert_eq!(clamp_dock_width_pct(99), DOCK_WIDTH_PCT_MAX);
+        let mut s = Settings::default();
+        s.dock_width_pct = DOCK_WIDTH_PCT_MAX + 1;
+        assert!(s.validate().is_err());
+        s.dock_width_pct = DOCK_WIDTH_PCT_MAX;
+        assert!(s.validate().is_ok());
     }
 
     #[test]
@@ -985,6 +1053,7 @@ mod tests {
             dock_mode: DEFAULT_DOCK_MODE.to_string(),
             dock_edge: DEFAULT_DOCK_EDGE.to_string(),
             dock_state: DEFAULT_DOCK_STATE.to_string(),
+            dock_width_pct: DEFAULT_DOCK_WIDTH_PCT,
             autostart: DEFAULT_AUTOSTART.to_string(),
             launch_groups: DEFAULT_GROUPS_FEATURE.to_string(),
             action_groups: DEFAULT_GROUPS_FEATURE.to_string(),

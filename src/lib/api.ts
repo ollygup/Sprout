@@ -470,6 +470,17 @@ export function setDisplayDockMode(display: string, mode: string): Promise<void>
   return invoke<void>("set_display_dock_mode", { display, mode });
 }
 
+/** The remembered dock width % for one display (ticket 128): null means no
+ * override — the global default applies. */
+export function getDisplayDockWidthPct(display: string): Promise<number | null> {
+  return invoke<number | null>("get_display_dock_width_pct", { display });
+}
+
+/** Persists one display's dock width % (ticket 128): 10–30, validated. */
+export function setDisplayDockWidthPct(display: string, pct: number): Promise<void> {
+  return invoke<void>("set_display_dock_width_pct", { display, pct });
+}
+
 /** Applies the complete saved dock/Companion state after Settings batch writes. */
 export function reconcileQuickLaunchSettings(): Promise<void> {
   return invoke<void>("reconcile_quick_launch_settings");

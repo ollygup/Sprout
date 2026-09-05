@@ -78,7 +78,7 @@ use crate::{
     appbar, db, settings,
     constants::window::{
         AUTOHIDE_ANIM_POLL_MS, AUTOHIDE_POLL_MS, AUTOHIDE_SLIDE_MS, DOCK_WIDTH, WINDOW_HEIGHT,
-        WINDOW_WIDTH,
+        WINDOW_WIDTH, dock_width_px,
     },
     AppState,
 };
@@ -385,7 +385,19 @@ fn on_appbar_pos_changed(app: &AppHandle, hwnd: HWND) {
     let Some(actual) = appbar::window_rect(hwnd) else {
         return;
     };
-    let desired = appbar::desired_rect(edge_u32, work, actual, DOCK_WIDTH as i32);
+    // Ticket 128: re-assert at the monitor's remembered width, not the old
+    // 340 constant — a widened fixed bar keeps its width across taskbar moves.
+    let width = {
+        let width = match app.state::<AppState>().db.lock() {
+            Ok(conn) => {
+                let s = settings::load(&conn);
+                dock_width_for_current(app, &conn, &s, &current, hwnd)
+            }
+            Err(_) => DOCK_WIDTH as i32,
+        };
+        width
+    };
+    let desired = appbar::desired_rect(edge_u32, work, actual, width);
     // The shell recomputed the work area from the bar's own placement — the
     // bar is already exactly where the shell expects it (ticket 61): nothing
     // to re-assert, just remember the rect.
@@ -588,6 +600,58 @@ fn resolve_dock_prefs_migrated(
     }
 }
 
+/// Resolves the dock width % for `monitor` the way `dock(None)` does
+/// (ticket 128): the monitor's remembered %, falling back to the Settings
+/// default. Pure — never persists anything.
+fn resolve_dock_width_pct(
+    conn: &Connection,
+    settings: &settings::Settings,
+    identity: Option<&str>,
+    monitor: &str,
+) -> u32 {
+    let pct = db::load_dock_width_pct_identified(conn, identity, monitor)
+        .unwrap_or(settings.dock_width_pct);
+    if settings::validate_dock_width_pct(pct).is_ok() {
+        pct
+    } else {
+        settings::DEFAULT_DOCK_WIDTH_PCT
+    }
+}
+
+/// The effective docked-strip width for `hwnd`'s monitor at `pct` % (ticket
+/// 128): % of the monitor's full width (`rcMonitor` — never the work area,
+/// which a fixed dock shrinks and would feed back into itself), floored at
+/// today's width and capped at 30% (see `dock_width_px`). Falls back to the
+/// floor when the monitor cannot be probed.
+fn dock_width_for_hwnd(hwnd: HWND, pct: u32) -> i32 {
+    match appbar::monitor_rect(hwnd) {
+        Some(monitor) => dock_width_px(monitor.right - monitor.left, pct),
+        None => DOCK_WIDTH as i32,
+    }
+}
+
+/// The effective width for the dock's current monitor, resolved the way
+/// `dock(None)` does (ticket 128): per-monitor memory, falling back to the
+/// given Settings. Falls back to the floor when the window or monitor cannot
+/// be probed — a width lookup must never fail a dock.
+fn dock_width_for_current(
+    app: &AppHandle,
+    conn: &Connection,
+    settings: &settings::Settings,
+    current: &DockState,
+    hwnd: HWND,
+) -> i32 {
+    let _ = (app, current);
+    let pct = db::load_dock_width_pct_identified(conn, current.identity.as_deref(), &current.monitor)
+        .unwrap_or(settings.dock_width_pct);
+    let pct = if settings::validate_dock_width_pct(pct).is_ok() {
+        pct
+    } else {
+        settings::DEFAULT_DOCK_WIDTH_PCT
+    };
+    dock_width_for_hwnd(hwnd, pct)
+}
+
 /// Refuses a seam edge with the shared reason string (ticket 111).
 fn ensure_edge_eligible(device: &str, edge: &str) -> Result<(), String> {
     settings::validate_dock_edge(edge)?;
@@ -655,7 +719,7 @@ pub fn dock(app: &AppHandle, edge: Option<&str>) -> Result<(), String> {
         .ok_or_else(|| "Quick Launch window is not open".to_string())?;
     let hwnd = window.hwnd().map_err(|e| e.to_string())?;
     let state = app.state::<AppState>();
-    let (edge, mode, monitor, identity) = {
+    let (edge, mode, width, monitor, identity) = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         let settings = settings::load(&conn);
         let (monitor, identity) = monitor_refs(hwnd.0)?;
@@ -671,13 +735,18 @@ pub fn dock(app: &AppHandle, edge: Option<&str>) -> Result<(), String> {
         };
         settings::validate_dock_edge(&edge)?;
         let mode = resolved_mode;
+        // Ticket 128: the monitor's remembered width %, falling back to the
+        // Settings default — % of this monitor's full width, floored at 340.
+        let pct = resolve_dock_width_pct(&conn, &settings, identity.as_deref(), &monitor);
+        let width = dock_width_for_hwnd(hwnd.0, pct);
         // Memory is written under the hardware-identity key when one
         // resolved, so replugging the panel elsewhere keeps its preference
         // (ticket 110).
         let key = memory_key(identity.as_deref(), &monitor);
         let _ = db::save_dock_edge(&conn, key, &edge);
         let _ = db::save_dock_mode(&conn, key, &mode);
-        (edge, mode, monitor, identity)
+        let _ = db::save_dock_width_pct(&conn, key, pct);
+        (edge, mode, width, monitor, identity)
     };
     // The dock state is recorded BEFORE the OS calls: auto-hide can hide the
     // window the moment it is enabled (losing focus), and the blur handler
@@ -712,11 +781,11 @@ pub fn dock(app: &AppHandle, edge: Option<&str>) -> Result<(), String> {
     let rect = if mode == "auto-hide" {
         let monitor = appbar::monitor_rect(hwnd.0)
             .ok_or_else(|| "cannot find the monitor rectangle".to_string())?;
-        appbar::appbar_rect(monitor, edge_u32, DOCK_WIDTH as i32)
+        appbar::appbar_rect(monitor, edge_u32, width)
     } else {
         let work = appbar::work_area(hwnd.0)
             .ok_or_else(|| "cannot find the monitor work area".to_string())?;
-        let desired = appbar::appbar_rect(work, edge_u32, DOCK_WIDTH as i32);
+        let desired = appbar::appbar_rect(work, edge_u32, width);
         match appbar::reserve(hwnd.0, edge_u32, desired) {
             Ok(rect) => rect,
             // A reservation that fails after a successful registration must
@@ -799,12 +868,20 @@ fn reposition(app: &AppHandle, edge: Option<&str>) -> Result<(), String> {
     let work = appbar::work_area(hwnd.0)
         .ok_or_else(|| "cannot find the monitor work area".to_string())?;
     let actual = appbar::window_rect(hwnd.0).unwrap_or(work);
+    // Ticket 128: edge switches keep the monitor's remembered width.
+    let width = match state.db.lock() {
+        Ok(conn) => {
+            let s = settings::load(&conn);
+            dock_width_for_current(app, &conn, &s, &current, hwnd.0)
+        }
+        Err(_) => DOCK_WIDTH as i32,
+    };
     // Never re-derive a same-edge dock from the work area alone: it
     // already reflects the bar's own reservation, which would grant a
     // rect one width into the screen (ticket 61). `desired_rect` keeps
     // the current rect when the bar is exactly where the shell expects
     // it.
-    let desired = appbar::desired_rect(edge_u32, work, actual, DOCK_WIDTH as i32);
+    let desired = appbar::desired_rect(edge_u32, work, actual, width);
     let rect = appbar::reserve(hwnd.0, edge_u32, desired)?;
     // The new edge's position is committed first; only then is the old edge's
     // auto-hide released — a refused query leaves the old dock untouched.
@@ -958,8 +1035,9 @@ fn current_edge_hwnd(app: &AppHandle) -> Result<HWND, String> {
 /// Applies the dock-related settings to a live window (ticket 57) — the
 /// Settings screen's changes land without reopening the window: a state
 /// change docks/undocks, an edge change repositions, a mode change re-applies
-/// auto-hide. No-op while the window is closed; the settings' values win over
-/// the per-monitor memory (the user just asked for them explicitly).
+/// auto-hide, a width change re-thickens the strip (ticket 128). No-op while
+/// the window is closed; the settings' values win over the per-monitor memory
+/// (the user just asked for them explicitly).
 pub fn apply_settings(app: &AppHandle, settings: &settings::Settings) -> Result<(), String> {
     if quick_launch_window(app).is_none() {
         return Ok(());
@@ -975,9 +1053,91 @@ pub fn apply_settings(app: &AppHandle, settings: &settings::Settings) -> Result<
         if current.edge != settings.dock_edge {
             dock(app, Some(&settings.dock_edge))?;
         }
+        // Re-read: the edge switch above replaced the live state.
+        let current = docked_state(app)
+            .ok_or_else(|| "Quick Launch window is not docked".to_string())?;
         if current.mode != settings.dock_mode {
             set_dock_mode(app, &settings.dock_mode)?;
         }
+        apply_width(app, settings)?;
+    }
+    Ok(())
+}
+
+/// Re-thickens a live docked strip to `settings.dock_width_pct` (ticket 128):
+/// the Settings width save lands without reopening the window, on both modes.
+/// Fixed re-reserves and places synchronously (the driver is inert while
+/// fixed, so this thread is the only writer); auto-hide only retargets
+/// `last_rect` — the driver slides to the new thickness within a tick, and
+/// the per-tick reconciliation covers it even if this retarget races a slide.
+/// No-op while floating (the palette stays 340) or when the width already
+/// matches. The monitor's memory is aligned with the applied % so a later
+/// redock on this screen keeps it.
+fn apply_width(app: &AppHandle, settings: &settings::Settings) -> Result<(), String> {
+    let Some(current) = docked_state(app) else {
+        return Ok(());
+    };
+    let Some(window) = quick_launch_window(app) else {
+        return Ok(());
+    };
+    let hwnd = window.hwnd().map_err(|e| e.to_string())?.0;
+    let pct = if settings::validate_dock_width_pct(settings.dock_width_pct).is_ok() {
+        settings.dock_width_pct
+    } else {
+        settings::DEFAULT_DOCK_WIDTH_PCT
+    };
+    let width = dock_width_for_hwnd(hwnd, pct);
+    let live_width = current
+        .last_rect
+        .map(|r| r.right - r.left)
+        .or_else(|| appbar::window_rect(hwnd).map(|r| r.right - r.left))
+        .unwrap_or(width);
+    if (live_width - width).abs() <= 1 {
+        return Ok(());
+    }
+    {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let key = memory_key(current.identity.as_deref(), &current.monitor);
+        let _ = db::save_dock_width_pct(&conn, key, pct);
+    }
+    let Some(edge_u32) = appbar::edge_constant(&current.edge) else {
+        return Ok(());
+    };
+    if current.mode == "auto-hide" {
+        // Single-writer: place nothing here — retarget the full rect and let
+        // the driver animate to it (see `autohide_tick`'s width pass).
+        if let Some(monitor) = appbar::monitor_rect(hwnd) {
+            let mut full = appbar::appbar_rect(monitor, edge_u32, width);
+            if let Some(granted) = current.last_rect {
+                full.top = granted.top;
+                full.bottom = granted.bottom;
+            }
+            record_last_rect(app, Some(full));
+        }
+        return Ok(());
+    }
+    let Some(work) = appbar::work_area(hwnd) else {
+        return Ok(());
+    };
+    let actual = appbar::window_rect(hwnd).unwrap_or(work);
+    let desired = appbar::desired_rect(edge_u32, work, actual, width);
+    if !appbar::rects_diverged(desired, actual, 0) {
+        record_last_rect(app, Some(actual));
+        return Ok(());
+    }
+    match appbar::reserve(hwnd, edge_u32, desired) {
+        Ok(rect) => {
+            if !docked_state(app).is_some() {
+                return Ok(());
+            }
+            if let Err(e) = appbar::place(hwnd, rect, false) {
+                report_dock_error(app, &format!("Could not resize the docked bar: {e}"));
+                return Ok(());
+            }
+            record_last_rect(app, Some(rect));
+        }
+        Err(e) => report_dock_error(app, &format!("Could not resize the docked bar: {e}")),
     }
     Ok(())
 }
@@ -1016,18 +1176,26 @@ pub fn reconcile_saved_settings(app: &AppHandle) -> Result<(), String> {
     }
 
     if let Some(current) = docked_state(app) {
-        let (edge, mode) = {
+        let (edge, mode, width_pct) = {
             let state = app.state::<AppState>();
             let conn = state.db.lock().map_err(|e| e.to_string())?;
-            resolve_dock_prefs_migrated(
+            let (edge, mode) = resolve_dock_prefs_migrated(
                 &conn,
                 &stored,
                 current.identity.as_deref(),
                 &current.monitor,
-            )?
+            )?;
+            let width_pct = resolve_dock_width_pct(
+                &conn,
+                &stored,
+                current.identity.as_deref(),
+                &current.monitor,
+            );
+            (edge, mode, width_pct)
         };
         stored.dock_edge = edge;
         stored.dock_mode = mode;
+        stored.dock_width_pct = width_pct;
     }
 
     apply_settings(app, &stored)?;
@@ -1168,11 +1336,20 @@ fn drift_check(app: &AppHandle, consecutive: &mut u32) -> Result<bool, String> {
     let edge_u32 = appbar::edge_constant(&current.edge).ok_or("invalid dock edge")?;
     let work = appbar::work_area(hwnd.0)
         .ok_or_else(|| "cannot find the monitor work area".to_string())?;
+    // Ticket 128: heal at the remembered width — a widened bar that drifted
+    // must come back wide, not collapse to 340.
+    let width = match app.state::<AppState>().db.lock() {
+        Ok(conn) => {
+            let s = settings::load(&conn);
+            dock_width_for_current(app, &conn, &s, &current, hwnd.0)
+        }
+        Err(_) => DOCK_WIDTH as i32,
+    };
     // The same self-aware derivation as the ABN handler (ticket 61): when the
     // work area already reflects the bar's own reservation the bar is where
     // the shell expects it — a re-dock derived from the work area would march
     // the bar into the screen instead of healing the drift.
-    let desired = appbar::desired_rect(edge_u32, work, actual, DOCK_WIDTH as i32);
+    let desired = appbar::desired_rect(edge_u32, work, actual, width);
     let rect = appbar::reserve(hwnd.0, edge_u32, desired)?;
     appbar::place(hwnd.0, rect, false)?;
     record_last_rect(app, Some(rect));
@@ -1303,7 +1480,21 @@ fn settle_mode(app: &AppHandle, current: &DockState) {
         // refused shrink keeps the full reservation and hides anyway — overlay
         // semantics mean no other window loses space.
         if let Some(monitor) = appbar::monitor_rect(hwnd.0) {
-            let full = appbar::appbar_rect(monitor, edge_u32, DOCK_WIDTH as i32);
+            // Ticket 128: the remembered width, not the old 340 constant.
+            let width = match app.state::<AppState>().db.lock() {
+                Ok(conn) => {
+                    let s = settings::load(&conn);
+                    let pct = resolve_dock_width_pct(
+                        &conn,
+                        &s,
+                        current.identity.as_deref(),
+                        &current.monitor,
+                    );
+                    dock_width_px(monitor.right - monitor.left, pct)
+                }
+                Err(_) => DOCK_WIDTH as i32,
+            };
+            let full = appbar::appbar_rect(monitor, edge_u32, width);
             let reservation = appbar::autohide_reservation(monitor, edge_u32);
             match appbar::reserve(hwnd.0, edge_u32, reservation) {
                 Ok(granted) => {
@@ -1346,11 +1537,23 @@ fn settle_mode(app: &AppHandle, current: &DockState) {
         x if x == windows_sys::Win32::UI::Shell::ABE_RIGHT => actual.left >= monitor.right,
         _ => false,
     };
+    // Ticket 128: fixed settle keeps the remembered width — a bar arriving
+    // narrow (mode flip, hidden off-screen) expands to its own width, never
+    // unconditionally to 340.
+    let width = match app.state::<AppState>().db.lock() {
+        Ok(conn) => {
+            let s = settings::load(&conn);
+            let pct =
+                resolve_dock_width_pct(&conn, &s, current.identity.as_deref(), &current.monitor);
+            dock_width_px(monitor.right - monitor.left, pct)
+        }
+        Err(_) => DOCK_WIDTH as i32,
+    };
     let desired =
-        if is_hidden || actual.right - actual.left < DOCK_WIDTH as i32 {
-            appbar::appbar_rect(work, edge_u32, DOCK_WIDTH as i32)
+        if is_hidden || actual.right - actual.left < width {
+            appbar::appbar_rect(work, edge_u32, width)
         } else {
-            appbar::desired_rect(edge_u32, work, actual, DOCK_WIDTH as i32)
+            appbar::desired_rect(edge_u32, work, actual, width)
         };
     match appbar::reserve(hwnd.0, edge_u32, desired) {
         Ok(rect) => {
@@ -1418,9 +1621,42 @@ fn autohide_tick(
     };
     // The full strip rect the shell granted (dock/reposition/drift keep it
     // current) — both animation endpoints derive from it.
-    let Some(full) = current.last_rect else {
+    let Some(mut full) = current.last_rect else {
         return Ok(());
     };
+    // Ticket 128: a Settings width save lands here within one tick without a
+    // mode flip — re-derive the full rect at the remembered width so the
+    // motion below slides to the new thickness on its own. Reading the DB per
+    // tick mirrors the reveal-tuning read below; a probe failure keeps the
+    // last rect rather than collapsing the strip.
+    if let Some(monitor) = appbar::monitor_rect(hwnd.0) {
+        let remembered = match app.try_state::<crate::AppState>() {
+            Some(state) => match state.db.lock() {
+                Ok(conn) => {
+                    let s = crate::settings::load(&conn);
+                    let pct = resolve_dock_width_pct(
+                        &conn,
+                        &s,
+                        current.identity.as_deref(),
+                        &current.monitor,
+                    );
+                    dock_width_px(monitor.right - monitor.left, pct)
+                }
+                Err(_) => full.right - full.left,
+            },
+            None => full.right - full.left,
+        };
+        if (full.right - full.left - remembered).abs() > 1 {
+            full = appbar::appbar_rect(monitor, edge_u32, remembered);
+            // Keep the top/bottom the shell granted — only the thickness
+            // follows the slider.
+            if let Some(granted) = current.last_rect {
+                full.top = granted.top;
+                full.bottom = granted.bottom;
+            }
+            record_last_rect(app, Some(full));
+        }
+    }
     let Some(actual) = appbar::window_rect(hwnd.0) else {
         return Ok(());
     };
@@ -1624,6 +1860,46 @@ mod tests {
         assert_eq!(memory_key(None, r"\\.\DISPLAY1"), r"\\.\DISPLAY1");
         // A degenerate empty identity (a probe bug) must not blank the key.
         assert_eq!(memory_key(Some(""), r"\\.\DISPLAY1"), r"\\.\DISPLAY1");
+    }
+
+    #[test]
+    fn dock_width_pct_prefers_per_monitor_memory_then_default() {
+        // Ticket 128: the monitor's remembered % wins; another monitor and a
+        // fresh database read the Settings default; identity rows win over
+        // device-name rows.
+        let dir = test_dir();
+        let conn = db::init_at(&dir).unwrap();
+        let settings = settings::Settings::default();
+        assert_eq!(
+            resolve_dock_width_pct(&conn, &settings, None, r"\\.\DISPLAY1"),
+            settings::DEFAULT_DOCK_WIDTH_PCT
+        );
+        db::save_dock_width_pct(&conn, r"\\.\DISPLAY1", 24).unwrap();
+        assert_eq!(
+            resolve_dock_width_pct(&conn, &settings, None, r"\\.\DISPLAY1"),
+            24
+        );
+        assert_eq!(
+            resolve_dock_width_pct(&conn, &settings, None, r"\\.\DISPLAY2"),
+            settings::DEFAULT_DOCK_WIDTH_PCT
+        );
+        db::save_dock_width_pct(&conn, "edid-1234-5678", 27).unwrap();
+        assert_eq!(
+            resolve_dock_width_pct(&conn, &settings, Some("edid-1234-5678"), r"\\.\DISPLAY1"),
+            27
+        );
+    }
+
+    #[test]
+    fn dock_width_pct_ignores_a_broken_stored_value() {
+        let dir = test_dir();
+        let conn = db::init_at(&dir).unwrap();
+        let settings = settings::Settings::default();
+        db::save_dock_width_pct(&conn, r"\\.\DISPLAY1", 99).unwrap();
+        assert_eq!(
+            resolve_dock_width_pct(&conn, &settings, None, r"\\.\DISPLAY1"),
+            settings::DEFAULT_DOCK_WIDTH_PCT
+        );
     }
 
     /// The settle geometry the driver derives when entering fixed (ticket

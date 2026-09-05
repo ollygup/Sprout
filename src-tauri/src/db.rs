@@ -886,6 +886,10 @@ pub fn get_run(conn: &Connection, id: &str) -> Result<Option<RunRecord>> {
 /// first time.
 const KEY_DOCK_EDGE_PREFIX: &str = "quicklaunch.dock.edge.";
 const KEY_DOCK_MODE_PREFIX: &str = "quicklaunch.dock.mode.";
+/// Dock width % per monitor (ticket 128): the Settings slider's per-display
+/// override, stored per monitor so each screen remembers its own width —
+/// falls back to the global `dock.width_pct`.
+const KEY_DOCK_WIDTH_PCT_PREFIX: &str = "quicklaunch.dock.width_pct.";
 /// Companion height ratio per monitor (ticket 125): the splitter position that
 /// dock bottom 25–60% occupies, stored per monitor so each screen remembers its
 /// own divider — falls back to the global settings ratio.
@@ -922,6 +926,21 @@ pub fn load_dock_mode(conn: &Connection, monitor: &str) -> Option<String> {
         .filter(|v| crate::settings::validate_dock_mode(v).is_ok())
 }
 
+/// Persists the dock width % for `monitor` (ticket 128). The caller validates
+/// the %; a broken value must never reach the dock, and `load` guards reads
+/// regardless.
+pub fn save_dock_width_pct(conn: &Connection, monitor: &str, pct: u32) -> Result<()> {
+    upsert_meta(conn, &dock_key(KEY_DOCK_WIDTH_PCT_PREFIX, monitor), &pct.to_string())
+}
+
+/// The remembered width % for `monitor`, when a valid one is stored — broken
+/// values read back as `None`, so the dock falls back to the Settings default.
+pub fn load_dock_width_pct(conn: &Connection, monitor: &str) -> Option<u32> {
+    read_meta(conn, &dock_key(KEY_DOCK_WIDTH_PCT_PREFIX, monitor))
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|v| crate::settings::validate_dock_width_pct(*v).is_ok())
+}
+
 /// The remembered edge for a display, preferring its hardware-identity row
 /// over the legacy device-name row (ticket 110): identity-keyed values win,
 /// and a display with no resolvable identity — or no row under its identity —
@@ -946,6 +965,18 @@ pub fn load_dock_mode_identified(
     identity
         .and_then(|id| load_dock_mode(conn, id))
         .or_else(|| load_dock_mode(conn, device_name))
+}
+
+/// The identified-shape twin for the dock width % (ticket 128):
+/// identity-keyed values win, falling back to device-name.
+pub fn load_dock_width_pct_identified(
+    conn: &Connection,
+    identity: Option<&str>,
+    device_name: &str,
+) -> Option<u32> {
+    identity
+        .and_then(|id| load_dock_width_pct(conn, id))
+        .or_else(|| load_dock_width_pct(conn, device_name))
 }
 
 /// Persists the companion height ratio for `monitor` (ticket 125). The caller

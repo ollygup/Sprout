@@ -1842,6 +1842,35 @@ fn set_display_dock_mode(
     db::save_dock_mode(&conn, &key, &mode).map_err(|e| e.to_string())
 }
 
+/// The remembered dock width % for one display (ticket 128): the per-monitor
+/// override the Settings slider edits, falling back to the global default
+/// when absent. `None` means no override — the caller uses the global.
+#[tauri::command]
+fn get_display_dock_width_pct(
+    state: State<'_, AppState>,
+    display: String,
+) -> Result<Option<u32>, String> {
+    let conn = lock(&state)?;
+    let displays = appbar::cached_displays();
+    let (device_name, identity) = resolve_display_keys(&display, &displays);
+    Ok(db::load_dock_width_pct_identified(&conn, identity.as_deref(), &device_name))
+}
+
+/// Persists one display's dock width % (ticket 128): 10–30, validated first.
+#[tauri::command]
+fn set_display_dock_width_pct(
+    state: State<'_, AppState>,
+    display: String,
+    pct: u32,
+) -> Result<(), String> {
+    settings::validate_dock_width_pct(pct)?;
+    let conn = lock(&state)?;
+    let displays = appbar::cached_displays();
+    let (device_name, identity) = resolve_display_keys(&display, &displays);
+    let key = per_display_key(identity.as_deref(), &device_name);
+    db::save_dock_width_pct(&conn, &key, pct).map_err(|e| e.to_string())
+}
+
 /// Applies the final saved global + per-monitor picture after the Settings
 /// screen finishes its batch writes, then publishes one definitive refresh.
 #[tauri::command]
@@ -2539,6 +2568,8 @@ pub fn run() {
             set_display_dock_edge,
             get_display_dock_mode,
             set_display_dock_mode,
+            get_display_dock_width_pct,
+            set_display_dock_width_pct,
             reconcile_quick_launch_settings,
             set_companion_url,
             open_companion_external,

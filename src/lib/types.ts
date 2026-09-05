@@ -279,6 +279,10 @@ export interface Settings {
    *  "docked" — what the window reopens as, and what the in-window dock
    *  toggle writes back. */
   dock_state: string;
+  /** The docked strip's width as % of its monitor (ticket 128): 10–30,
+   *  default 18. Docked only — floating stays 340 — shared by fixed and
+   *  auto-hide, with per-monitor memory falling back here. */
+  dock_width_pct: number;
   /** Whether Sprout starts with Windows (ticket 75): "on" or "off" — the
    *  Run-key registration is reconciled beside every toggle. */
   autostart: string;
