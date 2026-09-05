@@ -1,6 +1,6 @@
 # Tray-resident lean backend, virtual-desktop launch, cap+queue (ticket 37)
 
-> Status: amended 2026-09-05 — original text preserved below; corrections are in the Amendment section.
+> Status: amended 2026-09-05 — original decision text preserved; see the executable-source audit amendment for current behavior and implementation gaps.
 
 Backfilled from ticket 37's promised ADR (its "Further Notes" referenced this number, but it was never written). Sprout stays resident in the tray when the window is closed: closing destroys the window and webview, leaving only the lean Rust backend, and the tray icon is the one-click Quick Launch surface. Launches move apps to their assigned virtual desktops after their window appears, the virtual-desktop surface is gated to Windows 11 24H2+ (undocumented COM, build 26100.2605+), and launches run under a configurable concurrency cap with a queue.
 
@@ -24,3 +24,9 @@ Quick Launch's job is the morning routine: start the configured apps with one cl
 ## Amendment — 2026-09-05 (codebase accuracy pass)
 
 Three wording fixes, no behavior change: the gate is major build 26100 (the code reads `CurrentBuild` and cannot see the `.2605` UBR revision); the second-Start refusal is a command error, not a system notification; and "desktop-group surface" is retired terminology — assignment vs Groups is owned by ADR-0015. Residency, move-after-launch, GUID storage, and cap+queue numbers are verified unchanged.
+
+## Amendment — 2026-09-05 (executable-source audit)
+
+The tray opens the Quick Launch window; list execution starts from the window or page, not directly from the tray (`src-tauri/src/tray.rs`, `init` and `build_menu`). Existing-window matching uses case-insensitive executable basenames through `process_matches_image`/`image_basename` in `src-tauri/src/engine/windows.rs`, not full executable paths. Distinguishing two applications with the same filename in different directories is therefore not guaranteed; full-path matching remains an implementation gap against the stated policy.
+
+Only launches with a live desktop assignment retain a queue slot after spawn (`src-tauri/src/launch.rs`, `run_launch_queue_inner`). Desktop labels prefer the Windows desktop name and otherwise use “Desktop N” (`virtual_desktops`). Main-window close destroys its webview after the unsaved-Settings gate allows the close (`src-tauri/src/lib.rs` close-event handling); it is not unconditional immediate destruction. The existing major-build gate correction and tray-residency decision remain current.

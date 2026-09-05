@@ -1,6 +1,6 @@
 # Step types dispatch through an executor registry
 
-> Status: amended 2026-09-05 — the registry described below never existed in code; the built decision is in the Amendment section. Original text preserved.
+> Status: amended 2026-09-05 — original decision text preserved; see the executable-source audit amendment for current behavior and implementation gaps.
 
 Steps are data and execution dispatches through `HashMap<StepType, Box<dyn StepExecutor>>` — the plugin-registry pattern Tauri itself uses — so the run loop never hardcodes step logic and new step kinds are additive registrations, not invasive changes. v1 ships `winget` and `command` step types. Winget's manifest system already covers exe/msi/msix/zip-portable installs, silent switches, and success codes, so most installer shapes are winget cases; a future download-and-run type is one new executor struct plus one registry entry.
 
@@ -20,3 +20,11 @@ Steps are data (`Step::Winget` / `Step::Command` in `domain.rs`); execution cros
 - The Quick Launch side has its own seam (`LauncherEngine`) — covered by the launch-pipeline ADR, not this one.
 
 The registry paragraph above is preserved history. It never existed in code: no `StepExecutor`/`StepType` type has ever lived in `src-tauri/src` (verified by search). The decision is restated in this section in `codebase-design` vocabulary (module/interface/seam/adapter) so the ADR no longer lies about the architecture.
+
+## Amendment — 2026-09-05 (executable-source audit)
+
+Current install-run dispatch crosses `PlatformEngine` in `src-tauri/src/engine/mod.rs`, including its `detect_many` operation. `execute_run_observed` in `src-tauri/src/run.rs` uses that interface, and `WindowsWingetEngine` matches `Step::Winget`/`Step::Command` in the Windows adapter. The fake adapter is also exercised through this seam by run tests.
+
+This does not place every winget or command operation in the repository behind `PlatformEngine`: catalog `search`/`show` execute winget through `src-tauri/src/winget.rs`, and Quick Launch and Quick Actions have separate execution paths. Thus “all winget/command knowledge lives behind it” is accurate only when scoped to install-run step execution. ADR-0029 records the outstanding cross-feature ownership constraint.
+
+The currently built module tree contains no executor registry. Present source alone cannot establish the earlier amendment’s historical claim that such a registry never existed. No registry or expanded public interface is introduced by this correction.

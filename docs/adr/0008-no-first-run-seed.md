@@ -1,6 +1,6 @@
 # No first-run seed — the Library starts empty
 
-> Status: amended 2026-09-05 — original text preserved below; the correction is in the Amendment section.
+> Status: amended 2026-09-05 — original decision text preserved; see the executable-source audit amendment for current behavior and implementation gaps.
 
 Fresh installs open to an empty Library: the 14 starter catalog entries, the `seeded` meta guard, and the seeding mechanism are gone. Products exist only after the user adds them from the live winget registry search (`search_winget`) or by hand (`create_product`).
 
@@ -24,3 +24,9 @@ The first-run seed was a carry-over from the legacy catalog: it gave a blank-but
 ## Amendment — 2026-09-05 (codebase accuracy pass)
 
 The behavior above is accurate (`init_at` creates schema only; no `seed_if_needed`, no `seeded` key; `make_product` in tests), but the "the `seed` module is deleted" sentence was aspirational: the orphan file `src-tauri/src/seed.rs` (14 products, `SEED_COUNT`) is still on disk, unreferenced by the module tree (`lib.rs` has no `mod seed`) and uncompilable if wired (stale header referencing the deleted `legacy/` catalog). Deleting it is a git-side job — the sync tooling never propagates working-copy deletions to the share, by design. Update 2026-09-06: removed from both the share and the working copy by explicit one-time owner authorization (the AGENTS.md share rule was bypassed once, for this file only). The tree now matches the decision; the version-control commit itself lives outside this device.
+
+## Amendment — 2026-09-05 (executable-source audit)
+
+The current tree has no `src-tauri/src/seed.rs`, and `init_at` in `src-tauri/src/db.rs` creates schema without starter Products. The index’s orphan-file warning was obsolete. User-authored Products can also enter through whole-app backup restore (`src-tauri/src/backup.rs`, `merge`), in addition to the Add-product paths; those records are deliberate user data, not first-run seeding.
+
+Source inspection verifies present absence and initialization behavior, not the previous removal’s date or authorization history. The earlier historical addendum is preserved, and the no-first-run-seed decision is unchanged.

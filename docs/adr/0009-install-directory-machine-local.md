@@ -1,6 +1,6 @@
 # Install directory — machine-local global default (ticket 34)
 
-> Status: amended 2026-09-05 — original text preserved below; the correction is in the Amendment section.
+> Status: amended 2026-09-05 — original decision text preserved; see the executable-source audit amendment for current behavior and implementation gaps.
 
 A Settings value, `settings.install_dir`, names the directory installs and upgrades should land in. Empty means winget's own default. Runs pass it to winget as `--location`, the Plan says where software will go, and run results report where it actually landed — calling out installers that ignore the request. The value is machine-local: it is never part of a Preset, a Plan payload, a Run record, or an export.
 
@@ -29,3 +29,9 @@ Software installs scatter across `C:\Program Files`, per-user folders, and drive
 ## Amendment — 2026-09-05 (codebase accuracy pass)
 
 Ticket 36 has shipped, so the future-tense above is now present-tense: `Product.install_dir` (`domain.rs`) is a machine-local override of the global default, resolved per Requirement as `product.install_dir.or(global)` in `run.rs` and passed into the engine seam for both install and upgrade. The "not in the domain model" rationale in the Decisions section is superseded — the field IS in the model now — but the portability guarantee holds by explicit stripping instead: preset export/import strip it (`import_export.rs` both directions) and whole-app backup strips it both ways (`backup.rs` normalize). The Run record still carries no directory column; the honesty note lives in the outcome detail.
+
+## Amendment — 2026-09-05 (executable-source audit)
+
+The global default is read by the worker from Settings and is not a separate Plan/request field. A per-Product override does travel inside resolved Requirements in composition and `request.json` (`src-tauri/src/lib.rs`, `compute_plan` and `launch_run`). `src-tauri/src/run.rs` selects the Product override before the global default. Machine locality is enforced by stripping install directories on preset and backup import/export, not by excluding them from all local execution payloads.
+
+Run history has no directory field, but its detail may contain the actual-location note. `finish_step` adds that note after a successful install/upgrade and before verification; a later verify failure replaces the detail and can erase it. Retaining the note across failed verification is not currently guaranteed. The directory policy, optional `--location` on both winget verbs, and no-directory export requirement remain unchanged.

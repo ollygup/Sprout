@@ -1,5 +1,7 @@
 # Self-update from GitHub Releases
 
+> Status: amended 2026-09-05 — original decision text preserved; see the executable-source audit amendment for current behavior and implementation gaps.
+
 Sprout ships as an NSIS installer published to GitHub Releases per version tag, and updates itself: at startup (and on demand from Settings) the backend asks the repo's Releases API for the latest tag, compares it against the Cargo.toml version, and — when newer and the user confirms — downloads the setup exe to %TEMP% with `ureq` and runs it passively (`/UPDATE /P /R`), exiting so the installer replaces it in place.
 
 ## Why
@@ -66,3 +68,9 @@ verification step between download and spawn.
   an app update.
 - Scope: verification covers self-updates only — first installations still
   rest on TLS plus trust in the GitHub release page.
+
+## Amendment — 2026-09-05 (executable-source audit)
+
+The signed-update architecture and fail-closed verification remain implemented in `src-tauri/src/update.rs`. “One affordance” is outdated: the rail pill and Settings install action both use `src/lib/updateState.svelte.ts` and confirmation before installation. The verifier accepts bare minisign and Tauri’s base64-wrapped signature sidecars; `.github/workflows/release.yml` unwraps sidecars before publication for older verifiers.
+
+The release workflow invokes signing and checks for a signature sidecar; it does not independently assert that both secret strings are nonempty. Runtime verification still precedes installer spawn, and the `/UPDATE /P /R` handoff remains implemented. The workflow source shows references to signing secrets and pinned actions, not proof of their actual values, custody, or the contents of published releases. Key custody and repository privacy are operational claims outside this source-only audit; the custody rules remain obligations. This amendment does not revisit the signed-update decision.

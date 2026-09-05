@@ -1,6 +1,6 @@
 # Quick Launch window — AppBar dock and Quick Actions (tickets 49–54)
 
-> Status: amended 2026-09-05 (and 2026-08-21 for auto-hide) — original text preserved below; corrections are in the Amendment sections.
+> Status: amended 2026-09-05 — original decision text preserved; see the executable-source audit amendment for current behavior and implementation gaps.
 
 The tray's launch surface moves into a miniature Quick Launch window (opened by tray left-click) with two tabs — Quick Launch (a single Start button that starts the whole Quick Launch list) and Quick Actions (fire-and-forget user commands) — which can float or dock as a Win32 AppBar on the left/right screen edge, auto-hiding like the taskbar or staying fixed. The tray menu is slimmed to Open Sprout + Quit.
 
@@ -41,3 +41,9 @@ auto-hide setting ("not tied to each other, never").
 ## Amendment — 2026-09-05 (codebase accuracy pass)
 
 Three corrections to the window description above, all verified against `quick_window.rs` and the Quick Launch window page: the window has three tabs, not two — **Quick Clips** joins Quick Launch and Quick Actions once at least one Clip exists (and leaves when the last Clip is deleted). Quick Action rows are not NAME + Run — they are a details control plus a three-state Run/Stop/Stopping control with note glyph, backed by the tracked-run registry (see the Quick Action execution-model ADR). And the floating window does not remember size or position — it is always the fixed `340×460` palette, centered (`constants/window.rs` is the single size source). The dock, AppBar, per-monitor memory, and Settings-vs-window control split described above are unchanged. Deeper evolutions (dock-width %, density, companion pane, Groups in the window, clickable entries) are recorded in their own ADRs, not here.
+
+## Amendment — 2026-09-05 (executable-source audit)
+
+The absolute “never calls ABM_SETPOS” statement in the earlier amendment is inaccurate. `settle_mode` in `src-tauri/src/quick_window.rs` calls `appbar::reserve` with a zero-width reservation when entering auto-hide, and `reserve` in `src-tauri/src/appbar.rs` invokes `SHAppBarMessage(ABM_SETPOS)`. The intended distinction is zero workspace reservation for auto-hide versus a positive-width reservation for fixed mode; the mere presence of this Windows call does not imply a reserving auto-hide strip.
+
+Motion remains app-owned. The subsequent three-tab, tracked-action, and fixed centered floating-palette corrections remain current. The driver and reservation-failure limitations are recorded in ADR-0019.

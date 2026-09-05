@@ -24,6 +24,14 @@ _Avoid_: Installer, script
 A named, versioned, exportable set of Requirements targeting a platform. The unit of sharing; immutable once imported, edited only by forking.
 _Avoid_: Profile, configuration, setup
 
+**Catalog**:
+The external collection of available software from which the user can choose Products; Sprout's live winget search is a view into that collection. The user's saved Products belong to the Library, not a bundled or seeded catalog.
+_Avoid_: Library (the user's saved collection), preset (a declaration of installation intent)
+
+**Adapter**:
+A concrete implementation of one of Sprout's execution interfaces: the Windows adapter performs machine operations, while a test adapter supplies controlled outcomes at the same seam. An adapter is not a Preset, a Product, or a user-authored command.
+_Avoid_: Executor registry, generic command dispatcher
+
 **Preset file**:
 The `.sprout.json` file a Preset is exported to. Double-clicking one opens Sprout and imports it (registered by the installer via the Windows file association).
 _Avoid_: Setup file, config file
@@ -78,6 +86,10 @@ _Avoid_: Folder, category, tag, desktop group
 The machine-local list of Launch entries that the tray one-click launcher and the Quick Launch window start. Never part of Presets, Plan, Run, or exports.
 _Avoid_: Quick start, launcher
 
+**Quick Start**:
+An informal alias for starting the Quick Launch list, not a separate installation flow or a Preset. Use **Quick Launch** as the canonical name in Sprout's documentation and interface.
+_Avoid_: First-run setup, preset run
+
 **Quick Launch window**:
 The miniature window opened from the tray icon with two tabs — Quick Launch (a single Start button that starts the whole Quick Launch list) and Quick Actions — for read-only, fast access. A third tab, **Quick Clips**, joins them once any Clip exists; until then the window stays a two-tab palette. It floats as a persistent window (stays open until closed with × / Alt+F4 — blur never hides it — and is freely draggable) or docks as a Win32 AppBar (the Quick Launch dock) on the left/right screen edge. It has no configuration surface; all configuration happens in the main app.
 _Avoid_: Miniature window, palette, tray menu
@@ -113,6 +125,10 @@ _Avoid_: Quick copy, clipboard manager
 **Quick Action**:
 A machine-local, user-authored named command (PowerShell, optional working directory) run from the Quick Launch window's Quick Actions tab (e.g. "docker start" → `docker compose up -d`); runs hidden as the current user with no elevation and no status UI. Optionally **stoppable**: while its process runs, the Run button becomes Stop, which either runs the action's own stop command (e.g. `docker compose stop`) or kills the process tree; tracking covers foreground commands only — detached commands (e.g. `-d`) report as not running because the process exits while the service continues. Configured in the main app's Quick Actions page; never part of Presets, Plan, Run, or exports.
 _Avoid_: Action (a Plan term), command entry, script
+
+**Quick Actions**:
+The machine-local collection of Quick Action commands, configured in the main app and available from the Quick Launch window. It is independent of the Quick Launch list and of Preset installation Runs.
+_Avoid_: Quick Launch entries, preset steps
 
 **Companion**:
 A machine-local, single-site web surface shown in the lower portion of the Quick Launch dock when the user chooses an active saved site. It is absent while the window floats or no site is active, and it is unrelated to Quick Actions, Presets, Plans, and Runs.
