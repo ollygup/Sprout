@@ -304,6 +304,16 @@ export interface Settings {
   /** Companion saved URL list (ticket 125): https URLs edited in the main app,
    *  deduped host+path case-insensitive. Machine-local. */
   companion_url_list: string[];
+  /** Companion mute (global, persisted): the dock toolbar's mute toggle writes
+   *  it; the live WebView heals toward it on every read. Default unmuted. */
+  companion_muted: boolean;
+}
+
+/** The dock Companion toolbar's audio picture: persisted mute plus live
+ *  playback from the WebView. */
+export interface CompanionAudioState {
+  muted: boolean;
+  playing: boolean;
 }
 
 /** Which collection a Group buckets (ticket 89) — the discriminator that

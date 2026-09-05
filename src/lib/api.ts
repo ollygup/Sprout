@@ -407,6 +407,12 @@ export function openCompanionExternal(url: string): Promise<void> {
   return invoke<void>("open_companion_external", { url });
 }
 
+/** Companion audio: the toolbar's volume-mixer shortcut — opens the OS
+ *  per-app Volume mixer page at `ms-settings:apps-volume`. Fixed target. */
+export function openVolumeMixer(): Promise<void> {
+  return invoke<void>("open_volume_mixer");
+}
+
 /** Companion: set the height ratio (ticket 125) — 0.25–0.60. */
 export function setCompanionHeightRatio(ratio: number): Promise<void> {
   return invoke<void>("set_companion_height_ratio", { ratio });
@@ -415,6 +421,18 @@ export function setCompanionHeightRatio(ratio: number): Promise<void> {
 /** Companion: set the saved URL list (ticket 125) — deduped host+path. */
 export function setCompanionUrlList(urls: string[]): Promise<void> {
   return invoke<void>("set_companion_url_list", { urls });
+}
+
+/** Companion audio: persisted mute plus live playback for the dock toolbar.
+ *  Healing a drifted WebView toward the persisted mute happens inside. */
+export function getCompanionAudioState(): Promise<import("./types").CompanionAudioState> {
+  return invoke<import("./types").CompanionAudioState>("get_companion_audio_state");
+}
+
+/** Companion audio: the dock toolbar's mute toggle — persists, pushes into
+ *  the live WebView, and resolves with the fanned-out state. */
+export function setCompanionMuted(muted: boolean): Promise<import("./types").CompanionAudioState> {
+  return invoke<import("./types").CompanionAudioState>("set_companion_muted", { muted });
 }
 
 /** Companion per-monitor height ratio (ticket 125) — falls back to global. */

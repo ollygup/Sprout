@@ -3,8 +3,9 @@
  mod appbar;
  mod autostart;
  mod backup;
- mod clips;
- mod constants;
+  mod clips;
+  mod companion_audio;
+  mod constants;
 mod db;
 mod domain;
 mod engine;
@@ -1906,7 +1907,17 @@ fn set_companion_url(
 #[tauri::command]
 fn open_companion_external(url: String) -> Result<(), String> {
     settings::validate_companion_url(Some(&url))?;
-    external::open(url.trim())
+    external::open(url.trim(), "the companion URL")
+}
+
+/// The toolbar's volume-mixer shortcut: opens the per-app Volume mixer page
+/// directly, so loud/soft never needs hunting. Fixed target — no input to
+/// validate, nothing to persist.
+#[tauri::command]
+fn open_volume_mixer() -> Result<(), String> {
+    // WHY this URI: the modern per-app sliders page, and the same page the
+    // taskbar's own "Open volume mixer" opens — OS vocabulary, zero learning.
+    external::open("ms-settings:apps-volume", "the volume mixer")
 }
 
 /// Sets the global companion height ratio (ticket 125): 0.25–0.60.
@@ -1966,6 +1977,36 @@ fn set_companion_height_ratio_for_display(
     let (device_name, identity) = resolve_display_keys(&display, &displays);
     let key = per_display_key(identity.as_deref(), &device_name);
     db::save_companion_height_ratio(&conn, &key, ratio).map_err(|e| e.to_string())
+}
+
+/// The dock toolbar's audio picture: persisted mute plus live playback.
+/// Healing a drifted WebView toward the persisted mute happens inside, so a
+/// fresh pane never stays loud after silence was asked for.
+#[tauri::command]
+fn get_companion_audio_state(app: AppHandle) -> Result<companion_audio::CompanionAudioState, String> {
+    let persisted = companion_audio::persisted_muted(&app);
+    Ok(companion_audio::current_state(&app, persisted))
+}
+
+/// The dock toolbar's mute toggle: persists the choice, pushes it into the
+/// live WebView, and fans the new state out so the indicator follows without
+/// waiting for the next poll.
+#[tauri::command]
+fn set_companion_muted(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    muted: bool,
+) -> Result<companion_audio::CompanionAudioState, String> {
+    {
+        let conn = lock(&state)?;
+        settings::save_companion_muted(&conn, muted)?;
+    }
+    companion_audio::apply_muted(&app, muted);
+    let live = companion_audio::current_state(&app, muted);
+    // WHY emit instead of relying on the poll: the toggle must read back
+    // instantly or silence feels broken.
+    let _ = app.emit("companion-audio-changed", &live);
+    Ok(live)
 }
 
 /// Opens (or focuses) the main window (ticket 123): the dock header's mark
@@ -2501,10 +2542,13 @@ pub fn run() {
             reconcile_quick_launch_settings,
             set_companion_url,
             open_companion_external,
+            open_volume_mixer,
             set_companion_height_ratio,
             set_companion_url_list,
             get_companion_height_ratio,
             set_companion_height_ratio_for_display,
+            get_companion_audio_state,
+            set_companion_muted,
             set_settings_dirty,
             destroy_main_window
         ])

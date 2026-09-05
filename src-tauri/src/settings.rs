@@ -81,6 +81,10 @@ pub const REVEAL_SENSITIVITY_MAX_PX: i32 = 50;
 pub const DEFAULT_COMPANION_HEIGHT_RATIO: f64 = 0.40;
 pub const COMPANION_HEIGHT_RATIO_MIN: f64 = 0.25;
 pub const COMPANION_HEIGHT_RATIO_MAX: f64 = 0.60;
+/// Companion audio (mute-only): the dock toolbar's mute toggle persists here
+/// so silence survives restarts and WebView recreations. Default unmuted —
+/// a fresh install never starts silent.
+pub const DEFAULT_COMPANION_MUTED: bool = false;
 
 const KEY_TIMEOUT: &str = "settings.timeout_minutes";
 const KEY_RETENTION: &str = "settings.log_retention_days";
@@ -99,6 +103,7 @@ const KEY_REVEAL_SENSITIVITY_PX: &str = "dock.reveal_sensitivity_px";
 const KEY_COMPANION_URL: &str = "settings.companion_url";
 const KEY_COMPANION_HEIGHT_RATIO: &str = "settings.companion_height_ratio";
 const KEY_COMPANION_URL_LIST: &str = "settings.companion_url_list";
+const KEY_COMPANION_MUTED: &str = "settings.companion_muted";
 
 /// The persisted knobs. `u32` fields keep the frontend's number inputs safe;
 /// validation lives in [`Settings::validate`]. `install_dir` is empty when
@@ -158,6 +163,10 @@ pub struct Settings {
     /// the user. Machine-local, never in Preset exports/backups beyond the
     /// settings row (ADR-0009 spirit).
     pub companion_url_list: Vec<String>,
+    /// Companion mute (global, persisted): whether the docked pane's audio is
+    /// silenced. Applied to the live WebView on every read and on every
+    /// WebView creation, so a recreated pane never comes back loud.
+    pub companion_muted: bool,
 }
 
 impl Default for Settings {
@@ -180,6 +189,7 @@ impl Default for Settings {
             companion_url: None,
             companion_height_ratio: DEFAULT_COMPANION_HEIGHT_RATIO,
             companion_url_list: Vec::new(),
+            companion_muted: DEFAULT_COMPANION_MUTED,
         }
     }
 }
@@ -457,6 +467,11 @@ pub fn load(conn: &Connection) -> Settings {
         .and_then(|v| serde_json::from_str::<Vec<String>>(&v).ok())
         .map(|list| dedup_companion_url_list(&list))
         .unwrap_or_default();
+    // WHY stored as "1"/"0": the meta table holds strings, and an explicit
+    // pair keeps a broken value readable as unmuted instead of erroring.
+    let companion_muted = raw(conn, KEY_COMPANION_MUTED)
+        .map(|v| matches!(v.trim(), "1" | "true" | "on"))
+        .unwrap_or(DEFAULT_COMPANION_MUTED);
 
     Settings {
         default_timeout_minutes: number(conn, KEY_TIMEOUT).unwrap_or(DEFAULT_TIMEOUT_MINUTES),
@@ -490,6 +505,7 @@ pub fn load(conn: &Connection) -> Settings {
         companion_url,
         companion_height_ratio,
         companion_url_list,
+        companion_muted,
     }
 }
 
@@ -529,6 +545,8 @@ pub fn save(conn: &Connection, settings: &Settings) -> std::result::Result<(), S
         .map_err(|e| e.to_string())?;
     let list_json = serde_json::to_string(&settings.companion_url_list).map_err(|e| e.to_string())?;
     upsert_meta(&tx, KEY_COMPANION_URL_LIST, &list_json).map_err(|e| e.to_string())?;
+    upsert_meta(&tx, KEY_COMPANION_MUTED, if settings.companion_muted { "1" } else { "0" })
+        .map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())
 }
 
@@ -603,6 +621,28 @@ pub fn save_companion_url_list(conn: &Connection, list: &[String]) -> std::resul
     upsert_meta(conn, KEY_COMPANION_URL_LIST, &json).map_err(|e| e.to_string())
 }
 
+/// Persists only the companion mute — the dock toolbar's toggle writes here
+/// without touching the other knobs, so Settings and the toolbar never
+/// diverge. A bool needs no validation; any stored string outside "1" reads
+/// back as unmuted.
+pub fn save_companion_muted(conn: &Connection, muted: bool) -> std::result::Result<(), String> {
+    upsert_meta(conn, KEY_COMPANION_MUTED, if muted { "1" } else { "0" })
+        .map_err(|e| e.to_string())
+}
+
+/// Reads only the companion mute — the audio-state query's persisted half.
+/// Missing or broken values read back as unmuted.
+pub fn load_companion_muted(conn: &Connection) -> bool {
+    conn.query_row(
+        "SELECT value FROM meta WHERE key = ?1",
+        rusqlite::params![KEY_COMPANION_MUTED],
+        |row| row.get::<_, String>(0),
+    )
+    .ok()
+    .map(|v| matches!(v.trim(), "1" | "true" | "on"))
+    .unwrap_or(DEFAULT_COMPANION_MUTED)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -664,6 +704,7 @@ mod tests {
             companion_url: Some("https://music.youtube.com".to_string()),
             companion_height_ratio: 0.55,
             companion_url_list: vec!["https://music.youtube.com".to_string(), "https://open.spotify.com".to_string()],
+            companion_muted: true,
         };
         {
             let conn = crate::db::init_at(&dir).unwrap();
@@ -953,6 +994,7 @@ mod tests {
             companion_url: None,
             companion_height_ratio: DEFAULT_COMPANION_HEIGHT_RATIO,
             companion_url_list: Vec::new(),
+            companion_muted: false,
         };
         assert!(save(&conn, &bad).is_err());
         // Nothing was persisted.
@@ -1141,5 +1183,28 @@ mod tests {
         save_companion_url_list(&conn, &list).unwrap();
         // deduped on save load cycle
         assert_eq!(load(&conn).companion_url_list, vec!["https://a.example.com".to_string(), "https://b.example.com".to_string()]);
+    }
+
+    #[test]
+    fn companion_mute_roundtrip_and_default() {
+        // WHY the default matters: a fresh install must never start silent —
+        // muting is always an explicit toolbar action.
+        let conn = conn();
+        assert_eq!(load(&conn).companion_muted, DEFAULT_COMPANION_MUTED);
+        assert!(!DEFAULT_COMPANION_MUTED);
+        save_companion_muted(&conn, true).unwrap();
+        assert!(load(&conn).companion_muted);
+        assert!(load_companion_muted(&conn));
+        save_companion_muted(&conn, false).unwrap();
+        assert!(!load(&conn).companion_muted);
+        // Full-settings save carries the knob too.
+        let mut s = Settings::default();
+        s.companion_muted = true;
+        save(&conn, &s).unwrap();
+        assert!(load(&conn).companion_muted);
+        // A broken stored value falls back to unmuted, never to silent.
+        upsert_meta(&conn, KEY_COMPANION_MUTED, "loud").unwrap();
+        assert!(!load(&conn).companion_muted);
+        assert!(!load_companion_muted(&conn));
     }
 }

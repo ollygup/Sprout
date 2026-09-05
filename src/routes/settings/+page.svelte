@@ -511,6 +511,9 @@
         companion_url: companionUrl,
         companion_height_ratio: clampedCompanionRatio,
         companion_url_list: normalizedList,
+        // The dock toolbar owns the mute toggle — Settings only carries the
+        // stored value through so a save never resets it.
+        companion_muted: settings.companion_muted ?? false,
       });
       // Per-monitor follows Save (only Theme is immediate per 0009). Batch
       // the deferred writes so global + per-monitor share one success notice.
@@ -593,6 +596,7 @@
         companion_url: companionUrl,
         companion_height_ratio: companionHeightRatio,
         companion_url_list: [...companionUrlList],
+        companion_muted: settings.companion_muted ?? false,
       };
     } catch (cause) {
       console.error("settings save failed", cause);

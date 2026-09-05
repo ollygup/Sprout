@@ -3,7 +3,7 @@ name = "sprout"
 # App version. Single source of truth: this file — tauri.conf.json omits
 # `version` and Tauri v2 auto-inherits it from here into the exe metadata,
 # the window, and the installer. Never restate it elsewhere.
-version = "0.8.1"
+version = "0.8.2"
 description = "Preset-driven Windows software-installation desktop app"
 authors = ["Sprout contributors"]
 edition = "2021"
@@ -51,6 +51,11 @@ winvd = "0.0.49"
 # (ticket 122 Store scan) — WinRT, no extra size budget impact beyond the
 # already-pulled windows crate.
 windows = { version = "0.58", features = ["Win32_UI_Shell", "Win32_Foundation", "Win32_System_Com", "Win32_Storage_FileSystem", "Management_Deployment", "ApplicationModel", "ApplicationModel_Core", "Foundation_Collections", "Storage", "Storage_Streams", "Graphics_Imaging"] }
+# Companion audio: WebView2 mute-only control (IsMuted) plus the playing
+# indicator read (IsDocumentPlayingAudio) through the Tauri Webview handle.
+# Pinned to the minor Tauri's wry already uses so the controller types match.
+webview2-com = "0.38"
+windows-core = "0.61"
 png = "0.17"
 # PNG → data URL for the search-result icons (ticket 40); already in the lock
 # file as a transitive of tauri.

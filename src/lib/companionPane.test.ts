@@ -31,6 +31,14 @@ const LIB_SOURCE = readFileSync(
   new URL("../../src-tauri/src/lib.rs", import.meta.url),
   "utf8",
 );
+const SETTINGS_RS_SOURCE = readFileSync(
+  new URL("../../src-tauri/src/settings.rs", import.meta.url),
+  "utf8",
+);
+const AUDIO_RS_SOURCE = readFileSync(
+  new URL("../../src-tauri/src/companion_audio.rs", import.meta.url),
+  "utf8",
+);
 
 describe("Companion native WebView contract", () => {
   it("uses the content frame's logical bounds without covering the toolbar", () => {
@@ -167,5 +175,68 @@ describe("Companion native WebView contract", () => {
   it("enables Tauri's child-WebView API and keeps a separate profile", () => {
     expect(CARGO_SOURCE).toMatch(/features = \[[^\]]*"unstable"/);
     expect(ROUTE_SOURCE).toContain('dataDirectory: "companion"');
+  });
+});
+
+describe("Companion audio: toolbar mute + playing indicator", () => {
+  it("mutes through WebView2's mute-only API and reads playback from it", () => {
+    expect(AUDIO_RS_SOURCE).toContain("SetIsMuted");
+    expect(AUDIO_RS_SOURCE).toContain("IsMuted");
+    expect(AUDIO_RS_SOURCE).toContain("IsDocumentPlayingAudio");
+    expect(AUDIO_RS_SOURCE).not.toContain("SetVolume");
+  });
+
+  it("persists one global mute, default unmuted", () => {
+    expect(SETTINGS_RS_SOURCE).toContain("settings.companion_muted");
+    expect(SETTINGS_RS_SOURCE).toContain("DEFAULT_COMPANION_MUTED");
+    expect(SETTINGS_RS_SOURCE).toMatch(/DEFAULT_COMPANION_MUTED:\s*bool\s*=\s*false/);
+    expect(LIB_SOURCE).toContain("fn get_companion_audio_state");
+    expect(LIB_SOURCE).toContain("fn set_companion_muted");
+    expect(API_SOURCE).toContain("get_companion_audio_state");
+    expect(API_SOURCE).toContain("set_companion_muted");
+  });
+
+  it("heals a fresh WebView toward the persisted mute on read and creation", () => {
+    expect(ROUTE_SOURCE).toContain("getCompanionAudioState()");
+    expect(ROUTE_SOURCE).toContain("setCompanionMuted(!wasMuted)");
+    expect(AUDIO_RS_SOURCE).toContain("apply_muted(app, persisted)");
+  });
+
+  it("keeps the toggle keyboard-accessible with pressed state and the indicator tooltip-only", () => {
+    expect(ROUTE_SOURCE).toContain("aria-pressed={companionMuted}");
+    expect(ROUTE_SOURCE).toContain("Mute companion audio");
+    expect(ROUTE_SOURCE).toContain("Unmute companion audio");
+    expect(ROUTE_SOURCE).toContain("qlw__companion-playing");
+    expect(ROUTE_SOURCE).toContain("Playing audio");
+    expect(ROUTE_SOURCE).toContain('role="img"');
+  });
+
+  it("gates every audio chrome on the docked pane — floating and no-URL states gain none", () => {
+    const barAt = ROUTE_SOURCE.indexOf("qlw__companion-bar");
+    const toggleAt = ROUTE_SOURCE.indexOf("onclick={toggleCompanionMute}");
+    const indicatorAt = ROUTE_SOURCE.indexOf("qlw__companion-playing");
+    expect(barAt).toBeGreaterThan(-1);
+    // The toggle and the indicator both live inside the docked pane's own
+    // toolbar, which itself renders only while companionVisible holds.
+    expect(toggleAt).toBeGreaterThan(barAt);
+    expect(indicatorAt).toBeGreaterThan(barAt);
+    expect(ROUTE_SOURCE).toContain("{#if companionVisible}");
+  });
+
+  it("links loud/soft straight to the OS mixer instead of describing the way in words", () => {
+    // The moment-of-use shortcut supersedes the earlier Settings paragraph:
+    // no audio help text lives in Settings anymore.
+    expect(SETTINGS_SOURCE).not.toContain("Volume Mixer");
+    expect(SETTINGS_SOURCE).not.toContain("volume slider");
+    expect(LIB_SOURCE).toContain("fn open_volume_mixer");
+    expect(LIB_SOURCE).toContain("ms-settings:apps-volume");
+    expect(API_SOURCE).toContain("open_volume_mixer");
+    expect(ROUTE_SOURCE).toContain("onclick={openMixer}");
+    expect(ROUTE_SOURCE).toContain("Open volume mixer");
+    expect(ROUTE_SOURCE).toContain('icon="sliders"');
+    // The shortcut lives inside the docked pane's own toolbar, like the rest
+    // of the audio chrome — floating and no-URL states gain nothing.
+    const barAt = ROUTE_SOURCE.indexOf("qlw__companion-bar");
+    expect(ROUTE_SOURCE.indexOf("onclick={openMixer}")).toBeGreaterThan(barAt);
   });
 });

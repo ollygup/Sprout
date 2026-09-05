@@ -633,6 +633,7 @@ mod tests {
                 companion_url: None,
                 companion_height_ratio: settings::DEFAULT_COMPANION_HEIGHT_RATIO,
                 companion_url_list: Vec::new(),
+                companion_muted: false,
             },
         )
         .unwrap();

@@ -4,6 +4,7 @@
   import { listen } from "@tauri-apps/api/event";
   import type {
     Clip,
+    CompanionAudioState,
     Group,
     LaunchEntry,
     LaunchReport,
@@ -11,6 +12,7 @@
   } from "$lib/types";
   import {
     copyClip,
+    getCompanionAudioState,
     getQuickLaunchDockState,
     getSettings,
     listClips,
@@ -19,7 +21,9 @@
     listQuickActions,
     openCompanionExternal,
     openSprout,
+    openVolumeMixer,
     runQuickAction,
+    setCompanionMuted,
     startLaunchEntry,
     startQuickLaunch,
     switchQuickLaunchDockEdge,
@@ -152,6 +156,14 @@
   let companionFailedUrl: string | null = $state(null);
   let companionFailureDetail = $state("");
   let companionOpeningExternal = $state(false);
+  let companionMixerOpening = $state(false);
+  // Companion audio: persisted global mute plus the live playing read. The
+  // toggle and the indicator render only inside the docked pane's own
+  // toolbar, so floating and no-URL states gain no audio chrome.
+  let companionMuted = $state(false);
+  let companionPlaying = $state(false);
+  let companionMuteBusy = $state(false);
+  let companionAudioTimer: ReturnType<typeof setInterval> | undefined;
   function hasCompanionUrl(url: string | null): url is string {
     return typeof url === "string" && url.trim().length > 0;
   }
@@ -212,6 +224,15 @@
       }
       // Ensure native webview reflects new URL / ratio (direct navigation, not iframe, so X-Frame-Options never blocks)
       void syncCompanionWebview();
+      // The persisted mute is the source of truth — reading heals a fresh
+      // WebView toward it, so a recreated pane never comes back loud.
+      try {
+        const audio = await getCompanionAudioState();
+        companionMuted = audio.muted;
+        companionPlaying = audio.playing;
+      } catch (e) {
+        console.error(e);
+      }
     } catch (e) {
       console.error(e);
     }
@@ -241,6 +262,36 @@
       error = `Couldn't open the companion in your browser — ${String(e)}`;
     } finally {
       companionOpeningExternal = false;
+    }
+  }
+  // The toolbar's volume-mixer shortcut: loud/soft lives in the OS mixer, so
+  // the pane links straight there instead of describing the way in words.
+  async function openMixer() {
+    if (companionMixerOpening) return;
+    companionMixerOpening = true;
+    try {
+      await openVolumeMixer();
+    } catch (e) {
+      error = `Couldn't open the volume mixer — ${String(e)}`;
+    } finally {
+      companionMixerOpening = false;
+    }
+  }
+  // The toolbar's mute toggle: persists globally, silences the live WebView,
+  // and reads back at once so silence never feels broken.
+  async function toggleCompanionMute() {
+    if (companionMuteBusy) return;
+    const wasMuted = companionMuted;
+    companionMuteBusy = true;
+    try {
+      const next = await setCompanionMuted(!wasMuted);
+      companionMuted = next.muted;
+      companionPlaying = next.playing;
+    } catch (e) {
+      console.error(e);
+      error = `Couldn't ${wasMuted ? "unmute" : "mute"} the companion — ${String(e)}`;
+    } finally {
+      companionMuteBusy = false;
     }
   }
   async function companionRetry() {
@@ -404,6 +455,16 @@
           companionWebviewFailed = false;
           companionFailedUrl = null;
           companionFailureDetail = "";
+          // A fresh WebView starts unmuted — push the persisted choice back
+          // in before anything audible can leak through.
+          void getCompanionAudioState()
+            .then((audio) => {
+              companionMuted = audio.muted;
+              companionPlaying = audio.playing;
+            })
+            .catch((e) => {
+              console.error("companion audio sync failed", e);
+            });
         });
         wv.once("tauri://error", (e) => {
           if (companionWebview !== wv) return;
@@ -480,10 +541,17 @@
     listen<string>("quick-launch-dock-error", (e) => {
       error = e.payload;
     }).then((fn) => unlisteners.push(fn));
+    // The mute toggle fans its state out so the indicator follows at once,
+    // without waiting for the next poll below.
+    listen<CompanionAudioState>("companion-audio-changed", (e) => {
+      companionMuted = e.payload.muted;
+      companionPlaying = e.payload.playing;
+    }).then((fn) => unlisteners.push(fn));
     return () => {
       unlisteners.forEach((fn) => fn());
       clearTimeout(copiedTimer);
       clearTimeout(runNoticeTimer);
+      clearInterval(companionAudioTimer);
       // Cleanup companion webview on unmount
       if (companionWebview) {
         void companionWebview.close().catch(() => {});
@@ -501,6 +569,24 @@
     void qlwMainEl;
     void companionFrameWrapEl;
     void syncCompanionWebview();
+  });
+
+  // The playing indicator polls the live WebView while the pane shows — the
+  // cheapest honest read, with no animation to honor reduced motion.
+  $effect(() => {
+    if (!companionVisible) return;
+    const sync = async () => {
+      try {
+        const audio = await getCompanionAudioState();
+        companionMuted = audio.muted;
+        companionPlaying = audio.playing;
+      } catch (e) {
+        console.error(e);
+      }
+    };
+    void sync();
+    companionAudioTimer = setInterval(() => void sync(), 2500);
+    return () => clearInterval(companionAudioTimer);
   });
 
   $effect(() => {
@@ -1195,7 +1281,35 @@
             <IconButton icon="chevron-right" label="Forward" quiet onclick={companionGoForward} />
           {/if}
           <span class="qlw__companion-url" title={companionUrl ?? ""}>{companionUrl}</span>
+          {#if companionPlaying}
+            <!-- The playing indicator: status only, never a control — the
+                 mute toggle beside it owns the action. Tooltip-grade per the
+                 row-glyph grammar; static, so reduced motion stays still. -->
+            <span
+              class="qlw__companion-playing"
+              role="img"
+              aria-label={companionMuted ? "Playing audio (muted)" : "Playing audio"}
+              title={companionMuted ? "Playing audio (muted)" : "Playing audio"}
+            >
+              <Icon name={companionMuted ? "volume-muted" : "volume"} size={13} />
+            </span>
+          {/if}
           <span class="qlw__companion-spacer" aria-hidden="true"></span>
+          <IconButton
+            icon={companionMuted ? "volume-muted" : "volume"}
+            label={companionMuted ? "Unmute companion audio" : "Mute companion audio"}
+            quiet
+            disabled={companionMuteBusy}
+            aria-pressed={companionMuted}
+            onclick={toggleCompanionMute}
+          />
+          <IconButton
+            icon="sliders"
+            label={companionMixerOpening ? "Opening volume mixer" : "Open volume mixer"}
+            quiet
+            disabled={companionMixerOpening}
+            onclick={openMixer}
+          />
           <IconButton
             icon="external"
             label={companionOpeningExternal ? "Opening externally" : "Open externally"}
@@ -1848,6 +1962,14 @@
     white-space: nowrap;
     font-family: var(--font-mono);
     font-size: var(--text-xs);
+    color: var(--text-muted);
+  }
+
+  /* The playing indicator: token color only, no motion — it must stay still
+     under reduced motion, so status reads without animation. */
+  .qlw__companion-playing {
+    display: inline-flex;
+    flex-shrink: 0;
     color: var(--text-muted);
   }
 
