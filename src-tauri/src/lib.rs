@@ -2018,10 +2018,13 @@ fn get_companion_height_ratio(
     Ok(db::load_companion_height_ratio_identified(&conn, identity.as_deref(), &device_name))
 }
 
-/// Per-monitor companion height ratio write (ticket 125): validated, clamped
-/// on read, persisted per monitor (falls back to global settings).
+/// Per-monitor companion height ratio write: validated, clamped on read,
+/// persisted per monitor (falls back to global settings). Notifies the Quick
+/// Launch window like every other companion writer, so a Settings save lands
+/// on the live pane instead of waiting for the next resolve.
 #[tauri::command]
 fn set_companion_height_ratio_for_display(
+    app: AppHandle,
     state: State<'_, AppState>,
     display: String,
     ratio: f64,
@@ -2031,7 +2034,10 @@ fn set_companion_height_ratio_for_display(
     let displays = appbar::cached_displays();
     let (device_name, identity) = resolve_display_keys(&display, &displays);
     let key = per_display_key(identity.as_deref(), &device_name);
-    db::save_companion_height_ratio(&conn, &key, ratio).map_err(|e| e.to_string())
+    db::save_companion_height_ratio(&conn, &key, ratio).map_err(|e| e.to_string())?;
+    drop(conn);
+    emit_quick_launch_changed(&app);
+    Ok(())
 }
 
 /// The dock toolbar's audio picture: persisted mute plus live playback.

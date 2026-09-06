@@ -160,6 +160,18 @@
   let companionFrameEl: HTMLIFrameElement | null = $state(null);
   let companionFrameWrapEl: HTMLDivElement | null = $state(null);
   let companionWebview: Webview | null = $state(null);
+  // Whether the cached handle finished backend registration (its created
+  // event fired). Distinguishes a child that died (drop the stale handle so
+  // the next pass recreates) from one still registering (leave it alone —
+  // nulling it now would fork a duplicate creation).
+  let companionWebviewBorn = false;
+  // How long a fresh child may take to finish backend registration before its
+  // silence turns loud — cold WebView2 profile init is slow, but a birth that
+  // never lands must say so instead of hanging forever with no pane and no
+  // word anywhere (ADR-0022 Companion is a native WebView2 child).
+  const COMPANION_BORN_TIMEOUT_MS = 10_000;
+  const COMPANION_BORN_TIMEOUT_MSG =
+    "Couldn't show the companion pane — it never finished loading.";
   let companionSyncRunning = false;
   let companionSyncPending = false;
   let companionWebviewFailed = $state(false);
@@ -221,9 +233,16 @@
         if (display) {
           await setCompanionHeightRatioForDisplay(display, clamped);
         }
-      } catch {}
+      } catch (e) {
+        // The global save above landed but this screen forgot — say so
+        // instead of looking applied (research 0004 rule 5: silence reads
+        // as breakage).
+        console.error(e);
+        error = `Couldn't save the Companion height for this screen — ${String(e)}`;
+      }
     } catch (e) {
       console.error(e);
+      error = `Couldn't save the Companion height — ${String(e)}`;
     }
   }
   async function refreshCompanion() {
@@ -241,13 +260,41 @@
     } catch (e) {
       console.error(e);
     }
+    // The backend state can lag the window right after a dock toggle — one
+    // shot at the per-monitor read turns that transient into a permanent
+    // fallback. Retry boundedly while the monitor is unknown; a genuinely
+    // monitorless dock still ends promptly, and a missing entry (not an
+    // unknown screen) stays a silent global fallback as before.
+    const RESOLVE_ATTEMPTS = 3;
+    const RESOLVE_RETRY_MS = 150;
+    const RESOLVE_FAILED_MSG =
+      "Couldn't read the Companion height for this screen — using the Settings height.";
     let perMonitor: number | null = null;
-    try {
-      const display = await resolveCompanionDisplay();
-      if (display) {
-        perMonitor = await getCompanionHeightRatio(display);
+    let displayResolved = false;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const display = await resolveCompanionDisplay();
+        if (display) {
+          displayResolved = true;
+          if (error === RESOLVE_FAILED_MSG) error = "";
+          try {
+            perMonitor = await getCompanionHeightRatio(display);
+          } catch (e) {
+            console.error(e);
+            error = `Couldn't read the Companion height for this screen — ${String(e)}`;
+          }
+          break;
+        }
+      } catch (e) {
+        console.error(e);
       }
-    } catch {}
+      if (attempt + 1 >= RESOLVE_ATTEMPTS || !dock.docked) break;
+      await new Promise((r) => setTimeout(r, RESOLVE_RETRY_MS));
+      await refreshDock();
+    }
+    if (!displayResolved && dock.docked && url) {
+      error = RESOLVE_FAILED_MSG;
+    }
     companionUrl = url;
     companionRatio = clampCompanionRatio(perMonitor ?? globalRatio);
     companionRatioReady = true;
@@ -339,6 +386,7 @@
   async function companionRetry() {
     const webview = companionWebview;
     companionWebview = null;
+    companionWebviewBorn = false;
     companionWebviewFailed = false;
     companionFailedUrl = null;
     companionFailureDetail = "";
@@ -447,6 +495,7 @@
       if (companionWebview) {
         try { await companionWebview.close(); } catch {}
         companionWebview = null;
+        companionWebviewBorn = false;
       }
       companionWebviewFailed = false;
       companionFailedUrl = null;
@@ -469,6 +518,7 @@
       if (companionWebview) {
         try { await companionWebview.close(); } catch {}
         companionWebview = null;
+        companionWebviewBorn = false;
       }
       const targetUrl = companionUrl;
       try {
@@ -494,13 +544,27 @@
         (wv as any)._companionUrl = targetUrl;
         wv.once("tauri://created", () => {
           if (companionWebview !== wv) return;
+          companionWebviewBorn = true;
           console.log("companion webview created", targetUrl);
           void wv.setZoom(companionZoomForWidth(bounds.width)).catch((e) => {
             console.error("syncCompanionWebview zoom failed", e);
           });
+          // A child born while the details dialog sits above starts yielded —
+          // the synchronous hide after construction can lose to backend
+          // creation, and a native child paints above all web content, so the
+          // created callback re-asserts the yield (ADR-0022 Companion is a
+          // native WebView2 child).
+          if (detailsAction !== null) {
+            // Registration may still be landing — the created callback above
+            // retries with the error line attached, so a race here stays quiet.
+            void wv.hide().catch((e) => console.error(e));
+          }
           companionWebviewFailed = false;
           companionFailedUrl = null;
           companionFailureDetail = "";
+          // A late birth still heals — the timeout banner claimed the error
+          // line only because nothing had arrived yet.
+          if (error === COMPANION_BORN_TIMEOUT_MSG) error = "";
           // A fresh WebView starts unmuted — push the persisted choice back
           // in before anything audible can leak through.
           void getCompanionAudioState()
@@ -517,15 +581,31 @@
           console.error("companion webview error", e);
           void wv.close().catch(() => {});
           companionWebview = null;
+          companionWebviewBorn = false;
           companionFailedUrl = targetUrl;
           companionFailureDetail = String(e.payload ?? "");
           companionWebviewFailed = true;
         });
         companionWebview = wv;
+        companionWebviewBorn = false;
         companionWebviewFailed = false;
+        // A child created while the details dialog sits above starts yielded
+        // at birth — the created callback above re-asserts the hide there, so
+        // nothing hides here: the child cannot paint before registration, and
+        // every call until then only throws WebviewNotFound noise.
+        // The quiet passes below stay silent by design, so a birth that never
+        // completes expires here instead of hanging forever with no pane and
+        // no word anywhere (ADR-0022 Companion is a native WebView2 child).
+        window.setTimeout(() => {
+          if (companionWebview === wv && !companionWebviewBorn && !companionWebviewFailed) {
+            console.error("companion webview creation timed out", targetUrl);
+            if (!error) error = COMPANION_BORN_TIMEOUT_MSG;
+          }
+        }, COMPANION_BORN_TIMEOUT_MS);
       } catch (e) {
         console.error("syncCompanionWebview create failed", e);
         companionWebview = null;
+        companionWebviewBorn = false;
         companionFailedUrl = targetUrl;
         companionFailureDetail = String(e);
         companionWebviewFailed = true;
@@ -535,12 +615,27 @@
     // Existing webview: update bounds live
     const webview = companionWebview;
     if (!webview) return;
+    // A child still registering answers every call with WebviewNotFound until
+    // its created event lands — queue nothing, log nothing; the creation
+    // timeout above turns a never-landing registration loud (ADR-0022
+    // Companion is a native WebView2 child).
+    if (!companionWebviewBorn) return;
     try {
       await webview.setPosition(new LogicalPosition(bounds.x, bounds.y));
       await webview.setSize(new LogicalSize(bounds.width, bounds.height));
       await webview.setZoom(companionZoomForWidth(bounds.width));
     } catch (e) {
+      // A registered child answering this way is gone without its null-out
+      // landing — drop the stale handle so the next pass recreates instead of
+      // throwing on a dead label forever. An as-yet-unregistered child keeps
+      // its handle: its created callback settles it (ADR-0022 Companion is a
+      // native WebView2 child).
       console.error("syncCompanionWebview bounds failed", e);
+      if (companionWebview === webview && companionWebviewBorn) {
+        companionWebview = null;
+        companionWebviewBorn = false;
+        companionSyncPending = true;
+      }
     }
   }
 
@@ -606,6 +701,7 @@
       if (companionWebview) {
         void companionWebview.close().catch(() => {});
         companionWebview = null;
+        companionWebviewBorn = false;
       }
     };
   });
@@ -619,6 +715,93 @@
     void qlwMainEl;
     void companionFrameWrapEl;
     void syncCompanionWebview();
+  });
+
+  // Resolves the backend's live Companion child by label. The cached handle
+  // can go stale — a close racing its null-out leaves a dead label behind —
+  // and every call through it then fails with "webview not found" while the
+  // pane stays bricked. Adopting the live child heals that; the URL tag rides
+  // along so the next bounds pass sees no change to recreate (ADR-0022
+  // Companion is a native WebView2 child).
+  async function liveCompanionChild(): Promise<Webview | null> {
+    if (!isTauri || !companionUrl) return null;
+    try {
+      const live = await Webview.getByLabel("companion");
+      if (!live) return null;
+      (live as any)._companionUrl = companionUrl;
+      companionWebview = live;
+      companionWebviewBorn = true;
+      return live;
+    } catch (e) {
+      console.error(e);
+      return null;
+    }
+  }
+
+  // The details dialog always sits above the Companion pane. The pane is a
+  // native child window, which paints above all web content — no CSS z-index
+  // can cover it — so the child yields while the dialog is open and is
+  // restored after (ADR-0022 Companion is a native WebView2 child).
+  $effect(() => {
+    if (!isTauri) return;
+    const webview = companionWebview;
+    const dialogOpen = detailsAction !== null;
+    if (!webview) return;
+    // A child still registering has nothing to hide or show yet — its created
+    // callback re-asserts the yield when the dialog sits above, so attempting
+    // here only throws WebviewNotFound noise (ADR-0022 Companion is a native
+    // WebView2 child).
+    if (!companionWebviewBorn) return;
+    if (dialogOpen) {
+      // A refused hide must reach the error line, not just the console — a
+      // native child paints above all web content, so a silent denial reads
+      // as the dialog sliding behind the pane (ADR-0022 Companion is a
+      // native WebView2 child).
+      void webview.hide().catch(async (e) => {
+        console.error(e);
+        const live = await liveCompanionChild();
+        if (live && live !== webview) {
+          try {
+            await live.hide();
+          } catch (e2) {
+            console.error(e2);
+            error = `Couldn't hide the companion pane — ${String(e2)}`;
+          }
+        } else if (!live && companionWebview === webview && companionWebviewBorn) {
+          // Nothing alive under the label and the cached handle was
+          // registered — it died without its null-out landing. Drop it so the
+          // next pass recreates; silence is correct, nothing was covering.
+          companionWebview = null;
+          companionWebviewBorn = false;
+          void syncCompanionWebview();
+        }
+      });
+    } else {
+      void (async () => {
+        try {
+          await webview.show();
+        } catch (e) {
+          console.error(e);
+          const live = await liveCompanionChild();
+          if (live && live !== webview) {
+            try {
+              await live.show();
+            } catch (e2) {
+              console.error(e2);
+              error = `Couldn't restore the companion pane — ${String(e2)}`;
+            }
+          } else if (!live && companionWebview === webview && companionWebviewBorn) {
+            // The reported case: the cached handle outlived its child. Drop
+            // it — the trailing sync recreates silently, so no error line.
+            companionWebview = null;
+            companionWebviewBorn = false;
+          } else if (live) {
+            error = `Couldn't restore the companion pane — ${String(e)}`;
+          }
+        }
+        await syncCompanionWebview();
+      })();
+    }
   });
 
   // The playing indicator polls the live WebView while the pane shows — the
@@ -1415,7 +1598,9 @@
           {:else if useWebview}
             <!-- The placeholder reserves the content area while the native WebView2 is created. -->
             <div class="qlw__companion-placeholder" aria-hidden="true">
-              <p class="qlw__companion-placeholder-text">Loading {companionUrl}…</p>
+              {#if detailsAction === null}
+                <p class="qlw__companion-placeholder-text">Loading {companionUrl}…</p>
+              {/if}
             </div>
           {:else}
             <!-- Fallback iframe for browser preview / when Tauri not available.

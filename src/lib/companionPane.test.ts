@@ -240,3 +240,46 @@ describe("Companion audio: toolbar mute + playing indicator", () => {
     expect(ROUTE_SOURCE.indexOf("onclick={openMixer}")).toBeGreaterThan(barAt);
   });
 });
+
+describe("Companion height resolve never fails silently (ticket 143)", () => {
+  it("retries a bounded number of times when the monitor is absent", () => {
+    // Right after a dock toggle the backend state can lag the window — one
+    // shot at the per-monitor read turns a transient into a permanent
+    // fallback. Retry is bounded so a genuinely monitorless dock still ends.
+    expect(ROUTE_SOURCE).toContain("RESOLVE_ATTEMPTS");
+    expect(ROUTE_SOURCE).toContain("RESOLVE_RETRY_MS");
+    expect(ROUTE_SOURCE).toContain("setTimeout");
+  });
+
+  it("says so when it genuinely cannot resolve the screen", () => {
+    expect(ROUTE_SOURCE).toContain(
+      "Couldn't read the Companion height for this screen",
+    );
+  });
+
+  it("says so when a drag persist fails instead of looking applied", () => {
+    expect(ROUTE_SOURCE).toContain("Couldn't save the Companion height");
+  });
+});
+
+describe("Companion unborn window stays quiet", () => {
+  it("skips bounds syncs while the child is still registering", () => {
+    // setPosition/setSize/setZoom on a handle between `new Webview()` and its
+    // created event throw WebviewNotFound on every pass until registration
+    // lands (slow on cold WebView2 profile init) — the pass must return
+    // before touching the child, not attempt and log.
+    const boundsAt = ROUTE_SOURCE.indexOf("Existing webview: update bounds live");
+    expect(boundsAt).toBeGreaterThan(-1);
+    const boundsSource = ROUTE_SOURCE.slice(boundsAt, boundsAt + 1200);
+    expect(boundsSource).toContain("if (!companionWebviewBorn) return;");
+    expect(boundsSource).toContain("setPosition");
+  });
+
+  it("fails loud when registration never lands", () => {
+    // The quiet passes above stay silent by design, so a birth that never
+    // completes must expire loudly instead of hanging forever with no pane
+    // and no word anywhere.
+    expect(ROUTE_SOURCE).toContain("COMPANION_BORN_TIMEOUT_MS");
+    expect(ROUTE_SOURCE).toContain("never finished loading");
+  });
+});

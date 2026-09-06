@@ -12,6 +12,7 @@
     importBackup,
     inspectBackup,
     listDisplays,
+    setCompanionHeightRatioForDisplay,
     setDisplayDockEdge,
     setDisplayDockMode,
     setDisplayDockWidthPct,
@@ -149,6 +150,11 @@
   let companionUrl: string | null = $state(null);
   let companionHeightRatio = $state(0.40);
   let companionUrlList = $state<CompanionSite[]>([]);
+  // Whether the companion knobs were authored on this page since mount —
+  // the page loads once while the dock divider and the companion manager
+  // write out-of-band, so save must tell "left alone" from "edited here".
+  let companionUrlTouched = $state(false);
+  let companionRatioTouched = $state(false);
   let loading = $state(true);
   let loadFailed = $state(false);
   let saving = $state(false);
@@ -413,6 +419,9 @@
     const off = listen("displays-changed", () => {
       void loadDisplays();
     }).catch(() => () => {});
+    const offCompanion = listen("quick-launch-changed", () => {
+      void refreshCompanionKnobs();
+    }).catch(() => () => {});
     const offDirtyClose = listen("settings-dirty-close-requested", () => {
       if (!isDirty || guardOpen) return;
       pendingNav = null;
@@ -424,6 +433,7 @@
     window.addEventListener("focus", onFocus);
     return () => {
       void off.then((fn) => fn());
+      void offCompanion.then((fn) => fn());
       void offDirtyClose.then((fn) => fn());
       window.removeEventListener("focus", onFocus);
       // Clear the backend flag when leaving the Settings route while
@@ -484,6 +494,31 @@
       loadFailed = true;
     } finally {
       loading = false;
+    }
+  }
+
+  // The dock divider and the companion manager write out-of-band while this
+  // page loads once on mount — refresh the untouched companion knobs live so
+  // the page never displays (or later saves back) stale values. Touched knobs
+  // keep the user's edits; the save-time conflict check still guards those.
+  // No loading chrome: this is a background truth-sync, and a failed one
+  // degrades to today's behavior (save-time merge) rather than an error.
+  async function refreshCompanionKnobs() {
+    try {
+      const fresh = await getSettings();
+      if (!companionUrlTouched) {
+        companionUrl = fresh.companion_url ?? null;
+        if (baseline) baseline.companionUrl = companionUrl;
+      }
+      if (!companionRatioTouched) {
+        companionHeightRatio = clampCompanionRatio(fresh.companion_height_ratio ?? 0.40);
+        if (baseline) baseline.companionHeightRatio = companionHeightRatio;
+      }
+      const freshList = normalizeCompanionList(fresh.companion_url_list ?? []);
+      companionUrlList = [...freshList];
+      if (baseline) baseline.companionUrlList = [...freshList];
+    } catch (e) {
+      console.error("settings companion refresh failed", e);
     }
   }
 
@@ -640,9 +675,11 @@
     dockDensity = baseline.dockDensity;
     revealDwellMs = baseline.revealDwellMs;
     revealSensitivityPx = baseline.revealSensitivityPx;
-    companionUrl = baseline.companionUrl;
-    companionHeightRatio = baseline.companionHeightRatio;
-    companionUrlList = [...baseline.companionUrlList];
+      companionUrl = baseline.companionUrl;
+      companionHeightRatio = baseline.companionHeightRatio;
+      companionUrlList = [...baseline.companionUrlList];
+      companionUrlTouched = false;
+      companionRatioTouched = false;
     if (displays.length > 1) {
       displayEdges = { ...baselineDisplayEdges };
       displayModes = { ...baselineDisplayModes };
@@ -661,6 +698,48 @@
     // Clear per-monitor row errors before batch save.
     displayErrors = {};
     try {
+      // Companion knobs are written out-of-band (dock divider, companion
+      // manager) while this page loads once on mount — saving the stale
+      // baseline back over them silently un-configures the pane. Knobs left
+      // alone ride the fresh read; a knob edited here AND changed out there
+      // refuses with an honest error instead of picking a silent winner. The
+      // companion manager owns the site list, so it always rides fresh.
+      const clampedPageRatio = clampCompanionRatio(companionHeightRatio);
+      let saveCompanionUrl = companionUrl;
+      let saveCompanionRatio = clampedPageRatio;
+      let saveCompanionList = normalizeCompanionList(companionUrlList);
+      try {
+        const fresh = await getSettings();
+        if (!companionUrlTouched) {
+          saveCompanionUrl = fresh.companion_url ?? null;
+        } else if (
+          baseline &&
+          (fresh.companion_url ?? null) !== (baseline.companionUrl ?? null) &&
+          (fresh.companion_url ?? null) !== (companionUrl ?? null)
+        ) {
+          throw new Error(
+            "The Companion active site changed elsewhere — Discard and re-apply your edits."
+          );
+        }
+        if (!companionRatioTouched) {
+          saveCompanionRatio = clampCompanionRatio(fresh.companion_height_ratio ?? 0.40);
+        } else if (
+          baseline &&
+          clampCompanionRatio(fresh.companion_height_ratio ?? 0.40) !== baseline.companionHeightRatio &&
+          clampCompanionRatio(fresh.companion_height_ratio ?? 0.40) !== clampedPageRatio
+        ) {
+          throw new Error(
+            "The Companion pane height changed in the dock while Settings was open — Discard and re-apply your edits."
+          );
+        }
+        saveCompanionList = normalizeCompanionList(fresh.companion_url_list ?? []);
+      } catch (e) {
+        if (e instanceof Error && e.message.includes("Discard and re-apply")) throw e;
+        console.error("settings companion refresh failed", e);
+      }
+      companionUrl = saveCompanionUrl;
+      companionHeightRatio = saveCompanionRatio;
+      companionUrlList = [...saveCompanionList];
       // Ticket 113: clamp reveal knobs to sane ranges before persisting
       // (same 0–1000 ms / 0–50 px the backend validates; broken stored
       // values already fell back to defaults on load).
@@ -707,6 +786,7 @@
       // Disabled seam options prevent picking an ineligible edge, but a race
       // (screens moved after load) still surfaces as a row error.
       let perMonitorError = false;
+      let companionHeightError = "";
       // A single physical display has no visible per-monitor controls, so its
       // remembered values must follow the global knobs. DEV preview displays
       // are visual fixtures only and must never write fake monitor records.
@@ -747,6 +827,21 @@
         }
       }
       await reconcileQuickLaunchSettings();
+      // Single display only: its height memory tracks the global knob, the
+      // same rule as the width memory above — otherwise the surviving
+      // per-monitor entry shadows the just-saved global and the knob reads
+      // dead. Several displays keep their own memories (per-screen heights
+      // stay distinct); the global remains their fallback.
+      if (physicalDisplays.length === 1 && displayTargets.length === 1) {
+        try {
+          await setCompanionHeightRatioForDisplay(
+            displayTargets[0].device_name,
+            clampedCompanionRatio
+          );
+        } catch (e) {
+          companionHeightError = `Couldn't save the Companion height for this screen — ${String(e)}`;
+        }
+      }
       if (perMonitorError) {
         error = "Some per-monitor choices couldn't be saved — see the rows below.";
         // A failing save expands its owning group and lands focus on the
@@ -758,6 +853,8 @@
           const rowId = `per-monitor-edge-${failed.device_name.replace(/[^a-zA-Z0-9]/g, "-")}`;
           document.getElementById(rowId)?.focus();
         }
+      } else if (companionHeightError) {
+        error = companionHeightError;
       } else {
         saved = "Saved — the next run honors these.";
       }
@@ -799,6 +896,8 @@
         baselineDisplayModes = { ...displayModes };
         baselineDisplayWidths = { ...displayWidths };
       }
+      companionUrlTouched = false;
+      companionRatioTouched = false;
       // Keep the Settings object in sync so the next save's passthrough
       // (launch_groups etc) stays truthful.
       settings = {
@@ -1506,7 +1605,10 @@
                 id="companion-url"
                 variant="small"
                 value={companionUrl ?? ""}
-                onchange={(v) => (companionUrl = v ? v : null)}
+                onchange={(v) => {
+                  companionUrlTouched = true;
+                  companionUrl = v ? v : null;
+                }}
               >
                 <option value="">Off</option>
                 {#each companionUrlList as site (site.url)}
@@ -1534,7 +1636,10 @@
                 step="0.05"
                 autocomplete="off"
                 value={companionHeightRatio}
-                oninput={(e) => (companionHeightRatio = Number((e.target as HTMLInputElement).value))}
+                oninput={(e) => {
+                  companionRatioTouched = true;
+                  companionHeightRatio = Number((e.target as HTMLInputElement).value);
+                }}
               />
               <span class="knob__unit">× dock</span>
             </div>
