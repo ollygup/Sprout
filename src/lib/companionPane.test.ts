@@ -162,7 +162,11 @@ describe("Companion native WebView contract", () => {
   });
 
   it("forwards Sprout's concrete theme to child WebViews", () => {
-    expect(THEME_SOURCE).toContain("getCurrentWindow().setTheme(applied)");
+    // Pins push their concrete native theme; system mode passes null (follow
+    // the OS) so the forced value never poisons the matchMedia read the
+    // system resolution depends on — see themeSystem.test.ts for the loop.
+    expect(THEME_SOURCE).toContain("getCurrentWindow().setTheme(native)");
+    expect(THEME_SOURCE).toContain('mode === "system" ? null : mode');
   });
 
   it("reconciles the live dock after the complete Settings batch", () => {

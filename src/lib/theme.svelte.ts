@@ -33,13 +33,19 @@ function parseMode(value: string | null): ThemeMode {
   return value === "light" || value === "dark" ? value : "system";
 }
 
-function syncNativeWindowTheme(applied: "light" | "dark") {
+function syncNativeWindowTheme(mode: ThemeMode) {
   if (
     typeof window === "undefined" ||
     !("__TAURI_INTERNALS__" in window || "__TAURI_IPC__" in window)
   ) return;
+  // System mode passes null (follow the OS) rather than the resolved concrete
+  // value: WebView2 reports the native window theme back through the same
+  // `prefers-color-scheme` surface this module reads, so pinning the resolved
+  // value poisons the next read and System can never leave it (research 0012
+  // theme contract; the null-follows-system shape is the setTheme API's own).
+  const native = mode === "system" ? null : mode;
   void import("@tauri-apps/api/window")
-    .then(({ getCurrentWindow }) => getCurrentWindow().setTheme(applied))
+    .then(({ getCurrentWindow }) => getCurrentWindow().setTheme(native))
     .catch((error) => console.error("native theme update failed", error));
 }
 
@@ -51,7 +57,7 @@ function apply(mode: ThemeMode) {
   theme.mode = mode;
   theme.applied = applied;
   document.documentElement.dataset.theme = applied;
-  syncNativeWindowTheme(applied);
+  syncNativeWindowTheme(mode);
   try {
     localStorage.setItem(STORAGE_KEY, mode);
   } catch {
