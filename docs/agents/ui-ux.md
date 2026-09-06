@@ -1,0 +1,8 @@
+# UI/UX — agent reference
+
+> Read this file when: you change any UI (component, page, styling), make any
+> UI/UX design decision, or change any UI dimension. Otherwise skip it.
+
+- WHEN you change any UI (component, page, styling) → MUST USE the `web-design-guidelines` and `frontend-design` skills AND MUST REUSE the existing design system — tokens from `src/lib/styles/tokens.css`, components from `src/lib/components/`. MUST NOT introduce ad-hoc colors, type sizes, radii, or one-off component patterns. WHEN no shared pattern genuinely fits → MUST capture the deviation in the ticket and get it reviewed before shipping.
+- WHEN you make any UI/UX design decision → MUST FIRST read the standing research notes under `docs/research/` — `0004-progressive-disclosure-and-clips.md`, `0005-page-chrome-consistency.md`, `0006-notion-design-patterns.md` (Notion's factual method: visibility-on-surface vs configuration-elsewhere, minimal-until-content defaults, explicit-setup gating; pattern 8 covers view-scoped switches), `0007-export-scope-selection-placement.md` (per-use scope choices → moment-of-use dialogs), and `0008-feature-menus-over-toolbar-checkboxes.md` (opt-in feature switches → the page-features menu; classify a knob before placing it) — AND MUST cite the rule you applied. WHEN you gather new evidence for an existing topic → MUST extend that topic's note (e.g. Notion findings go into 0006); WHEN the topic is genuinely NEW → MUST create a NEW numbered research note.
+- WHEN you change any UI dimension → MUST FIRST scan `src-tauri/src/constants/window.rs` AND MUST NOT re-declare its values in another module (single size source; details in Conventions → Window sizing).
