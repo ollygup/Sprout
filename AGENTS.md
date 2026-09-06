@@ -38,6 +38,8 @@ tools\sync.ps1 -Up
   - WHEN you join work already in progress and no fresh snapshot exists for this session → MUST first check for a snapshot from earlier the same session: WHEN such a snapshot exists → MUST sync `-Up` first; WHEN no snapshot exists → MUST back up local edits before any `-Down` (it overwrites differing local files).
 - WHEN invoking the sync script → MUST invoke as `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "tools\sync.ps1" -Up` (or `-Down`) — PowerShell's execution policy blocks `.ps1` directly (same reason npm is `npm.cmd`).
 - WHEN you have run `-Up` → MUST verify the sync by running `-Up` again — MUST expect `0 copied` when in sync. MUST NOT run `-Up` without a snapshot; the script refuses.
+- WHEN you run 2+ tickets concurrently in one session as a batch → MUST follow `docs/agents/parallel-tickets.md`: exactly one coordinator runs `-Down`/`-Up` and the ownership gate; ticket workers MUST NOT sync. MUST NOT run parallel tickets as independent sessions sharing one working copy.
+- WHEN you were spawned as a ticket worker under a coordinator in a parallel batch (your spawning prompt designates you as one) → the Core sync and publish duties DO NOT apply to you: session-start `-Down`, per-unit/session-end `-Up` and gate-before-`-Up`, and any contact with the share UNC, `.sync-state.json`, or git. Any future MUST whose action publishes state falls inside this exemption automatically. Everything else in this file and its topic modules applies unchanged — topic-index WHEN reads are yours to decide, skills are yours to choose. MUST read `docs/agents/worker.md` and follow it.
 
 Full working-copy detail (two homes, snapshot location, divergence handling, robocopy fallback) lives in `docs/agents/working-copy.md` — read it when Core sync isn't enough.
 
@@ -54,3 +56,5 @@ Full working-copy detail (two homes, snapshot location, divergence handling, rob
 | File/module layout | WHEN you touch files and need owners, or work tickets (AC tracking rule lives here) | `docs/agents/structure.md` |
 | Rust + Tauri + Svelte conventions | WHEN you touch Rust/Tauri/Svelte, constants, version, window sizing, module boundaries, `shared/`, or any Windows invocation | `docs/agents/conventions.md` |
 | Code comments | WHEN you write or edit code comments | `docs/agents/comments.md` |
+| Parallel tickets | WHEN you run 2+ tickets concurrently in one session as a batch | `docs/agents/parallel-tickets.md` |
+| Worker session | WHEN you were spawned as a ticket worker under a coordinator in a parallel batch | `docs/agents/worker.md` |
