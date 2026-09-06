@@ -309,12 +309,20 @@ export interface Settings {
   /** Companion height ratio (ticket 125): 0.25–0.60, default 0.40 — bottom fraction
    *  of the dock occupied by the web view. Per-monitor memory falls back here. */
   companion_height_ratio: number;
-  /** Companion saved URL list (ticket 125): https URLs edited in the main app,
-   *  deduped host+path case-insensitive. Machine-local. */
-  companion_url_list: string[];
+  /** Companion saved URL list: https URLs edited in the main app, each
+   *  with the user's display name for it (blank = render the URL).
+   *  Deduped on the URL trimmed case-insensitive. Machine-local. */
+  companion_url_list: CompanionSite[];
   /** Companion mute (global, persisted): the dock toolbar's mute toggle writes
    *  it; the live WebView heals toward it on every read. Default unmuted. */
   companion_muted: boolean;
+}
+
+/** One Companion saved site: its https URL plus the user's display name for
+ *  it. A blank name renders as the URL everywhere. */
+export interface CompanionSite {
+  url: string;
+  name: string;
 }
 
 /** The dock Companion toolbar's audio picture: persisted mute plus live
@@ -521,6 +529,11 @@ export interface QuickLaunchDockState {
   blocked: string | null;
   left_eligible: boolean;
   right_eligible: boolean;
+  /** The device the live dock is attached to — null while floating, where
+   *  per-monitor memory does not apply. */
+  monitor: string | null;
+  /** The dock monitor's hardware identity when one resolved at dock time. */
+  monitor_identity: string | null;
 }
 
 /** One connected display (ticket 111): label, resolution, EDID identity

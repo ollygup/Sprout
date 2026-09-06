@@ -5,6 +5,7 @@
   import type {
     Clip,
     CompanionAudioState,
+    CompanionSite,
     Group,
     LaunchEntry,
     LaunchReport,
@@ -132,6 +133,8 @@
     blocked: null,
     left_eligible: true,
     right_eligible: true,
+    monitor: null,
+    monitor_identity: null,
   });
   // Ticket 119 Study A: already-docked middle line (seam) reuses the blocked
   // banner — same wall rule and same reason line as Settings.
@@ -146,7 +149,7 @@
   // Content-gated (0004:2 / 0006:11) — companionUrl==null → no Webview, no splitter, no chrome;
   // floating never shows the pane; per-monitor height ratio falls back to settings.
   let companionUrl: string | null = $state(null);
-  let companionUrlList: string[] = $state([]);
+  let companionUrlList: CompanionSite[] = $state([]);
   let companionRatio = $state(0.40);
   let companionCanGoBack = $state(false);
   let companionCanGoForward = $state(false);
@@ -179,18 +182,44 @@
   // Detect Tauri reliably — __TAURI_IPC__ is always present in Tauri webviews, __TAURI__ may be delayed
   const isTauri = typeof window !== "undefined" && !!((window as any).__TAURI__ || (window as any).__TAURI_IPC__ || (window as any).__TAURI_INTERNALS__);
   const useWebview = $derived(companionVisible && isTauri && !companionWebviewFailed);
-  // Splitter follows the 0.25–0.60 clamp (ticket 125) — single source with settings.rs
+  // Splitter follows the 0.25–0.60 clamp — single source with settings.rs
   function clampCompanionRatio(v: number): number {
-    return Math.min(0.60, Math.max(0.25, v));
+    const f = Number(v);
+    if (!Number.isFinite(f)) return 0.40;
+    return Math.min(0.60, Math.max(0.25, f));
+  }
+  // The launch gate: the native child is only created once the saved ratio
+  // for the actual dock monitor has resolved, so the first paint never sizes
+  // from the 0.40 init. After that the ratio always holds a resolved value.
+  let companionRatioReady = $state(false);
+  // The real dock monitor: the backend's live dock state names the device the
+  // dock is attached to, matched against the arrangement — per-monitor memory
+  // wins, the global ratio covers every miss (floating, unknown device).
+  async function resolveCompanionDisplay(): Promise<string | null> {
+    if (!dock.docked || !dock.monitor) return null;
+    try {
+      const displays = await listDisplays();
+      const match =
+        displays.find((d) => d.device_name === dock.monitor) ??
+        (dock.monitor_identity
+          ? displays.find((d) => d.identity === dock.monitor_identity)
+          : undefined);
+      return match?.device_name ?? null;
+    } catch {
+      return null;
+    }
   }
   async function persistCompanionRatio() {
     try {
       const clamped = clampCompanionRatio(companionRatio);
       await setCompanionHeightRatio(clamped);
       try {
-        const displays = await listDisplays();
-        if (displays.length > 0) {
-          await setCompanionHeightRatioForDisplay(displays[0].device_name, clamped);
+        // The drag happened on the live dock's monitor — remember it there,
+        // not on a proxy, so moving screens recalls each screen's height.
+        await refreshDock();
+        const display = await resolveCompanionDisplay();
+        if (display) {
+          await setCompanionHeightRatioForDisplay(display, clamped);
         }
       } catch {}
     } catch (e) {
@@ -198,48 +227,54 @@
     }
   }
   async function refreshCompanion() {
+    // Ordered launch reads: dock state first (which monitor the dock sits
+    // on), then the global ratio, then that monitor's override — the native
+    // child is created only after the resolved ratio lands.
+    await refreshDock();
+    let url: string | null = null;
+    let globalRatio = 0.40;
     try {
       const s = await getSettings();
-      companionUrl = s.companion_url;
+      url = s.companion_url ?? null;
       companionUrlList = s.companion_url_list ?? [];
-      const globalRatio = s.companion_height_ratio ?? 0.40;
-      // Per-monitor override: query the monitor the window sits on
-      let perMonitor: number | null = null;
-      try {
-        const displays = await listDisplays();
-        // Simplest: use first display as proxy for current monitor; the backend's
-        // dock memory already keys per-monitor, and the frontend's drag persists
-        // per monitor via setCompanionHeightRatioForDisplay with that display.
-        if (displays.length > 0) {
-          perMonitor = await getCompanionHeightRatio(displays[0].device_name);
-        }
-      } catch {}
-      companionRatio = clampCompanionRatio(perMonitor ?? globalRatio);
-      // Init history when url changes
-      if (companionUrl) {
-        if (companionHistory.length === 0 || companionHistory[0] !== companionUrl) {
-          companionHistory = [companionUrl];
-          companionHistoryIndex = 0;
-          companionCanGoBack = false;
-          companionCanGoForward = false;
-        }
-      } else {
-        companionHistory = [];
-        companionHistoryIndex = -1;
+      globalRatio = s.companion_height_ratio ?? 0.40;
+    } catch (e) {
+      console.error(e);
+    }
+    let perMonitor: number | null = null;
+    try {
+      const display = await resolveCompanionDisplay();
+      if (display) {
+        perMonitor = await getCompanionHeightRatio(display);
+      }
+    } catch {}
+    companionUrl = url;
+    companionRatio = clampCompanionRatio(perMonitor ?? globalRatio);
+    companionRatioReady = true;
+    // Init history when url changes
+    if (companionUrl) {
+      if (companionHistory.length === 0 || companionHistory[0] !== companionUrl) {
+        companionHistory = [companionUrl];
+        companionHistoryIndex = 0;
         companionCanGoBack = false;
         companionCanGoForward = false;
       }
-      // Ensure native webview reflects new URL / ratio (direct navigation, not iframe, so X-Frame-Options never blocks)
-      void syncCompanionWebview();
-      // The persisted mute is the source of truth — reading heals a fresh
-      // WebView toward it, so a recreated pane never comes back loud.
-      try {
-        const audio = await getCompanionAudioState();
-        companionMuted = audio.muted;
-        companionPlaying = audio.playing;
-      } catch (e) {
-        console.error(e);
-      }
+    } else {
+      companionHistory = [];
+      companionHistoryIndex = -1;
+      companionCanGoBack = false;
+      companionCanGoForward = false;
+    }
+    // The resolved ratio is in — re-sync so the first paint never measures a
+    // pre-layout rect at the init value (the ratio assignment above also
+    // re-fires the tracking effect; this covers the child already created).
+    void syncCompanionWebview();
+    // The persisted mute is the source of truth — reading heals a fresh
+    // WebView toward it, so a recreated pane never comes back loud.
+    try {
+      const audio = await getCompanionAudioState();
+      companionMuted = audio.muted;
+      companionPlaying = audio.playing;
     } catch (e) {
       console.error(e);
     }
@@ -419,13 +454,17 @@
       return;
     }
     if (!companionFrameWrapEl) return;
-    const bounds = companionWebviewBounds(companionFrameWrapEl.getBoundingClientRect());
     // Recreate if URL changed or not yet created
     const needsCreate = !companionWebview;
-    // For URL changes, easiest is to recreate the webview (Tauri Webview has no navigate API)
+    // For URL changes, easiest is to recreate the webview (Tauri WebView has no navigate API)
     // We track lastUrl via a hidden prop
     const lastUrl = (companionWebview as any)?._companionUrl as string | undefined;
     const urlChanged = lastUrl !== companionUrl;
+    // Launch gate: never create (or recreate) the native child before the
+    // saved ratio for the actual dock monitor has resolved — the re-sync
+    // after it lands performs the first sizing.
+    if ((needsCreate || urlChanged) && !companionRatioReady) return;
+    const bounds = companionWebviewBounds(companionFrameWrapEl.getBoundingClientRect());
     if (needsCreate || urlChanged) {
       if (companionWebview) {
         try { await companionWebview.close(); } catch {}
@@ -621,6 +660,9 @@
     try {
       await toggleQuickLaunchDock();
       await refreshDock();
+      // A fresh dock can sit on another screen — re-resolve the Companion
+      // ratio for the monitor it actually landed on.
+      await refreshCompanion();
     } catch (e) {
       console.error(e);
       error = String(e);

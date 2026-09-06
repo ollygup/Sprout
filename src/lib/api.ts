@@ -418,9 +418,10 @@ export function setCompanionHeightRatio(ratio: number): Promise<void> {
   return invoke<void>("set_companion_height_ratio", { ratio });
 }
 
-/** Companion: set the saved URL list (ticket 125) — deduped host+path. */
-export function setCompanionUrlList(urls: string[]): Promise<void> {
-  return invoke<void>("set_companion_url_list", { urls });
+/** Companion: set the saved sites — each URL plus its display name.
+ *  Duplicates are refused with a message naming what collided. */
+export function setCompanionUrlList(sites: import("./types").CompanionSite[]): Promise<void> {
+  return invoke<void>("set_companion_url_list", { sites });
 }
 
 /** Companion audio: persisted mute plus live playback for the dock toolbar.

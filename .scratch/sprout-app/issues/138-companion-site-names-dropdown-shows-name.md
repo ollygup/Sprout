@@ -14,11 +14,11 @@
 
 ## ACs
 
-- [ ] Blank name renders the URL everywhere — nothing ever renders blank.
-- [ ] Duplicate URL and duplicate name are both refused (trimmed, case-insensitive) with a message stating which collided.
-- [ ] Legacy `string[]` payloads migrate on read without data loss; round-trip save keeps order and names.
-- [ ] Settings active-site dropdown lists names; selecting by name activates the right URL.
-- [ ] `npm.cmd run check` 0 errors; settings/companion/backup test slices green.
+- [x] Blank name renders the URL everywhere — nothing ever renders blank.
+- [x] Duplicate URL and duplicate name are both refused (trimmed, case-insensitive) with a message stating which collided.
+- [x] Legacy `string[]` payloads migrate on read without data loss; round-trip save keeps order and names.
+- [x] Settings active-site dropdown lists names; selecting by name activates the right URL.
+- [x] `npm.cmd run check` 0 errors; settings/companion/backup test slices green.
 
 ## Implementation notes
 

@@ -134,6 +134,14 @@ _Avoid_: Quick Launch entries, preset steps
 A machine-local, single-site web surface shown in the lower portion of the Quick Launch dock when the user chooses an active saved site. It is absent while the window floats or no site is active, and it is unrelated to Quick Actions, Presets, Plans, and Runs.
 _Avoid_: Browser pane, embedded app, mini window
 
+**Companion site**:
+One saved https address available to the Companion, carrying the user's display name for it. Sites are ordered by the user and unique by address; choosing one as the active site shows it in the dock. Machine-local; never part of Presets, Plan, Run, or exports.
+_Avoid_: Bookmark, favorite, tab
+
+**Companion site name**:
+The user's display label for one Companion site, shown everywhere the site is picked. Blank means the address itself is shown — nothing ever renders blank. Unique across named sites; blank names never collide.
+_Avoid_: Title, nickname, alias
+
 **Note**:
 Optional free-form text a user attaches to exactly one Quick Action, for whatever they want to record about it — the content and its purpose are the user's alone, and Sprout gives it no behavior (it never affects how the action runs). Short formatted text (bullets, numbered steps), authored in the main app and rendered read-only wherever shown; rows carrying one are marked so readers know the text exists before opening it. Machine-local; never part of Presets, Plan, Run, or exports.
 _Avoid_: Comment, description, remark

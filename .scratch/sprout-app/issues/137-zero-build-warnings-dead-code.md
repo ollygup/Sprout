@@ -14,9 +14,9 @@
 
 ## ACs
 
-- [ ] `cargo check` reports 0 warnings; `npm.cmd run check` still 0 errors / 0 warnings.
-- [ ] No behavior change: full `cargo test` slice for settings/store/walker green; app launches, Settings loads/saves, discovery snapshot still merges.
-- [ ] No `allow` without a reason comment naming the seam/test that needs it; no dead code kept "just in case".
+- [x] `cargo check` reports 0 warnings; `npm.cmd run check` still 0 errors / 0 warnings.
+- [x] No behavior change: full `cargo test` slice for settings/store/walker green; app launches, Settings loads/saves, discovery snapshot still merges.
+- [x] No `allow` without a reason comment naming the seam/test that needs it; no dead code kept "just in case".
 
 ## Implementation notes
 

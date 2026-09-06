@@ -1733,6 +1733,11 @@ fn close_quick_launch_window(app: AppHandle) -> Result<(), String> {
 /// tells the two apart, and the transient blocked reason (ticket 63) when
 /// auto-hide is refused by the shell. The header's dock/undock toggle renders
 /// the target edge's icon from it, so the chrome always tells the truth.
+/// `monitor` names the device the live dock is attached to (with its hardware
+/// identity when one resolved at dock time) so per-monitor memory — the dock
+/// width, the Companion height — reads the actual monitor instead of a proxy
+/// (ADR: Companion is one isolated site in the docked window only); `None`
+/// while floating, where per-monitor memory does not apply.
 #[derive(serde::Serialize)]
 pub struct DockStateView {
     pub edge: String,
@@ -1741,6 +1746,8 @@ pub struct DockStateView {
     pub blocked: Option<String>,
     pub left_eligible: bool,
     pub right_eligible: bool,
+    pub monitor: Option<String>,
+    pub monitor_identity: Option<String>,
 }
 
 /// The dock/undock toggle (ticket 53): docks the window to its current
@@ -1981,16 +1988,18 @@ fn set_companion_height_ratio(
     Ok(())
 }
 
-/// Sets the companion saved URL list (ticket 125): deduped host+path case-insensitive.
+/// Sets the companion saved sites: each carries its URL and display name.
+/// Duplicates are refused with a message naming what collided; the Quick
+/// Launch window is notified so pickers update without reopening.
 #[tauri::command]
 fn set_companion_url_list(
     app: AppHandle,
     state: State<'_, AppState>,
-    urls: Vec<String>,
+    sites: Vec<settings::CompanionSite>,
 ) -> Result<(), String> {
-    settings::validate_companion_url_list(&urls)?;
+    settings::validate_companion_url_list(&sites)?;
     let conn = lock(&state)?;
-    settings::save_companion_url_list(&conn, &urls)?;
+    settings::save_companion_url_list(&conn, &sites)?;
     drop(conn);
     emit_quick_launch_changed(&app);
     Ok(())
@@ -2143,6 +2152,8 @@ fn get_quick_launch_dock_state(app: AppHandle) -> Result<DockStateView, String> 
                 blocked: d.blocked,
                 left_eligible,
                 right_eligible,
+                monitor: Some(d.monitor),
+                monitor_identity: d.identity,
             }
         },
         None => {
@@ -2161,6 +2172,8 @@ fn get_quick_launch_dock_state(app: AppHandle) -> Result<DockStateView, String> 
                 blocked: None,
                 left_eligible,
                 right_eligible,
+                monitor: None,
+                monitor_identity: None,
             }
         }
     })

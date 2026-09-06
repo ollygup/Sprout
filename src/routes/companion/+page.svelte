@@ -2,6 +2,8 @@
   import { onMount } from "svelte";
   import { goto } from "$app/navigation";
   import { getSettings, setCompanionUrl, setCompanionUrlList } from "$lib/api";
+  import type { CompanionSite } from "$lib/types";
+  import { companionDisplayName, companionUrlKey, normalizeCompanionSites } from "$lib/companion";
   import PageHeader from "$lib/components/PageHeader.svelte";
   import Button from "$lib/components/Button.svelte";
   import Notice from "$lib/components/Notice.svelte";
@@ -11,15 +13,18 @@
   import Badge from "$lib/components/Badge.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
 
-  // Ticket 125 companion manager — machine-local only, never in Preset exports/backups beyond settings row (ADR-0009 spirit).
-  // Reuses PageHeader / Dialog / IconButton (research 0006 visibility-on-surface vs configuration-elsewhere,
-  // 0008 page-features never, 0004 content-gated). Saved URLs: add/edit/remove, reorder via ordered_list discipline
-  // (position-preserving), dedup trimmed case-insensitive on host+path.
+  // Companion manager — machine-local only, never in Preset exports (the settings
+  // row itself never travels in backups either). Reuses PageHeader / Dialog /
+  // IconButton (research 0006 visibility-on-surface vs configuration-elsewhere,
+  // 0008 page-features never, 0004 content-gated). Saved sites carry a display
+  // name each: add/rename/remove, reorder via ordered_list discipline
+  // (position-preserving), duplicates refused on URL and on name.
 
-  let urls = $state<string[]>([]);
+  let sites = $state<CompanionSite[]>([]);
   let activeUrl: string | null = $state(null);
   let editIndex: number | null = $state(null);
   let siteDraft = $state("");
+  let nameDraft = $state("");
   let formOpen = $state(false);
   let formError = $state("");
   let removeIndex: number | null = $state(null);
@@ -28,19 +33,8 @@
   let notice = $state("");
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;
 
-  function normalizeList(list: string[]): string[] {
-    const seen = new Set<string>();
-    const out: string[] = [];
-    for (const raw of list) {
-      const trimmed = raw.trim();
-      if (!trimmed) continue;
-      if (!trimmed.toLowerCase().startsWith("https://")) continue;
-      const key = trimmed.toLowerCase().replace(/\/+$/, "");
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push(trimmed);
-    }
-    return out;
+  function normalizeList(list: CompanionSite[]): CompanionSite[] {
+    return normalizeCompanionSites(list);
   }
   function validateInput(url: string): string | null {
     const t = url.trim();
@@ -48,6 +42,17 @@
     if (!t.toLowerCase().startsWith("https://")) return "Companion URL must be https://";
     if (t.includes(" ")) return "Companion URL must be a valid https:// URL.";
     return null;
+  }
+  function duplicateUrl(url: string, except: number | null): string | null {
+    const key = companionUrlKey(url);
+    const hit = sites.find((s, i) => i !== except && companionUrlKey(s.url) === key);
+    return hit ? `"${url.trim()}" is already saved.` : null;
+  }
+  function duplicateName(name: string, except: number | null): string | null {
+    const t = name.trim();
+    if (!t) return null;
+    const hit = sites.find((s, i) => i !== except && s.name.trim().toLowerCase() === t.toLowerCase());
+    return hit ? `"${t}" is already used as a site name.` : null;
   }
   function flash(msg: string) {
     notice = msg;
@@ -64,7 +69,7 @@
     loading = true;
     try {
       const s = await getSettings();
-      urls = normalizeList(s.companion_url_list ?? []);
+      sites = normalizeList(s.companion_url_list ?? []);
       activeUrl = s.companion_url ?? null;
       error = "";
     } catch (e) {
@@ -74,12 +79,12 @@
     }
   }
 
-  async function persistList(next: string[]) {
+  async function persistList(next: CompanionSite[]) {
     const normalized = normalizeList(next);
     await setCompanionUrlList(normalized);
-    urls = normalized;
+    sites = normalized;
     // If active disappeared, clear it
-    if (activeUrl && !normalized.some((u) => u.toLowerCase() === activeUrl!.toLowerCase())) {
+    if (activeUrl && !normalized.some((s) => s.url.toLowerCase() === activeUrl!.toLowerCase())) {
       activeUrl = null;
       await setCompanionUrl(null);
     }
@@ -89,20 +94,23 @@
     const err = validateInput(siteDraft);
     if (err) { formError = err; return; }
     const trimmed = siteDraft.trim();
-    if (urls.some((u) => u.toLowerCase() === trimmed.toLowerCase())) { formError = `"${trimmed}" is already saved.`; return; }
-    const next = [...urls, trimmed];
+    const dupe = duplicateUrl(trimmed, null) ?? duplicateName(nameDraft, null);
+    if (dupe) { formError = dupe; return; }
+    const next = [...sites, { url: trimmed, name: nameDraft.trim() }];
     try {
       await persistList(next);
       siteDraft = "";
+      nameDraft = "";
       formOpen = false;
       formError = "";
       error = "";
-      flash(`Added ${trimmed}`);
+      flash(`Added ${companionDisplayName(next[next.length - 1])}`);
     } catch (e) { formError = String(e); }
   }
   function startEdit(idx: number) {
     editIndex = idx;
-    siteDraft = urls[idx] ?? "";
+    siteDraft = sites[idx]?.url ?? "";
+    nameDraft = sites[idx]?.name ?? "";
     formError = "";
     formOpen = true;
   }
@@ -110,11 +118,13 @@
     formOpen = false;
     editIndex = null;
     siteDraft = "";
+    nameDraft = "";
     formError = "";
   }
   function startAdd() {
     editIndex = null;
     siteDraft = "";
+    nameDraft = "";
     formError = "";
     formOpen = true;
   }
@@ -123,10 +133,11 @@
     const err = validateInput(siteDraft);
     if (err) { formError = err; return; }
     const trimmed = siteDraft.trim();
-    if (urls.some((u, i) => i !== editIndex && u.toLowerCase() === trimmed.toLowerCase())) { formError = `"${trimmed}" is already saved.`; return; }
-    const wasActive = activeUrl && urls[editIndex!].toLowerCase() === activeUrl!.toLowerCase();
-    const next = [...urls];
-    next[editIndex!] = trimmed;
+    const dupe = duplicateUrl(trimmed, editIndex) ?? duplicateName(nameDraft, editIndex);
+    if (dupe) { formError = dupe; return; }
+    const wasActive = activeUrl && sites[editIndex!].url.toLowerCase() === activeUrl!.toLowerCase();
+    const next = [...sites];
+    next[editIndex!] = { url: trimmed, name: nameDraft.trim() };
     try {
       await persistList(next);
       if (wasActive) {
@@ -135,6 +146,7 @@
       }
       editIndex = null;
       siteDraft = "";
+      nameDraft = "";
       formOpen = false;
       formError = "";
       error = "";
@@ -142,20 +154,20 @@
     } catch (e) { formError = String(e); }
   }
   async function removeUrl(idx: number) {
-    const removed = urls[idx];
-    const next = urls.filter((_, i) => i !== idx);
+    const removed = sites[idx];
+    const next = sites.filter((_, i) => i !== idx);
     try {
       await persistList(next);
-      if (activeUrl && removed.toLowerCase() === activeUrl.toLowerCase()) {
+      if (activeUrl && removed.url.toLowerCase() === activeUrl.toLowerCase()) {
         activeUrl = null;
       }
-      flash(`Removed ${removed}`);
+      flash(`Removed ${companionDisplayName(removed)}`);
     } catch (e) { error = String(e); }
   }
   async function moveUrl(idx: number, dir: -1 | 1) {
     const target = idx + dir;
-    if (target < 0 || target >= urls.length) return;
-    const next = [...urls];
+    if (target < 0 || target >= sites.length) return;
+    const next = [...sites];
     const tmp = next[idx];
     next[idx] = next[target];
     next[target] = tmp;
@@ -196,19 +208,24 @@
           <h2 id="saved-sites-title" class="saved-sites__title">Saved sites</h2>
           <p class="saved-sites__hint">The first site is your quickest pick; reorder the list anytime.</p>
         </div>
-        <span class="saved-sites__count">{urls.length}</span>
+        <span class="saved-sites__count">{sites.length}</span>
       </div>
-      {#if urls.length > 0}
+      {#if sites.length > 0}
         <ul class="saved-list">
-          {#each urls as url, idx (url)}
+          {#each sites as site, idx (site.url)}
             <li class="saved-row">
-              <span class="saved-row__url" title={url}>{url}</span>
-              {#if activeUrl && activeUrl.toLowerCase() === url.toLowerCase()}
+              <span class="saved-row__text">
+                <span class="saved-row__name" title={site.url}>{companionDisplayName(site)}</span>
+                {#if site.name.trim()}
+                  <span class="saved-row__url" title={site.url}>{site.url}</span>
+                {/if}
+              </span>
+              {#if activeUrl && activeUrl.toLowerCase() === site.url.toLowerCase()}
                 <Badge tone="accent">Active</Badge>
               {/if}
               <Button variant="ghost" onclick={() => startEdit(idx)}>Edit</Button>
               <IconButton icon="chevron-up" label="Move up" quiet onclick={() => moveUrl(idx, -1)} disabled={idx===0} />
-              <IconButton icon="chevron-down" label="Move down" quiet onclick={() => moveUrl(idx, 1)} disabled={idx===urls.length-1} />
+              <IconButton icon="chevron-down" label="Move down" quiet onclick={() => moveUrl(idx, 1)} disabled={idx===sites.length-1} />
               <Button variant="ghost" onclick={() => (removeIndex = idx)}>Remove</Button>
             </li>
           {/each}
@@ -231,6 +248,20 @@
       else void saveEdit();
     }}
   >
+    <label class="site-form__label" for="companion-site-name">Site name</label>
+    <input
+      id="companion-site-name"
+      name="companion-site-name"
+      class="site-form__input"
+      type="text"
+      autocomplete="off"
+      spellcheck="false"
+      placeholder="My music…"
+      value={nameDraft}
+      oninput={(event) => (nameDraft = (event.target as HTMLInputElement).value)}
+      aria-describedby="companion-site-name-hint"
+    />
+    <p id="companion-site-name-hint" class="site-form__hint">Optional — shown in pickers instead of the address.</p>
     <label class="site-form__label" for="companion-site-url">Site URL</label>
     <input
       id="companion-site-url"
@@ -355,14 +386,28 @@
     border: 1px solid var(--border);
     border-radius: var(--radius);
   }
-  .saved-row__url {
+  .saved-row__text {
     flex: 1;
     min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+  .saved-row__name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--text);
+  }
+  .saved-row__url {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
     font-family: var(--font-mono);
-    font-size: var(--text-sm);
+    font-size: var(--text-xs);
+    color: var(--text-muted);
     font-variant-ligatures: none;
   }
   .site-form {

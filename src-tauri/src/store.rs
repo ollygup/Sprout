@@ -29,21 +29,6 @@ pub struct StoreApp {
     pub logo: Option<String>,
 }
 
-/// The seam for the enumeration so tests can script Store results without
-/// touching the real PackageManager.
-pub trait UwpEnumerator: Send + Sync {
-    fn enumerate(&self) -> Vec<StoreApp>;
-}
-
-/// The real enumerator — delegates to the OS.
-pub struct PackageManagerEnumerator;
-
-impl UwpEnumerator for PackageManagerEnumerator {
-    fn enumerate(&self) -> Vec<StoreApp> {
-        enumerate_uwp()
-    }
-}
-
 /// The live enumeration: `PackageManager::FindPackages()` → `GetAppListEntries()`
 /// per package, filtered as above. Any failure (missing API, not on Windows,
 /// COM not initialized) is an empty list — the Win32 sources still surface.
@@ -163,7 +148,7 @@ fn try_enumerate_via_package_manager() -> Option<Vec<StoreApp>> {
 /// as 24 (picker) / 16 (rack/dock) via CSS — identical display size to Win32
 /// `SHGetFileInfoW` 32 icons, no new token.
 fn find_44_logo(installed_path: &str, _raw_display: &str) -> Option<String> {
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     let manifest_path = Path::new(installed_path).join("AppxManifest.xml");
     let content = std::fs::read_to_string(&manifest_path).ok()?;
     for attr in ["Square44x44Logo", "Square150x150Logo", "Logo"] {

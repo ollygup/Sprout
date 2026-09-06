@@ -119,6 +119,44 @@ const KEY_COMPANION_HEIGHT_RATIO: &str = "settings.companion_height_ratio";
 const KEY_COMPANION_URL_LIST: &str = "settings.companion_url_list";
 const KEY_COMPANION_MUTED: &str = "settings.companion_muted";
 
+/// One Companion saved site: its https URL plus the user's display name for
+/// it. A blank name renders as the URL everywhere — nothing ever renders
+/// blank (ADR: Companion is one isolated site in the docked window only).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompanionSite {
+    pub url: String,
+    #[serde(default)]
+    pub name: String,
+}
+
+/// A stored list entry: either today's `{url, name}` shape or a legacy bare
+/// URL string from before names existed. The whole stored payload parses as
+/// one or the other per entry, so a hand-mixed array still migrates.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum CompanionSiteEntry {
+    Site(CompanionSite),
+    Legacy(String),
+}
+
+/// Migrates a stored list entry-wise: legacy strings become unnamed sites,
+/// today's shapes pass through with trimmed values.
+fn migrate_companion_site_list(entries: Vec<CompanionSiteEntry>) -> Vec<CompanionSite> {
+    entries
+        .into_iter()
+        .map(|entry| match entry {
+            CompanionSiteEntry::Site(site) => CompanionSite {
+                url: site.url.trim().to_string(),
+                name: site.name.trim().to_string(),
+            },
+            CompanionSiteEntry::Legacy(url) => CompanionSite {
+                url: url.trim().to_string(),
+                name: String::new(),
+            },
+        })
+        .collect()
+}
+
 /// The persisted knobs. `u32` fields keep the frontend's number inputs safe;
 /// validation lives in [`Settings::validate`]. `install_dir` is empty when
 /// winget should use its own default directory.
@@ -180,11 +218,12 @@ pub struct Settings {
     /// the web view, clamped 0.25–0.60 (default 0.40). Live-draggable via the
     /// horizontal splitter and persisted per monitor (falls back to this).
     pub companion_height_ratio: f64,
-    /// Companion saved URL list (ticket 125): the URLs the main app's companion
-    /// manager edits; deduped trimmed case-insensitive on host+path, ordered by
-    /// the user. Machine-local, never in Preset exports/backups beyond the
-    /// settings row (ADR-0009 spirit).
-    pub companion_url_list: Vec<String>,
+    /// Companion saved sites: the URLs the main app's companion manager
+    /// edits, each with the user's display name for it; deduped on the URL
+    /// trimmed case-insensitive, ordered by the user. Machine-local (ADR:
+    /// Machine-local boundary + backup identities + ordered lists): never in
+    /// Preset exports, and the settings row itself never travels in backups.
+    pub companion_url_list: Vec<CompanionSite>,
     /// Companion mute (global, persisted): whether the docked pane's audio is
     /// silenced. Applied to the live WebView on every read and on every
     /// WebView creation, so a recreated pane never comes back loud.
@@ -401,7 +440,9 @@ pub fn validate_companion_height_ratio(value: f64) -> std::result::Result<(), St
     Ok(())
 }
 
-/// Clamps a stored companion height ratio to the sane range (ticket 125).
+/// Clamps a stored companion height ratio to the sane range — test seam locking
+/// the clamp contract while production clamps before persisting and validates on save (ADR: Companion is one isolated site in the docked window only).
+#[cfg(test)]
 pub fn clamp_companion_height_ratio(value: f64) -> f64 {
     if !value.is_finite() {
         return DEFAULT_COMPANION_HEIGHT_RATIO;
@@ -409,35 +450,57 @@ pub fn clamp_companion_height_ratio(value: f64) -> f64 {
     value.clamp(COMPANION_HEIGHT_RATIO_MIN, COMPANION_HEIGHT_RATIO_MAX)
 }
 
-/// Dedups companion URL list (ticket 125): trimmed, case-insensitive on host+path,
-/// preserving first occurrence order. Empty entries are dropped. Only https URLs survive.
-/// Trailing slashes are ignored for dedup (https://a.com ↔ https://a.com/ are the same).
-pub fn dedup_companion_url_list(list: &[String]) -> Vec<String> {
+/// Dedups companion saved sites: trimmed, case-insensitive on the whole URL,
+/// preserving first occurrence order. Entries with empty or non-https URLs
+/// are dropped. Trailing slashes are ignored for identity
+/// (https://a.com ↔ https://a.com/ are the same).
+pub fn dedup_companion_site_list(list: &[CompanionSite]) -> Vec<CompanionSite> {
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut out = Vec::new();
-    for raw in list {
-        let trimmed = raw.trim().to_string();
-        if trimmed.is_empty() {
+    for site in list {
+        let url = site.url.trim().to_string();
+        if url.is_empty() {
             continue;
         }
-        if validate_companion_url(Some(&trimmed)).is_err() {
+        if validate_companion_url(Some(&url)).is_err() {
             continue;
         }
-        // Dedup key: lowercased trimmed URL without trailing slash (host+path case-insensitive).
-        let key = trimmed.to_ascii_lowercase().trim_end_matches('/').to_string();
+        // Dedup key: lowercased trimmed URL without trailing slash.
+        let key = url.to_ascii_lowercase().trim_end_matches('/').to_string();
         if seen.contains(&key) {
             continue;
         }
         seen.insert(key);
-        out.push(trimmed);
+        out.push(CompanionSite {
+            url,
+            name: site.name.trim().to_string(),
+        });
     }
     out
 }
 
-/// Validates companion URL list (ticket 125): each entry must be https or empty list.
-pub fn validate_companion_url_list(list: &[String]) -> std::result::Result<(), String> {
-    for url in list {
-        validate_companion_url(Some(url))?;
+/// The identity key for one companion URL: trimmed, lowercased, trailing
+/// slashes ignored — the same key dedup and uniqueness checks share.
+pub fn companion_url_key(url: &str) -> String {
+    url.trim().to_ascii_lowercase().trim_end_matches('/').to_string()
+}
+
+/// Validates companion saved sites: every URL must be https, URLs must be
+/// unique, and non-blank names must be unique — all compared trimmed and
+/// case-insensitively, each refusal naming what collided.
+pub fn validate_companion_url_list(list: &[CompanionSite]) -> std::result::Result<(), String> {
+    let mut seen_urls: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for site in list {
+        validate_companion_url(Some(&site.url))?;
+        let url_key = companion_url_key(&site.url);
+        if !seen_urls.insert(url_key) {
+            return Err(format!("\"{}\" is already saved.", site.url.trim()));
+        }
+        let name = site.name.trim();
+        if !name.is_empty() && !seen_names.insert(name.to_ascii_lowercase()) {
+            return Err(format!("\"{name}\" is already used as a site name."));
+        }
     }
     Ok(())
 }
@@ -518,8 +581,8 @@ pub fn load(conn: &Connection) -> Settings {
         .filter(|v| validate_companion_height_ratio(*v).is_ok())
         .unwrap_or(DEFAULT_COMPANION_HEIGHT_RATIO);
     let companion_url_list = raw(conn, KEY_COMPANION_URL_LIST)
-        .and_then(|v| serde_json::from_str::<Vec<String>>(&v).ok())
-        .map(|list| dedup_companion_url_list(&list))
+        .and_then(|v| serde_json::from_str::<Vec<CompanionSiteEntry>>(&v).ok())
+        .map(|entries| dedup_companion_site_list(&migrate_companion_site_list(entries)))
         .unwrap_or_default();
     // WHY stored as "1"/"0": the meta table holds strings, and an explicit
     // pair keeps a broken value readable as unmuted instead of erroring.
@@ -677,10 +740,11 @@ pub fn save_companion_height_ratio(conn: &Connection, ratio: f64) -> std::result
     upsert_meta(conn, KEY_COMPANION_HEIGHT_RATIO, &ratio.to_string()).map_err(|e| e.to_string())
 }
 
-/// Persists only the companion URL list (ticket 125) — deduped first, then stored as JSON.
-pub fn save_companion_url_list(conn: &Connection, list: &[String]) -> std::result::Result<(), String> {
+/// Persists only the companion saved sites — validated (duplicates refused),
+/// then deduped and stored as JSON.
+pub fn save_companion_url_list(conn: &Connection, list: &[CompanionSite]) -> std::result::Result<(), String> {
     validate_companion_url_list(list)?;
-    let deduped = dedup_companion_url_list(list);
+    let deduped = dedup_companion_site_list(list);
     let json = serde_json::to_string(&deduped).map_err(|e| e.to_string())?;
     upsert_meta(conn, KEY_COMPANION_URL_LIST, &json).map_err(|e| e.to_string())
 }
@@ -769,7 +833,10 @@ mod tests {
             reveal_sensitivity_px: 20,
             companion_url: Some("https://music.youtube.com".to_string()),
             companion_height_ratio: 0.55,
-            companion_url_list: vec!["https://music.youtube.com".to_string(), "https://open.spotify.com".to_string()],
+            companion_url_list: vec![
+                CompanionSite { url: "https://music.youtube.com".to_string(), name: "Music".to_string() },
+                CompanionSite { url: "https://open.spotify.com".to_string(), name: String::new() },
+            ],
             companion_muted: true,
         };
         {
@@ -1235,24 +1302,70 @@ mod tests {
         s.companion_height_ratio = 0.90;
         assert!(s.validate().is_err());
         s.companion_height_ratio = 0.40;
-        s.companion_url_list = vec!["https://ok.example.com".to_string(), "http://bad".to_string()];
+        s.companion_url_list = vec![
+            CompanionSite { url: "https://ok.example.com".to_string(), name: String::new() },
+            CompanionSite { url: "http://bad".to_string(), name: String::new() },
+        ];
         assert!(s.validate().is_err());
-        s.companion_url_list = vec!["https://ok.example.com".to_string()];
+        s.companion_url_list = vec![
+            CompanionSite { url: "https://ok.example.com".to_string(), name: "OK".to_string() },
+        ];
+        assert!(s.validate().is_ok());
+        // Duplicate URLs and duplicate names are both refused, each naming the collision.
+        s.companion_url_list = vec![
+            CompanionSite { url: "https://a.example.com".to_string(), name: String::new() },
+            CompanionSite { url: "https://A.example.com/".to_string(), name: String::new() },
+        ];
+        let err = s.validate().unwrap_err();
+        assert!(err.contains("already saved"), "got: {err}");
+        s.companion_url_list = vec![
+            CompanionSite { url: "https://a.example.com".to_string(), name: "Music".to_string() },
+            CompanionSite { url: "https://b.example.com".to_string(), name: " music ".to_string() },
+        ];
+        let err = s.validate().unwrap_err();
+        assert!(err.contains("already used"), "got: {err}");
+        // Blank names never collide with each other.
+        s.companion_url_list = vec![
+            CompanionSite { url: "https://a.example.com".to_string(), name: String::new() },
+            CompanionSite { url: "https://b.example.com".to_string(), name: "   ".to_string() },
+        ];
         assert!(s.validate().is_ok());
     }
 
     #[test]
-    fn companion_url_list_dedup_is_case_insensitive_and_trimmed() {
+    fn companion_site_list_dedup_is_case_insensitive_and_trimmed() {
         let list = vec![
-            " https://Music.Youtube.com ".to_string(),
-            "https://music.youtube.com".to_string(),
-            "https://open.spotify.com".to_string(),
-            "HTTPS://OPEN.SPOTIFY.COM/ ".to_string(),
-            "http://bad.example.com".to_string(),
-            "  ".to_string(),
+            CompanionSite { url: " https://Music.Youtube.com ".to_string(), name: "First".to_string() },
+            CompanionSite { url: "https://music.youtube.com".to_string(), name: "Second".to_string() },
+            CompanionSite { url: "https://open.spotify.com".to_string(), name: String::new() },
+            CompanionSite { url: "HTTPS://OPEN.SPOTIFY.COM/ ".to_string(), name: String::new() },
+            CompanionSite { url: "http://bad.example.com".to_string(), name: String::new() },
+            CompanionSite { url: "  ".to_string(), name: String::new() },
         ];
-        let deduped = dedup_companion_url_list(&list);
-        assert_eq!(deduped, vec!["https://Music.Youtube.com".to_string(), "https://open.spotify.com".to_string()]);
+        let deduped = dedup_companion_site_list(&list);
+        assert_eq!(deduped, vec![
+            CompanionSite { url: "https://Music.Youtube.com".to_string(), name: "First".to_string() },
+            CompanionSite { url: "https://open.spotify.com".to_string(), name: String::new() },
+        ]);
+    }
+
+    #[test]
+    fn legacy_string_site_list_migrates_on_read_without_data_loss() {
+        let conn = conn();
+        upsert_meta(&conn, KEY_COMPANION_URL_LIST, r#"["https://a.example.com", "https://b.example.com/"]"#).unwrap();
+        let loaded = load(&conn);
+        assert_eq!(loaded.companion_url_list, vec![
+            CompanionSite { url: "https://a.example.com".to_string(), name: String::new() },
+            CompanionSite { url: "https://b.example.com/".to_string(), name: String::new() },
+        ]);
+        // Round-trip save keeps order and names in the new shape.
+        let mut named = loaded.companion_url_list;
+        named[0].name = "A".to_string();
+        save_companion_url_list(&conn, &named).unwrap();
+        let stored = conn.query_row("SELECT value FROM meta WHERE key = ?1", params![KEY_COMPANION_URL_LIST], |row| row.get::<_, String>(0)).unwrap();
+        assert!(stored.contains("\"name\":\"A\""), "got: {stored}");
+        let reloaded = load(&conn);
+        assert_eq!(reloaded.companion_url_list, named);
     }
 
     #[test]
@@ -1261,14 +1374,20 @@ mod tests {
         let mut s = Settings::default();
         s.companion_url = Some("https://music.youtube.com".to_string());
         s.companion_height_ratio = 0.55;
-        s.companion_url_list = vec!["https://music.youtube.com".to_string(), "https://open.spotify.com".to_string()];
+        s.companion_url_list = vec![
+            CompanionSite { url: "https://music.youtube.com".to_string(), name: "Music".to_string() },
+            CompanionSite { url: "https://open.spotify.com".to_string(), name: String::new() },
+        ];
         {
             let conn = crate::db::init_at(&dir).unwrap();
             save(&conn, &s).unwrap();
             let loaded = load(&conn);
             assert_eq!(loaded.companion_url, Some("https://music.youtube.com".to_string()));
             assert!((loaded.companion_height_ratio - 0.55).abs() < 1e-9);
-            assert_eq!(loaded.companion_url_list, vec!["https://music.youtube.com".to_string(), "https://open.spotify.com".to_string()]);
+            assert_eq!(loaded.companion_url_list, vec![
+                CompanionSite { url: "https://music.youtube.com".to_string(), name: "Music".to_string() },
+                CompanionSite { url: "https://open.spotify.com".to_string(), name: String::new() },
+            ]);
         }
         let conn = crate::db::init_at(&dir).unwrap();
         let loaded = load(&conn);
@@ -1303,10 +1422,18 @@ mod tests {
         save_companion_height_ratio(&conn, 0.55).unwrap();
         assert!((load(&conn).companion_height_ratio - 0.55).abs() < 1e-9);
         assert!(save_companion_height_ratio(&conn, 0.90).is_err());
-        let list = vec!["https://a.example.com".to_string(), " https://A.example.com ".to_string(), "https://b.example.com".to_string()];
+        let list = vec![
+            CompanionSite { url: "https://a.example.com".to_string(), name: String::new() },
+            CompanionSite { url: "https://b.example.com".to_string(), name: "B".to_string() },
+        ];
         save_companion_url_list(&conn, &list).unwrap();
-        // deduped on save load cycle
-        assert_eq!(load(&conn).companion_url_list, vec!["https://a.example.com".to_string(), "https://b.example.com".to_string()]);
+        // trimmed values persist; duplicates are refused, not cleaned.
+        assert_eq!(load(&conn).companion_url_list, list);
+        let dupes = vec![
+            CompanionSite { url: "https://a.example.com".to_string(), name: String::new() },
+            CompanionSite { url: " https://A.example.com ".to_string(), name: String::new() },
+        ];
+        assert!(save_companion_url_list(&conn, &dupes).is_err());
     }
 
     #[test]

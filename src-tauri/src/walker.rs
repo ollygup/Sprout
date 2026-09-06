@@ -172,10 +172,9 @@ pub fn snapshot() -> Vec<Candidate> {
     merge_three(start_menu, registry, store)
 }
 
-/// The walk itself with its seams injected (test entry point) — the Win32
-/// sources only. Store/MSIX is additive on the live snapshot, not on the
-/// scripted test seam, so existing tests stay deterministic regardless of what
-/// is installed on the machine.
+/// Test seam: deterministic Win32-only walk without Store/MSIX so tests stay
+/// independent of installed apps (ADR: App discovery is a fresh snapshot; winget is authoring-time read-only).
+#[cfg(test)]
 fn snapshot_with(
     roots: &[PathBuf],
     registry: &dyn UninstallRegistry,
@@ -190,7 +189,9 @@ fn snapshot_with(
     merge(start_menu, registry)
 }
 
-/// The live snapshot with Store/MSIX merged in (ticket 122).
+/// Test seam: live-shape merge with scripted Store/MSIX so tests cover the
+/// additive source without touching installed apps (ADR: App discovery is a fresh snapshot; winget is authoring-time read-only).
+#[cfg(test)]
 fn snapshot_with_store_merged(
     roots: &[PathBuf],
     registry: &dyn UninstallRegistry,
@@ -360,6 +361,8 @@ fn is_windows_apps(path: &str) -> bool {
 /// source (shell:AppsFolder\<AUMID>) deduped on AUMID exact plus the same
 /// intra-source name collapse; Store candidates never collapse with Win32 ones
 /// on name alone — the picker shows both when they coexist (e.g. Calculator).
+/// Test seam: two-source merge exercised directly while the live snapshot merges three sources (ADR: App discovery is a fresh snapshot; winget is authoring-time read-only).
+#[cfg(test)]
 fn merge(start_menu: Vec<Candidate>, registry: Vec<Candidate>) -> Vec<Candidate> {
     merge_three(start_menu, registry, Vec::new())
 }

@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { beforeNavigate, goto } from "$app/navigation";
-  import type { BackupCounts, DisplayInfo, Settings } from "$lib/types";
+  import type { BackupCounts, CompanionSite, DisplayInfo, Settings } from "$lib/types";
+  import { companionDisplayName, normalizeCompanionSites } from "$lib/companion";
   import {
     exportBackup,
     getDisplayDockEdge,
@@ -99,10 +100,10 @@
   let advancedOpen = $state(false);
   let housekeepingAdvancedOpen = $state(false);
   let autostart = $state("on");
-  // Ticket 125 companion: active URL (null=off), height ratio 0.25–0.60, saved list
+  // Companion: active URL (null=off), height ratio 0.25–0.60, saved sites with names
   let companionUrl: string | null = $state(null);
   let companionHeightRatio = $state(0.40);
-  let companionUrlList = $state<string[]>([]);
+  let companionUrlList = $state<CompanionSite[]>([]);
   let loading = $state(true);
   let loadFailed = $state(false);
   let saving = $state(false);
@@ -135,7 +136,7 @@
     revealSensitivityPx: number;
     companionUrl: string | null;
     companionHeightRatio: number;
-    companionUrlList: string[];
+    companionUrlList: CompanionSite[];
   } | null>(null);
   let baselineDisplayEdges = $state<Record<string, string>>({});
   let baselineDisplayModes = $state<Record<string, string>>({});
@@ -182,19 +183,8 @@
     if (!Number.isFinite(f)) return 0.40;
     return Math.min(0.60, Math.max(0.25, Math.round(f * 100) / 100));
   }
-  function normalizeCompanionList(list: string[]): string[] {
-    const seen = new Set<string>();
-    const out: string[] = [];
-    for (const raw of list) {
-      const trimmed = raw.trim();
-      if (!trimmed) continue;
-      if (!trimmed.toLowerCase().startsWith("https://")) continue;
-      const key = trimmed.toLowerCase().replace(/\/+$/, "");
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push(trimmed);
-    }
-    return out;
+  function normalizeCompanionList(list: CompanionSite[]): CompanionSite[] {
+    return normalizeCompanionSites(list);
   }
 
   const isDirty = $derived.by(() => {
@@ -212,7 +202,7 @@
     if (clampSens(revealSensitivityPx) !== baseline.revealSensitivityPx) return true;
     if ((companionUrl ?? null) !== (baseline.companionUrl ?? null)) return true;
     if (clampCompanionRatio(companionHeightRatio) !== baseline.companionHeightRatio) return true;
-    if (normalizeCompanionList(companionUrlList).join("\n") !== baseline.companionUrlList.join("\n")) return true;
+    if (JSON.stringify(normalizeCompanionList(companionUrlList)) !== JSON.stringify(baseline.companionUrlList)) return true;
     if (displays.length > 1) {
       for (const d of displays) {
         const cur = displayEdges[d.device_name];
@@ -1194,8 +1184,8 @@
                 onchange={(v) => (companionUrl = v ? v : null)}
               >
                 <option value="">Off</option>
-                {#each companionUrlList as url (url)}
-                  <option value={url}>{url}</option>
+                {#each companionUrlList as site (site.url)}
+                  <option value={site.url}>{companionDisplayName(site)}</option>
                 {/each}
               </Select>
             </div>

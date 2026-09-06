@@ -14,10 +14,10 @@
 
 ## ACs
 
-- [ ] Cold launch with height at 50% renders 50% before any pointer input, single-monitor and per-monitor multi-monitor.
-- [ ] Moving the dock to another screen picks up that screen's remembered height, falling back to global when absent.
-- [ ] Drag and arrow-key resize still persist and survive restart; out-of-range stored values clamp to 25–60% (default 40%).
-- [ ] `npm.cmd run check` 0 errors; settings/companion test slices green.
+- [x] Cold launch with height at 50% renders 50% before any pointer input, single-monitor and per-monitor multi-monitor.
+- [x] Moving the dock to another screen picks up that screen's remembered height, falling back to global when absent.
+- [x] Drag and arrow-key resize still persist and survive restart; out-of-range stored values clamp to 25–60% (default 40%).
+- [x] `npm.cmd run check` 0 errors; settings/companion test slices green.
 
 ## Implementation notes
 
