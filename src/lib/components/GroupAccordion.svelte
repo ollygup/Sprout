@@ -64,6 +64,13 @@
     --caret-column: 14px;
   }
 
+  /* The top margin separates sections from each other — a section already
+     first in its parent sits under the header's own spacing, so it takes
+     none, keeping header-to-content rhythm identical on every page. */
+  .group:first-child {
+    margin-top: 0;
+  }
+
   /* The Quick Launch window's strip: its scroll container already spaces
      sections, and the rows sit flush with everything else. */
   .group--flush {

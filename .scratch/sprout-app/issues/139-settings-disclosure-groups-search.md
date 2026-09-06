@@ -15,10 +15,10 @@
 
 ## ACs
 
-- [ ] Four groups render with scent summaries while collapsed; open state persists across visits.
-- [ ] Typing `light`, `dark` or `theme` all surface the theme knob; `width` surfaces dock width; a nonsense query shows the designed empty state, never a blank page.
-- [ ] A failing save expands the owning group and focuses the field; dirty-guard and Save/Discard behavior unchanged.
-- [ ] No second rail, no tabs, no new routes; `npm.cmd run check` 0 errors.
+- [x] Four groups render through the shared accordion with counts while collapsed; open state persists across visits. (Collapsed state summaries were cut on review — search covers findability, so headers stay caret + name + count.)
+- [x] Typing `light`, `dark` or `theme` all surface the theme knob; `width` surfaces dock width; a nonsense query shows the designed empty state, never a blank page.
+- [x] A failing save expands the owning group and focuses the field; dirty-guard and Save/Discard behavior unchanged.
+- [x] No second rail, no tabs, no new routes; `npm.cmd run check` 0 errors.
 
 ## Implementation notes
 

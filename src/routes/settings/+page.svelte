@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import { beforeNavigate, goto } from "$app/navigation";
   import type { BackupCounts, CompanionSite, DisplayInfo, Settings } from "$lib/types";
   import { companionDisplayName, normalizeCompanionSites } from "$lib/companion";
@@ -25,12 +25,13 @@
   import Button from "$lib/components/Button.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
+  import GroupAccordion from "$lib/components/GroupAccordion.svelte";
   import Notice from "$lib/components/Notice.svelte";
   import PageHeader from "$lib/components/PageHeader.svelte";
+  import SearchInput from "$lib/components/SearchInput.svelte";
   import Select from "$lib/components/Select.svelte";
   import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";
   import { theme, restoreTheme, selectTheme } from "$lib/theme.svelte";
-  import Disclosure from "$lib/components/Disclosure.svelte";
   import type { ThemeMode } from "$lib/theme.svelte";
   import {
     checkForUpdates,
@@ -39,6 +40,12 @@
   } from "$lib/updateState.svelte";
   import { COLLECTIONS, EXPORT_ORDER } from "$lib/collections";
   import type { CollectionKey } from "$lib/collections";
+  import {
+    buildSettingsSearchIndex,
+    resolveSettingsFilter,
+    SETTINGS_GROUP_KNOBS,
+    type SettingsGroupKey,
+  } from "$lib/settingsSearch";
 
   const themeOptions: { mode: ThemeMode; label: string }[] = [
     { mode: "system", label: "System" },
@@ -96,9 +103,47 @@
   let dockDensity = $state("default");
   let revealDwellMs = $state(200);
   let revealSensitivityPx = $state(12);
-  let companionOpen = $state(false);
-  let advancedOpen = $state(false);
-  let housekeepingAdvancedOpen = $state(false);
+  // Four accordion groups on the one route (research 0014: disclosure
+  // sections over page splits; search before hierarchy), rendered through
+  // the shared GroupAccordion. All open on first visit; the remembered
+  // choice survives across visits.
+  const GROUP_STORAGE_KEY = "sprout.settings.groups.v1";
+  function loadGroupOpen(): Record<SettingsGroupKey, boolean> {
+    const allOpen = { general: true, dock: true, companion: true, backup: true };
+    try {
+      const raw = localStorage.getItem(GROUP_STORAGE_KEY);
+      if (!raw) return allOpen;
+      const parsed = JSON.parse(raw) as Partial<Record<SettingsGroupKey, boolean>>;
+      return {
+        general: parsed.general ?? true,
+        dock: parsed.dock ?? true,
+        companion: parsed.companion ?? true,
+        backup: parsed.backup ?? true,
+      };
+    } catch {
+      return allOpen;
+    }
+  }
+  let groupOpen = $state<Record<SettingsGroupKey, boolean>>(loadGroupOpen());
+  function toggleGroup(key: SettingsGroupKey) {
+    groupOpen = { ...groupOpen, [key]: !groupOpen[key] };
+    try {
+      localStorage.setItem(GROUP_STORAGE_KEY, JSON.stringify(groupOpen));
+    } catch {
+      // Storage unavailable — the groups still toggle for this visit.
+    }
+  }
+  function expandGroups(keys: SettingsGroupKey[]) {
+    groupOpen = { ...groupOpen, ...Object.fromEntries(keys.map((k) => [k, true])) };
+    try {
+      localStorage.setItem(GROUP_STORAGE_KEY, JSON.stringify(groupOpen));
+    } catch {
+      // Storage unavailable — the groups still expand for this visit.
+    }
+  }
+  // The local filter (research 0014 rule 6): matches knob labels, synonyms,
+  // current values, and one-line descriptions from the data-driven index.
+  let filter = $state("");
   let autostart = $state("on");
   // Companion: active URL (null=off), height ratio 0.25–0.60, saved sites with names
   let companionUrl: string | null = $state(null);
@@ -223,6 +268,72 @@
     return false;
   });
 
+  const filtering = $derived(filter.trim().length > 0);
+  // Update state in user terms, feeding the search index so update queries
+  // land on the Sprout updates knob.
+  const backupSummary = $derived.by(() => {
+    if (updateState.available) return `Sprout ${updateState.available.version} ready to install`;
+    if (checkResult === "current") return "Up to date";
+    return "Whole-app backup";
+  });
+  const searchIndex = $derived.by(() =>
+    buildSettingsSearchIndex({
+      themeMode: theme.mode,
+      themeLabel: themeOptions.find((o) => o.mode === theme.mode)?.label ?? "System",
+      installDir,
+      autostart,
+      timeoutMinutes: clampTimeout(timeout),
+      retentionDays: clampRetention(retention),
+      launchConcurrency: clampConcurrency(launchConcurrency),
+      dockMode,
+      dockEdge,
+      dockState,
+      dockWidthPct: clampWidthPct(dockWidthPct),
+      dockDensity,
+      revealDwellMs: clampDwell(revealDwellMs),
+      revealSensitivityPx: clampSens(revealSensitivityPx),
+      companionActiveName: companionUrl
+        ? (companionUrlList.find((s) => s.url === companionUrl)?.name.trim() ||
+          companionDisplayName({ url: companionUrl, name: "" }))
+        : null,
+      companionRatioPct: Math.round(clampCompanionRatio(companionHeightRatio) * 100),
+      companionSiteCount: companionUrlList.length,
+      companionSiteNames: companionUrlList.map((s) => companionDisplayName(s)),
+      companionMuted: settings?.companion_muted ?? false,
+      updateSummary: backupSummary,
+    }),
+  );
+  const resolution = $derived(resolveSettingsFilter(searchIndex, filter));
+  // A knob shows while idle, or when the resolver kept it; knob matches win
+  // over group matches, so a precise query never surfaces a whole group.
+  function knobVisible(id: string): boolean {
+    if (!filtering) return true;
+    return resolution.visibleKnobIds.has(id);
+  }
+  function groupVisible(group: SettingsGroupKey): boolean {
+    if (!filtering) return true;
+    return SETTINGS_GROUP_KNOBS[group].some((id) => resolution.visibleKnobIds.has(id));
+  }
+  // The badge counts what the section holds — the visible knobs while
+  // filtering, so the number can never disagree with the page.
+  function groupKnobCount(group: SettingsGroupKey): number {
+    const ids = SETTINGS_GROUP_KNOBS[group];
+    if (!filtering) return ids.length;
+    return ids.filter((id) => resolution.visibleKnobIds.has(id)).length;
+  }
+  // While filtering, matching groups open so no match hides behind a collapse
+  // — the same filter pattern every other list page follows.
+  function groupEffectiveOpen(key: SettingsGroupKey): boolean {
+    return filtering ? groupVisible(key) : groupOpen[key];
+  }
+  const matchCount = $derived(resolution.visibleKnobIds.size);
+  const noGroupVisible = $derived(
+    filtering &&
+      !groupVisible("general") &&
+      !groupVisible("dock") &&
+      !groupVisible("companion") &&
+      !groupVisible("backup"),
+  );
   // Ticket 115: polite live region that announces appearance and disappearance
   // without moving focus or scrolling — text + color, never color alone.
   let dirtyLiveMessage = $state("");
@@ -638,6 +749,15 @@
       await reconcileQuickLaunchSettings();
       if (perMonitorError) {
         error = "Some per-monitor choices couldn't be saved — see the rows below.";
+        // A failing save expands its owning group and lands focus on the
+        // first refusing row, so the failure is found, not hunted.
+        expandGroups(["dock"]);
+        await tick();
+        const failed = displays.find((d) => displayErrors[d.device_name]);
+        if (failed) {
+          const rowId = `per-monitor-edge-${failed.device_name.replace(/[^a-zA-Z0-9]/g, "-")}`;
+          document.getElementById(rowId)?.focus();
+        }
       } else {
         saved = "Saved — the next run honors these.";
       }
@@ -707,6 +827,11 @@
       error = detail
         ? `Couldn't save the settings — ${detail}`
         : "Couldn't save the settings — try again. If it keeps failing, close Sprout and relaunch.";
+      // A backend refusal names no field, so every group opens and focus
+      // lands on the error itself — the same expand-and-focus promise.
+      expandGroups(["general", "dock", "companion", "backup"]);
+      await tick();
+      document.getElementById("settings-error")?.focus();
     } finally {
       saving = false;
     }
@@ -897,11 +1022,26 @@
       Defaults for authoring and housekeeping, persisted in the Library database and honored by
       every run.
     {/snippet}
+    {#snippet toolbar()}
+      <SearchInput
+        value={filter}
+        placeholder="Filter settings…"
+        ariaLabel="Filter settings"
+        onchange={(v) => (filter = v)}
+      />
+      {#if filtering}
+        <p class="filter-count" role="status">
+          {matchCount === 1 ? "1 match" : `${matchCount} matches`}
+        </p>
+      {/if}
+    {/snippet}
   </PageHeader>
 
-  {#if error}
-    <Notice tone="error">{error}</Notice>
-  {/if}
+  <div id="settings-error" tabindex="-1" class="settings-error-anchor">
+    {#if error}
+      <Notice tone="error">{error}</Notice>
+    {/if}
+  </div>
   {#if saved}
     <Notice tone="ok">{saved}</Notice>
   {/if}
@@ -921,6 +1061,15 @@
       </div>
     </EmptyState>
   {:else}
+    {#if noGroupVisible}
+      <EmptyState icon="search" title={`Nothing matches “${filter.trim()}”`}>
+        <p>Try a different name, or clear the filter to see every setting.</p>
+        <div class="empty-cta">
+          <Button variant="secondary" onclick={() => (filter = "")}>Clear filter</Button>
+        </div>
+      </EmptyState>
+    {/if}
+    {#if !noGroupVisible}
     <form
       class="form"
       onsubmit={(e) => {
@@ -928,7 +1077,16 @@
         save();
       }}
     >
-      <article class="knob">
+      {#if groupVisible("general")}
+        <!-- General: theme, install directory, auto-start, and run defaults. -->
+        <GroupAccordion
+          open={groupEffectiveOpen("general")}
+          controls="group-general-body"
+          name="General"
+          count={groupKnobCount("general")}
+          onToggle={() => toggleGroup("general")}
+        >
+      <article class="knob" hidden={!knobVisible("theme")}>
         <div class="knob__body">
           <span class="knob__label">Theme</span>
           <p class="knob__hint">
@@ -952,7 +1110,7 @@
         </div>
       </article>
 
-      <article class="knob">
+      <article class="knob" hidden={!knobVisible("install-dir")}>
         <div class="knob__body">
           <label class="knob__label" for="install-dir">Install directory</label>
           <p class="knob__hint">
@@ -980,7 +1138,117 @@
         </div>
       </article>
 
-      <article class="knob">
+      <article class="knob" hidden={!knobVisible("autostart")}>
+        <div class="knob__body">
+          <span class="knob__label">Start with Windows</span>
+          <p class="knob__hint">
+            Registers Sprout to start at login, resident in the tray — the main
+            window stays closed and a docked Quick Launch bar reappears on its
+            own. Turning it off removes the registration immediately; no restart
+            needed.
+          </p>
+        </div>
+        <div class="knob__input">
+          <Select
+            id="autostart"
+            variant="small"
+            value={autostart}
+            onchange={(v) => pickAutostart(v)}
+          >
+            {#each autostartOptions as option (option.value)}
+              <option value={option.value}>{option.label}</option>
+            {/each}
+          </Select>
+        </div>
+      </article>
+
+      <article class="knob" hidden={!knobVisible("default-timeout")}>
+        <div class="knob__body">
+          <label class="knob__label" for="default-timeout">Default timeout</label>
+          <p class="knob__hint">
+            Minutes a requirement may take before its installer is killed. New requirements
+            in the preset composer start with this value; you can still override each one.
+            1–1440 min, default 10 min.
+          </p>
+        </div>
+        <div class="knob__input">
+          <input
+            id="default-timeout"
+            name="default-timeout"
+            class="field__input"
+            type="number"
+            min="1"
+            max="1440"
+            autocomplete="off"
+            value={timeout}
+            oninput={(e) => (timeout = Number((e.target as HTMLInputElement).value))}
+          />
+          <span class="knob__unit">min</span>
+        </div>
+      </article>
+
+      <article class="knob" hidden={!knobVisible("log-retention")}>
+        <div class="knob__body">
+          <label class="knob__label" for="log-retention">Log retention</label>
+          <p class="knob__hint">
+            How long a finished run's raw log folder is kept before it is pruned. Pruning
+            happens after every run and at app start. The runs list itself is never deleted.
+            1–3650 days, default 30 days.
+          </p>
+        </div>
+        <div class="knob__input">
+          <input
+            id="log-retention"
+            name="log-retention"
+            class="field__input"
+            type="number"
+            min="1"
+            max="3650"
+            autocomplete="off"
+            value={retention}
+            oninput={(e) => (retention = Number((e.target as HTMLInputElement).value))}
+          />
+          <span class="knob__unit">days</span>
+        </div>
+      </article>
+
+      <article class="knob" hidden={!knobVisible("launch-concurrency")}>
+        <div class="knob__body">
+          <label class="knob__label" for="launch-concurrency">Launch concurrency</label>
+          <p class="knob__hint">
+            How many Quick Launch apps may start at once before the rest queue. Lower is more
+            sequential and gentle on the system; higher is more parallel and snappier but
+            heavier. 1–50 apps, default 8.
+          </p>
+        </div>
+        <div class="knob__input">
+          <input
+            id="launch-concurrency"
+            name="launch-concurrency"
+            class="field__input"
+            type="number"
+            min="1"
+            max="50"
+            autocomplete="off"
+            value={launchConcurrency}
+            oninput={(e) => (launchConcurrency = Number((e.target as HTMLInputElement).value))}
+          />
+          <span class="knob__unit">apps</span>
+        </div>
+      </article>
+        </GroupAccordion>
+      {/if}
+
+      {#if groupVisible("dock")}
+        <!-- Dock: window state, mode, edge, width, density, per-monitor, reveal. -->
+        <GroupAccordion
+          open={groupEffectiveOpen("dock")}
+          controls="group-dock-body"
+          name="Dock"
+          count={groupKnobCount("dock")}
+          onToggle={() => toggleGroup("dock")}
+        >
+      <article class="knob" hidden={!knobVisible("dock-state")}>
         <div class="knob__body">
           <label class="knob__label" for="dock-state">Quick Launch window</label>
           <p class="knob__hint">
@@ -1003,7 +1271,7 @@
         </div>
       </article>
 
-      <article class="knob">
+      <article class="knob" hidden={!knobVisible("dock-mode")}>
         <div class="knob__body">
           <label class="knob__label" for="dock-mode">Dock mode</label>
           <p class="knob__hint">
@@ -1021,7 +1289,7 @@
         </div>
       </article>
 
-      <article class="knob">
+      <article class="knob" hidden={!knobVisible("dock-edge")}>
         <div class="knob__body">
           <label class="knob__label" for="dock-edge">Default dock edge</label>
           <p class="knob__hint">
@@ -1038,7 +1306,7 @@
         </div>
       </article>
 
-      <article class="knob">
+      <article class="knob" hidden={!knobVisible("dock-width")}>
         <div class="knob__body">
           <label class="knob__label" for="dock-width">Dock width</label>
           <p class="knob__hint">
@@ -1071,7 +1339,7 @@
         </div>
       </article>
 
-      <article class="knob">
+      <article class="knob" hidden={!knobVisible("dock-density")}>
         <div class="knob__body">
           <label class="knob__label" for="dock-density">List density</label>
           <p class="knob__hint">
@@ -1088,7 +1356,7 @@
         </div>
       </article>
 
-      {#if displays.length > 1}
+      {#if displays.length > 1 && knobVisible("per-monitor")}
         <!-- Per-monitor: flat knobs per display (flattened to reuse .knob, 0005 rule 5). No nested card. Global defaults above stay fallback. -->
         <div class="per-monitor" aria-labelledby="per-monitor-title">
           <div class="per-monitor__header">
@@ -1105,7 +1373,7 @@
             {@const reasonId = `per-monitor-reason-${d.device_name.replace(/[^a-zA-Z0-9]/g, "-")}`}
             {@const hasSeam = !d.left_eligible || !d.right_eligible}
             {@const widthPct = clampWidthPct(displayWidths[d.device_name] ?? dockWidthPct)}
-            <article class="knob">
+            <article class="knob" hidden={!knobVisible("per-monitor")}>
               <div class="knob__body">
                 <span class="knob__label">{d.label} · {d.resolution}</span>
                 {#if hasSeam}
@@ -1157,19 +1425,76 @@
           {/each}
         </div>
       {/if}
+      {#if dockMode === "auto-hide"}
+        <!-- Reveal tuning lives at the dock group's footer as flat reused rows
+             (research 0006 pattern 7 without a nested disclosure — at most two
+             disclosure levels, so the group header is the only collapse).
+             Hidden entirely when auto-hide is not the active dock mode. -->
+        <article class="knob" hidden={!knobVisible("reveal-dwell")}>
+          <div class="knob__body">
+            <label class="knob__label" for="reveal-dwell">Reveal delay</label>
+            <p class="knob__hint">
+              Hold time at the screen edge after pushing into it before the hidden dock
+              slides out. Shorter feels snappier but may fire on grazes along the seam;
+              longer needs a deliberate hold and resists accidental reveals. 0–1000 ms,
+              default 200 ms.
+            </p>
+          </div>
+          <div class="knob__input">
+            <input
+              id="reveal-dwell"
+              name="reveal-dwell"
+              class="field__input"
+              type="number"
+              min="0"
+              max="1000"
+              autocomplete="off"
+              value={revealDwellMs}
+              oninput={(e) => (revealDwellMs = Number((e.target as HTMLInputElement).value))}
+            />
+            <span class="knob__unit">ms</span>
+          </div>
+        </article>
 
-      <!-- Companion is an optional dock capability, so its global controls stay beside the
-           dock settings but collapse as one named section (0004 rule 2; 0006 pattern 7).
-           URL authoring remains on its dedicated configuration surface (0006 pattern 1). -->
-      <div class="dock-advanced">
-        <Disclosure
-          open={companionOpen}
-          controls="companion-settings-body"
-          label="Companion"
-          onclick={() => (companionOpen = !companionOpen)}
-        />
-        <div id="companion-settings-body" class="advanced__body" hidden={!companionOpen}>
-          <article class="knob">
+        <article class="knob" hidden={!knobVisible("reveal-sensitivity")}>
+          <div class="knob__body">
+            <label class="knob__label" for="reveal-sensitivity">Reveal sensitivity</label>
+            <p class="knob__hint">
+              Distance the cursor must push into the edge before the hold timer starts.
+              Lower needs only a nudge and feels immediate; higher demands a purposeful push
+              and ignores brushes along the edge. 0–50 px, default 12 px.
+            </p>
+          </div>
+          <div class="knob__input">
+            <input
+              id="reveal-sensitivity"
+              name="reveal-sensitivity"
+              class="field__input"
+              type="number"
+              min="0"
+              max="50"
+              autocomplete="off"
+              value={revealSensitivityPx}
+              oninput={(e) => (revealSensitivityPx = Number((e.target as HTMLInputElement).value))}
+            />
+            <span class="knob__unit">px</span>
+          </div>
+        </article>
+      {/if}
+        </GroupAccordion>
+      {/if}
+
+      {#if groupVisible("companion")}
+        <!-- Companion: active site, pane height, and saved sites. URL authoring
+             stays on its dedicated configuration surface (research 0006 pattern 1). -->
+        <GroupAccordion
+          open={groupEffectiveOpen("companion")}
+          controls="group-companion-body"
+          name="Companion"
+          count={groupKnobCount("companion")}
+          onToggle={() => toggleGroup("companion")}
+        >
+          <article class="knob" hidden={!knobVisible("companion-active")}>
             <div class="knob__body">
               <label class="knob__label" for="companion-url">Active site</label>
               <p class="knob__hint">
@@ -1191,7 +1516,7 @@
             </div>
           </article>
 
-          <article class="knob">
+          <article class="knob" hidden={!knobVisible("companion-height")}>
             <div class="knob__body">
               <label class="knob__label" for="companion-ratio">Pane height</label>
               <p class="knob__hint">
@@ -1215,7 +1540,7 @@
             </div>
           </article>
 
-          <div class="companion-manager">
+          <div class="companion-manager" hidden={!knobVisible("companion-sites")}>
             <div class="knob__body">
               <span class="knob__label">Saved sites</span>
               <p class="knob__hint">
@@ -1224,103 +1549,19 @@
             </div>
             <Button variant="secondary" onclick={() => goto("/companion")}>Manage sites</Button>
           </div>
-        </div>
-      </div>
-
-      {#if dockMode === "auto-hide"}
-        <!-- Reveal tuning (ticket 113): quiet knobs under a collapsed disclosure at the
-             end of the dock group (research 0004 no-content→no-chrome, 0006 pattern 7 collapsible
-             sections, 0006 pattern 4 proximity — tuning lives at the dock group's footer, not
-             page-bottom, so the dock cluster stays contiguous). Hidden entirely when auto-hide
-             is not the active dock mode. Distinct label "Reveal tuning" gives information scent
-             per 0008 rule 3, avoiding duplicate "Advanced" carets. -->
-        <div class="dock-advanced">
-          <Disclosure
-            open={advancedOpen}
-            controls="dock-advanced-body"
-            label="Reveal tuning"
-            onclick={() => (advancedOpen = !advancedOpen)}
-          />
-          <div id="dock-advanced-body" class="advanced__body" hidden={!advancedOpen}>
-            <article class="knob">
-              <div class="knob__body">
-                <label class="knob__label" for="reveal-dwell">Reveal delay</label>
-                <p class="knob__hint">
-                  Hold time at the screen edge after pushing into it before the hidden dock
-                  slides out. Shorter feels snappier but may fire on grazes along the seam;
-                  longer needs a deliberate hold and resists accidental reveals. 0–1000 ms,
-                  default 200 ms.
-                </p>
-              </div>
-              <div class="knob__input">
-                <input
-                  id="reveal-dwell"
-                  name="reveal-dwell"
-                  class="field__input"
-                  type="number"
-                  min="0"
-                  max="1000"
-                  autocomplete="off"
-                  value={revealDwellMs}
-                  oninput={(e) => (revealDwellMs = Number((e.target as HTMLInputElement).value))}
-                />
-                <span class="knob__unit">ms</span>
-              </div>
-            </article>
-
-            <article class="knob">
-              <div class="knob__body">
-                <label class="knob__label" for="reveal-sensitivity">Reveal sensitivity</label>
-                <p class="knob__hint">
-                  Distance the cursor must push into the edge before the hold timer starts.
-                  Lower needs only a nudge and feels immediate; higher demands a purposeful push
-                  and ignores brushes along the edge. 0–50 px, default 12 px.
-                </p>
-              </div>
-              <div class="knob__input">
-                <input
-                  id="reveal-sensitivity"
-                  name="reveal-sensitivity"
-                  class="field__input"
-                  type="number"
-                  min="0"
-                  max="50"
-                  autocomplete="off"
-                  value={revealSensitivityPx}
-                  oninput={(e) => (revealSensitivityPx = Number((e.target as HTMLInputElement).value))}
-                />
-                <span class="knob__unit">px</span>
-              </div>
-            </article>
-          </div>
-        </div>
+        </GroupAccordion>
       {/if}
 
-      <article class="knob">
-        <div class="knob__body">
-          <span class="knob__label">Start with Windows</span>
-          <p class="knob__hint">
-            Registers Sprout to start at login, resident in the tray — the main
-            window stays closed and a docked Quick Launch bar reappears on its
-            own. Turning it off removes the registration immediately; no restart
-            needed.
-          </p>
-        </div>
-        <div class="knob__input">
-          <Select
-            id="autostart"
-            variant="small"
-            value={autostart}
-            onchange={(v) => pickAutostart(v)}
-          >
-            {#each autostartOptions as option (option.value)}
-              <option value={option.value}>{option.label}</option>
-            {/each}
-          </Select>
-        </div>
-      </article>
-
-      <article class="knob">
+      {#if groupVisible("backup")}
+        <!-- Backup & housekeeping: whole-app backup and Sprout updates. -->
+        <GroupAccordion
+          open={groupEffectiveOpen("backup")}
+          controls="group-backup-body"
+          name="Backup & housekeeping"
+          count={groupKnobCount("backup")}
+          onToggle={() => toggleGroup("backup")}
+        >
+      <article class="knob" hidden={!knobVisible("backup")}>
         <div class="knob__body">
           <span class="knob__label">Backup</span>
           <p class="knob__hint">
@@ -1345,7 +1586,7 @@
         </div>
       </article>
 
-      <article class="knob">
+      <article class="knob" hidden={!knobVisible("updates")}>
         <div class="knob__body">
           <span class="knob__label">Sprout updates</span>
           <p class="knob__hint">
@@ -1389,103 +1630,10 @@
           {/if}
         </div>
       </article>
-
-      <!-- Housekeeping advanced (research 0004 progressive disclosure, 0006 pattern 7):
-           infrequent tuning — timeout / retention / concurrency — collapsed behind
-           an obvious affordance. Always visible (not content-gated: defaults always
-           meaningful), never dock-conditional. Install directory stays outside
-           (browse action + absolute-path affordance, not plain number tuning). -->
-      <div class="dock-advanced">
-        <Disclosure
-          open={housekeepingAdvancedOpen}
-          controls="housekeeping-advanced-body"
-          label="Advanced"
-          onclick={() => (housekeepingAdvancedOpen = !housekeepingAdvancedOpen)}
-        />
-        <div id="housekeeping-advanced-body" class="advanced__body" hidden={!housekeepingAdvancedOpen}>
-          <article class="knob">
-            <div class="knob__body">
-              <label class="knob__label" for="default-timeout">Default timeout</label>
-              <p class="knob__hint">
-                Minutes a requirement may take before its installer is killed. New requirements
-                in the preset composer start with this value; you can still override each one.
-                1–1440 min, default 10 min.
-              </p>
-            </div>
-            <div class="knob__input">
-              <input
-                id="default-timeout"
-                name="default-timeout"
-                class="field__input"
-                type="number"
-                min="1"
-                max="1440"
-                autocomplete="off"
-                value={timeout}
-                oninput={(e) => (timeout = Number((e.target as HTMLInputElement).value))}
-              />
-              <span class="knob__unit">min</span>
-            </div>
-          </article>
-
-          <article class="knob">
-            <div class="knob__body">
-              <label class="knob__label" for="log-retention">Log retention</label>
-              <p class="knob__hint">
-                How long a finished run's raw log folder is kept before it is pruned. Pruning
-                happens after every run and at app start. The runs list itself is never deleted.
-                1–3650 days, default 30 days.
-              </p>
-            </div>
-            <div class="knob__input">
-              <input
-                id="log-retention"
-                name="log-retention"
-                class="field__input"
-                type="number"
-                min="1"
-                max="3650"
-                autocomplete="off"
-                value={retention}
-                oninput={(e) => (retention = Number((e.target as HTMLInputElement).value))}
-              />
-              <span class="knob__unit">days</span>
-            </div>
-          </article>
-
-          <article class="knob">
-            <div class="knob__body">
-              <label class="knob__label" for="launch-concurrency">Launch concurrency</label>
-              <p class="knob__hint">
-                How many Quick Launch apps may start at once before the rest queue. Lower is more
-                sequential and gentle on the system; higher is more parallel and snappier but
-                heavier. 1–50 apps, default 8.
-              </p>
-            </div>
-            <div class="knob__input">
-              <input
-                id="launch-concurrency"
-                name="launch-concurrency"
-                class="field__input"
-                type="number"
-                min="1"
-                max="50"
-                autocomplete="off"
-                value={launchConcurrency}
-                oninput={(e) => (launchConcurrency = Number((e.target as HTMLInputElement).value))}
-              />
-              <span class="knob__unit">apps</span>
-            </div>
-          </article>
-        </div>
-      </div>
-
-      <div class="form__actions">
-        <Button kind="submit" disabled={saving}>
-          {saving ? "Saving…" : "Save settings"}
-        </Button>
-      </div>
+        </GroupAccordion>
+      {/if}
     </form>
+    {/if}
     {#if isDirty}
       <!-- Ticket 115: fixed bottom bar — warning text + Save/Discard, pinned
            regardless of scroll, until saved or reverted. Text + color, never
@@ -1694,7 +1842,9 @@
   .form {
     display: flex;
     flex-direction: column;
-    gap: var(--space-3);
+    /* No own gap: sections arrive with the accordion's component-owned
+       separation, so collapsed rows sit as one list, not adrift. */
+    gap: 0;
   }
 
   .knob {
@@ -1708,20 +1858,35 @@
     padding: var(--space-4);
   }
 
-  .dock-advanced {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-  }
-
-  .advanced__body {
+  /* Section chrome (headers, caret anatomy, section spacing) belongs to the
+     shared accordion — the page only keeps its knobs' rhythm inside the
+     rows container, which carries none of its own. */
+  .form :global(.group__rows) {
     display: flex;
     flex-direction: column;
     gap: var(--space-3);
   }
 
-  .advanced__body[hidden] {
+  /* Class-based display overrides `hidden`'s UA rule, so filtered-out knobs
+     need the explicit collapse. */
+  .knob[hidden],
+  .companion-manager[hidden] {
     display: none;
+  }
+
+  .filter-count {
+    margin: 0 0 0 var(--space-3);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    letter-spacing: var(--tracking-mono);
+    color: var(--text-muted);
+    white-space: nowrap;
+  }
+
+  /* Programmatic focus target for a failing save — the error Notice itself
+     is the visual indicator, so the anchor draws no ring of its own. */
+  .settings-error-anchor:focus {
+    outline: none;
   }
 
   .companion-manager {
@@ -1869,11 +2034,6 @@
   .knob__unit--auto {
     width: auto;
     white-space: nowrap;
-  }
-
-  .form__actions {
-    display: flex;
-    justify-content: flex-end;
   }
 
   .export-picker {
