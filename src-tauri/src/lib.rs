@@ -514,6 +514,11 @@ fn update_settings(
     let conn = lock(&state)?;
     settings::save(&conn, &settings)?;
     drop(conn);
+    // Off (null or blank) must leave no WebView2 behind — same guarantee as
+    // set_companion_url, since this bulk save is the Settings Off-select path.
+    if settings::normalize_companion_url(settings.companion_url.as_deref()).is_none() {
+        companion_audio::destroy_webview(&app);
+    }
     if let Err(e) = quick_window::apply_settings(&app, &settings) {
         eprintln!("Could not apply dock settings to the live window: {e}");
     }
@@ -1941,7 +1946,9 @@ fn per_display_key<'a>(identity: Option<&'a str>, device: &'a str) -> String {
 
 /// Sets the companion active URL (ticket 125): https:// or null (off).
 /// Validates, persists, and notifies the Quick Launch window so the pane
-/// appears/disappears without reopening (content-gated).
+/// appears/disappears without reopening (content-gated). Turning off also
+/// destroys the live native child here — the frontend's close is best
+/// effort, so without this an orphaned WebView2 keeps ~150 MB after Off.
 #[tauri::command]
 fn set_companion_url(
     app: AppHandle,
@@ -1953,6 +1960,9 @@ fn set_companion_url(
     let conn = lock(&state)?;
     settings::save_companion_url(&conn, normalized.as_deref())?;
     drop(conn);
+    if normalized.is_none() {
+        companion_audio::destroy_webview(&app);
+    }
     emit_quick_launch_changed(&app);
     Ok(())
 }

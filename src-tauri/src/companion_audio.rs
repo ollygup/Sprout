@@ -20,6 +20,18 @@ pub struct CompanionAudioState {
 /// The child WebView label the dock frontend creates.
 pub const COMPANION_WEBVIEW_LABEL: &str = "companion";
 
+/// Destroys the live companion child, if any — best effort, missing child is
+/// the common case (floating, off, never created). The settings writers call
+/// this when companion turns off, so a native child whose JS handle is gone
+/// (an in-flight creation racing its close, a stale cached handle) cannot
+/// keep a ~150 MB renderer alive after Off.
+pub fn destroy_webview(app: &AppHandle) {
+    let Some(webview) = app.get_webview(COMPANION_WEBVIEW_LABEL) else {
+        return;
+    };
+    let _ = webview.close();
+}
+
 /// Reads the persisted mute without touching any WebView.
 pub fn persisted_muted(app: &AppHandle) -> bool {
     let Some(state) = app.try_state::<crate::AppState>() else {
@@ -33,13 +45,16 @@ pub fn persisted_muted(app: &AppHandle) -> bool {
 
 /// The current toolbar state: persisted mute plus live playback. Heals a
 /// drifted WebView toward the persisted mute, so a fresh pane never stays
-/// loud after silence was asked for.
+/// loud after silence was asked for. Also pins the child to the LOW memory
+/// usage target on every read, so recreations (navigation, redock, restart)
+/// keep the always-on reduction without a new command or event.
 pub fn current_state(app: &AppHandle, persisted: bool) -> CompanionAudioState {
     match read_live(app) {
         Some((_live_muted, live_playing)) => {
             if _live_muted != persisted {
                 apply_muted(app, persisted);
             }
+            apply_memory_profile(app);
             CompanionAudioState {
                 muted: persisted,
                 playing: live_playing,
@@ -60,6 +75,22 @@ pub fn apply_muted(app: &AppHandle, muted: bool) {
     };
     let _ = webview.with_webview(move |platform| {
         apply_to_platform(&platform, muted);
+    });
+}
+
+/// Pins the live companion child to WebView2's LOW memory usage target:
+/// the runtime favors discarding cached renderer resources sooner, which
+/// trims the steady-state working set of a glanceable single-site pane at
+/// the cost of re-fetching more often on revisit. Best effort and
+/// idempotent — re-applied on every audio-state read (creation, the dock's
+/// playing poll, the mute toggle), so no caller tracks whether it landed.
+/// No-op while the pane has no native surface.
+pub fn apply_memory_profile(app: &AppHandle) {
+    let Some(webview) = app.get_webview(COMPANION_WEBVIEW_LABEL) else {
+        return;
+    };
+    let _ = webview.with_webview(move |platform| {
+        apply_memory_profile_to_platform(&platform);
     });
 }
 
@@ -122,3 +153,26 @@ fn apply_to_platform(platform: &tauri::webview::PlatformWebview, muted: bool) {
 
 #[cfg(not(windows))]
 fn apply_to_platform(_platform: &tauri::webview::PlatformWebview, _muted: bool) {}
+
+#[cfg(windows)]
+fn apply_memory_profile_to_platform(platform: &tauri::webview::PlatformWebview) {
+    use windows_core::Interface;
+    unsafe {
+        let Ok(core) = platform.controller().CoreWebView2() else {
+            return;
+        };
+        let Ok(v19) =
+            core.cast::<webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2_19>()
+        else {
+            // Pre-1.0.2739 runtimes predate the memory target API — the pane
+            // still works, it just keeps the default (Normal) target.
+            return;
+        };
+        let _ = v19.SetMemoryUsageTargetLevel(
+            webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn apply_memory_profile_to_platform(_platform: &tauri::webview::PlatformWebview) {}

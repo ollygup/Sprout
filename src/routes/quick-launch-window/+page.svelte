@@ -174,6 +174,16 @@
     "Couldn't show the companion pane — it never finished loading.";
   let companionSyncRunning = false;
   let companionSyncPending = false;
+  // Monotonic id for refreshCompanion runs — a run superseded by a newer one
+  // discards its results instead of assigning stale state (e.g. a pre-save
+  // read landing after an off-save and resurrecting the old URL for good).
+  // Plain counter, never reactive: only compared, never rendered.
+  let companionRefreshGen = 0;
+  // The off-transition orphan poller below — one live at most; re-arming
+  // clears the previous so rapid off/on cycles never stack pollers.
+  // Bare-timer typed like the audio poll below (this tsconfig resolves the
+  // bare setInterval to Node's Timeout).
+  let companionSweeper: ReturnType<typeof setInterval> | undefined;
   let companionWebviewFailed = $state(false);
   let companionFailedUrl: string | null = $state(null);
   let companionFailureDetail = $state("");
@@ -246,6 +256,7 @@
     }
   }
   async function refreshCompanion() {
+    const gen = ++companionRefreshGen;
     // Ordered launch reads: dock state first (which monitor the dock sits
     // on), then the global ratio, then that monitor's override — the native
     // child is created only after the resolved ratio lands.
@@ -295,6 +306,10 @@
     if (!displayResolved && dock.docked && url) {
       error = RESOLVE_FAILED_MSG;
     }
+    // A newer refresh started while this one was awaiting — its results win.
+    // Applying these stale ones here would resurrect a pre-save URL after an
+    // off-save (or clobber a rapid off→on), so drop them silently.
+    if (gen !== companionRefreshGen) return;
     companionUrl = url;
     companionRatio = clampCompanionRatio(perMonitor ?? globalRatio);
     companionRatioReady = true;
@@ -492,10 +507,55 @@
       companionFailureDetail = "";
     }
     if (!companionVisible || !companionUrl) {
+      const hadWebview = companionWebview !== null;
       if (companionWebview) {
         try { await companionWebview.close(); } catch {}
         companionWebview = null;
         companionWebviewBorn = false;
+      }
+      // A creation racing this teardown can register its native child after
+      // the cached handle died (cold WebView2 profile init is slow) — sweep
+      // by label so no ownerless child keeps a renderer alive after Off.
+      // The backend destroys by label on save too; this catches a child that
+      // lands after that destroy. The late re-sweep below only arms when a
+      // child actually existed, so idle off-states schedule no timers.
+      try {
+        const orphan = await Webview.getByLabel("companion");
+        if (orphan) await orphan.close();
+      } catch {}
+      if (hadWebview) {
+        // A child created just now can still land after the kills above
+        // (cold WebView2 profile init is slow, slower still on weak devices,
+        // where this read as white → bare site → gone at ~15–20 s). Re-sweep
+        // on a short poll while the pane stays gone (off or undocked with the
+        // same URL) instead of once after 12 s, so an orphan lives ~1 s, not
+        // ~12 s. Every tick re-checks the gate: a legitimately returned pane
+        // (rapid off→on) stops the poller untouched, as does the hard cap —
+        // stale pollers from superseded transitions self-terminate.
+        const sweptUrl = companionUrl;
+        clearInterval(companionSweeper);
+        companionSweeper = setInterval(() => {
+          if ((companionUrl ?? null) !== (sweptUrl ?? null) || useWebview) {
+            clearInterval(companionSweeper);
+            companionSweeper = undefined;
+            return;
+          }
+          void (async () => {
+            try {
+              const late = await Webview.getByLabel("companion");
+              if (late) await late.close();
+            } catch {
+              clearInterval(companionSweeper);
+              companionSweeper = undefined;
+            }
+          })();
+        }, 1000);
+        // Hard stop past the cold-init window: a birth that never lands is
+        // the birth-timeout banner's job, not this poller's.
+        window.setTimeout(() => {
+          clearInterval(companionSweeper);
+          companionSweeper = undefined;
+        }, COMPANION_BORN_TIMEOUT_MS + 5000);
       }
       companionWebviewFailed = false;
       companionFailedUrl = null;
@@ -697,6 +757,8 @@
       clearTimeout(copiedTimer);
       clearTimeout(runNoticeTimer);
       clearInterval(companionAudioTimer);
+      clearInterval(companionSweeper);
+      companionSweeper = undefined;
       // Cleanup companion webview on unmount
       if (companionWebview) {
         void companionWebview.close().catch(() => {});

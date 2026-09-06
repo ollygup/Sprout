@@ -1437,6 +1437,30 @@ mod tests {
     }
 
     #[test]
+    fn companion_off_forms_normalize_to_none() {
+        // WHY this lock exists: both settings writers (set_companion_url and
+        // the bulk update_settings) destroy the live companion WebView2
+        // exactly when the saved URL normalizes to None — every off-form
+        // below must take that branch, or Off can orphan a ~150 MB renderer.
+        assert_eq!(normalize_companion_url(None), None);
+        assert_eq!(normalize_companion_url(Some("")), None);
+        assert_eq!(normalize_companion_url(Some("   ")), None);
+        assert_eq!(
+            normalize_companion_url(Some("https://music.youtube.com")),
+            Some("https://music.youtube.com".to_string())
+        );
+        // Full-settings save carries the off state too.
+        let conn = conn();
+        let mut s = Settings::default();
+        s.companion_url = Some("https://music.youtube.com".to_string());
+        save(&conn, &s).unwrap();
+        assert!(load(&conn).companion_url.is_some());
+        s.companion_url = None;
+        save(&conn, &s).unwrap();
+        assert_eq!(load(&conn).companion_url, None);
+    }
+
+    #[test]
     fn companion_mute_roundtrip_and_default() {
         // WHY the default matters: a fresh install must never start silent —
         // muting is always an explicit toolbar action.
