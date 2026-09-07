@@ -13,9 +13,9 @@
 
 ## ACs
 
-- [ ] Zoom persists per site across redock/restart; unset sites follow today's auto zoom.
-- [ ] Zoom never moves the height splitter and vice versa.
-- [ ] `npm.cmd run check` 0 errors; related frontend tests green.
+- [x] Zoom persists per site across redock/restart; unset sites follow today's auto zoom.
+- [x] Zoom never moves the height splitter and vice versa.
+- [x] `npm.cmd run check` 0 errors; related frontend tests green.
 
 ## Verification
 

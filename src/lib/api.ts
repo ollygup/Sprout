@@ -459,9 +459,16 @@ export function setCompanionHeightRatioForDisplay(display: string, ratio: number
   return invoke<void>("set_companion_height_ratio_for_display", { display, ratio });
 }
 
-/** Companion mobile UA: identify WebView2 as Chromium so responsive sites do not receive Safari-only bundles. */
+/** Companion mobile identity: Chromium on Android, so responsive sites serve
+ *  their mobile layout to the narrow dock pane. */
 export const COMPANION_MOBILE_UA =
-  "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36";
+  "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Mobile Safari/537.36";
+
+/** Companion desktop identity (Edge variant): `Windows NT 10.0` covers
+ *  current Windows releases (Win11 differs only via Client Hints); the
+ *  Edge token first-classes sites that block generic mobile identities. */
+export const COMPANION_DESKTOP_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36 Edg/150.0.0.0";
 
 /** One connected display (ticket 111): label, resolution, identity, and
  * wall eligibility from the live arrangement. */

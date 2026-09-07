@@ -319,10 +319,15 @@ export interface Settings {
 }
 
 /** One Companion saved site: its https URL plus the user's display name for
- *  it. A blank name renders as the URL everywhere. */
+ *  it. A blank name renders as the URL everywhere. `ua` is the site's browser
+ *  identity — "mobile" (default) or "desktop" for desktop-only sites;
+ *  missing/legacy reads as mobile. `zoom` is the user's explicit page zoom as
+ *  a factor — absent/null means the width-derived auto zoom. */
 export interface CompanionSite {
   url: string;
   name: string;
+  ua?: "mobile" | "desktop";
+  zoom?: number | null;
 }
 
 /** The dock Companion toolbar's audio picture: persisted mute plus live

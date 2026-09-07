@@ -1913,7 +1913,9 @@ fn get_display_dock_width_pct(
     Ok(db::load_dock_width_pct_identified(&conn, identity.as_deref(), &device_name))
 }
 
-/// Persists one display's dock width % (ticket 128): 10–30, validated first.
+/// Persists one display's dock width % (ticket 128; per-mode caps in
+/// ADR-0021): 10–60 stored, validated first — fixed applies at most 30 on the
+/// dock, auto-hide to 60.
 #[tauri::command]
 fn set_display_dock_width_pct(
     state: State<'_, AppState>,

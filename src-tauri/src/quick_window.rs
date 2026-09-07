@@ -78,7 +78,7 @@ use crate::{
     appbar, db, settings,
     constants::window::{
         AUTOHIDE_ANIM_POLL_MS, AUTOHIDE_POLL_MS, AUTOHIDE_SLIDE_MS, DOCK_WIDTH, WINDOW_HEIGHT,
-        WINDOW_WIDTH, dock_width_px,
+        WINDOW_WIDTH, dock_width_px_for_mode,
     },
     AppState,
 };
@@ -618,22 +618,24 @@ fn resolve_dock_width_pct(
     }
 }
 
-/// The effective docked-strip width for `hwnd`'s monitor at `pct` % (ticket
-/// 128): % of the monitor's full width (`rcMonitor` — never the work area,
-/// which a fixed dock shrinks and would feed back into itself), floored at
-/// today's width and capped at 30% (see `dock_width_px`). Falls back to the
-/// floor when the monitor cannot be probed.
-fn dock_width_for_hwnd(hwnd: HWND, pct: u32) -> i32 {
+/// The effective docked-strip width for `hwnd`'s monitor at `pct` % in `mode`
+/// (ticket 128; per-mode caps in ADR-0021): % of the monitor's full width
+/// (`rcMonitor` — never the work area, which a fixed dock shrinks and would
+/// feed back into itself), floored at today's width and capped at the mode's
+/// cap (see `dock_width_px_for_mode`). Falls back to the floor when the
+/// monitor cannot be probed.
+fn dock_width_for_hwnd(hwnd: HWND, pct: u32, mode: &str) -> i32 {
     match appbar::monitor_rect(hwnd) {
-        Some(monitor) => dock_width_px(monitor.right - monitor.left, pct),
+        Some(monitor) => dock_width_px_for_mode(monitor.right - monitor.left, pct, mode),
         None => DOCK_WIDTH as i32,
     }
 }
 
 /// The effective width for the dock's current monitor, resolved the way
-/// `dock(None)` does (ticket 128): per-monitor memory, falling back to the
-/// given Settings. Falls back to the floor when the window or monitor cannot
-/// be probed — a width lookup must never fail a dock.
+/// `dock(None)` does (ticket 128; per-mode caps in ADR-0021): per-monitor
+/// memory, falling back to the given Settings, applied at the live dock mode.
+/// Falls back to the floor when the window or monitor cannot be probed — a
+/// width lookup must never fail a dock.
 fn dock_width_for_current(
     app: &AppHandle,
     conn: &Connection,
@@ -641,7 +643,7 @@ fn dock_width_for_current(
     current: &DockState,
     hwnd: HWND,
 ) -> i32 {
-    let _ = (app, current);
+    let _ = app;
     let pct = db::load_dock_width_pct_identified(conn, current.identity.as_deref(), &current.monitor)
         .unwrap_or(settings.dock_width_pct);
     let pct = if settings::validate_dock_width_pct(pct).is_ok() {
@@ -649,7 +651,7 @@ fn dock_width_for_current(
     } else {
         settings::DEFAULT_DOCK_WIDTH_PCT
     };
-    dock_width_for_hwnd(hwnd, pct)
+    dock_width_for_hwnd(hwnd, pct, &current.mode)
 }
 
 /// Refuses a seam edge with the shared reason string (ticket 111).
@@ -735,10 +737,11 @@ pub fn dock(app: &AppHandle, edge: Option<&str>) -> Result<(), String> {
         };
         settings::validate_dock_edge(&edge)?;
         let mode = resolved_mode;
-        // Ticket 128: the monitor's remembered width %, falling back to the
-        // Settings default — % of this monitor's full width, floored at 340.
+        // Ticket 128; per-mode caps in ADR-0021: the monitor's remembered
+        // width %, falling back to the Settings default — % of this monitor's
+        // full width, floored at 340, capped at the resolved mode's cap.
         let pct = resolve_dock_width_pct(&conn, &settings, identity.as_deref(), &monitor);
-        let width = dock_width_for_hwnd(hwnd.0, pct);
+        let width = dock_width_for_hwnd(hwnd.0, pct, &mode);
         // Memory is written under the hardware-identity key when one
         // resolved, so replugging the panel elsewhere keeps its preference
         // (ticket 110).
@@ -1086,7 +1089,10 @@ fn apply_width(app: &AppHandle, settings: &settings::Settings) -> Result<(), Str
     } else {
         settings::DEFAULT_DOCK_WIDTH_PCT
     };
-    let width = dock_width_for_hwnd(hwnd, pct);
+    // Per-mode caps in ADR-0021: a stored 60 in fixed applies at 30 — the
+    // mode switch re-clamps honestly through this derivation, never by
+    // rewriting the stored %.
+    let width = dock_width_for_hwnd(hwnd, pct, &current.mode);
     let live_width = current
         .last_rect
         .map(|r| r.right - r.left)
@@ -1490,7 +1496,8 @@ fn settle_mode(app: &AppHandle, current: &DockState) {
         // refused shrink keeps the full reservation and hides anyway — overlay
         // semantics mean no other window loses space.
         if let Some(monitor) = appbar::monitor_rect(hwnd.0) {
-            // Ticket 128: the remembered width, not the old 340 constant.
+            // Ticket 128; per-mode caps in ADR-0021: the remembered width at
+            // the live mode, not the old 340 constant.
             let width = match app.state::<AppState>().db.lock() {
                 Ok(conn) => {
                     let s = settings::load(&conn);
@@ -1500,7 +1507,7 @@ fn settle_mode(app: &AppHandle, current: &DockState) {
                         current.identity.as_deref(),
                         &current.monitor,
                     );
-                    dock_width_px(monitor.right - monitor.left, pct)
+                    dock_width_px_for_mode(monitor.right - monitor.left, pct, &current.mode)
                 }
                 Err(_) => DOCK_WIDTH as i32,
             };
@@ -1547,15 +1554,16 @@ fn settle_mode(app: &AppHandle, current: &DockState) {
         x if x == windows_sys::Win32::UI::Shell::ABE_RIGHT => actual.left >= monitor.right,
         _ => false,
     };
-    // Ticket 128: fixed settle keeps the remembered width — a bar arriving
-    // narrow (mode flip, hidden off-screen) expands to its own width, never
-    // unconditionally to 340.
+    // Ticket 128; per-mode caps in ADR-0021: fixed settle keeps the
+    // remembered width at the live mode — a bar arriving narrow (mode flip,
+    // hidden off-screen) expands to its own width, never unconditionally
+    // to 340.
     let width = match app.state::<AppState>().db.lock() {
         Ok(conn) => {
             let s = settings::load(&conn);
             let pct =
                 resolve_dock_width_pct(&conn, &s, current.identity.as_deref(), &current.monitor);
-            dock_width_px(monitor.right - monitor.left, pct)
+            dock_width_px_for_mode(monitor.right - monitor.left, pct, &current.mode)
         }
         Err(_) => DOCK_WIDTH as i32,
     };
@@ -1634,11 +1642,12 @@ fn autohide_tick(
     let Some(mut full) = current.last_rect else {
         return Ok(());
     };
-    // Ticket 128: a Settings width save lands here within one tick without a
-    // mode flip — re-derive the full rect at the remembered width so the
-    // motion below slides to the new thickness on its own. Reading the DB per
-    // tick mirrors the reveal-tuning read below; a probe failure keeps the
-    // last rect rather than collapsing the strip.
+    // Ticket 128; per-mode caps in ADR-0021: a Settings width save lands here
+    // within one tick without a mode flip — re-derive the full rect at the
+    // remembered width for the live mode so the motion below slides to the new
+    // thickness on its own. Reading the DB per tick mirrors the reveal-tuning
+    // read below; a probe failure keeps the last rect rather than collapsing
+    // the strip.
     if let Some(monitor) = appbar::monitor_rect(hwnd.0) {
         let remembered = match app.try_state::<crate::AppState>() {
             Some(state) => match state.db.lock() {
@@ -1650,7 +1659,7 @@ fn autohide_tick(
                         current.identity.as_deref(),
                         &current.monitor,
                     );
-                    dock_width_px(monitor.right - monitor.left, pct)
+                    dock_width_px_for_mode(monitor.right - monitor.left, pct, &current.mode)
                 }
                 Err(_) => full.right - full.left,
             },

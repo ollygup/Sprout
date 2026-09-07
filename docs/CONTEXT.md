@@ -139,7 +139,7 @@ A machine-local, single-site web surface shown in the lower portion of the Quick
 _Avoid_: Browser pane, embedded app, mini window
 
 **Companion site**:
-One saved https address available to the Companion, carrying the user's display name for it. Sites are ordered by the user and unique by address; choosing one as the active site shows it in the dock. Machine-local; never part of Presets, Plan, Run, or exports.
+One saved https address available to the Companion, carrying the user's display name for it. Sites are ordered by the user and unique by address; choosing one as the active site shows it in the dock. Each site carries its own browser identity — Mobile (default) or Desktop for desktop-only sites — and its own page zoom (50–200%, unset follows the automatic width zoom). Machine-local; never part of Presets, Plan, Run, or exports.
 _Avoid_: Bookmark, favorite, tab
 
 **Companion site name**:

@@ -14,9 +14,9 @@
 
 ## ACs
 
-- [ ] Default and legacy sites behave exactly as today (Mobile); a Desktop site loads desktop-only pages.
-- [ ] The `Windows NT 10.0` token is used for Desktop (covers current Windows releases; Win11 differs only via Client Hints).
-- [ ] `npm.cmd run check` 0 errors; related settings/companion tests green.
+- [x] Default and legacy sites behave exactly as today (Mobile); a Desktop site loads desktop-only pages.
+- [x] The `Windows NT 10.0` token is used for Desktop (covers current Windows releases; Win11 differs only via Client Hints).
+- [x] `npm.cmd run check` 0 errors; related settings/companion tests green.
 
 ## Verification
 

@@ -32,7 +32,9 @@
     setCompanionHeightRatio,
     setCompanionHeightRatioForDisplay,
     getCompanionHeightRatio,
+    setCompanionUrlList,
     listDisplays,
+    COMPANION_DESKTOP_UA,
     COMPANION_MOBILE_UA,
   } from "$lib/api";
   import {
@@ -53,7 +55,11 @@
   import {
     companionWebviewBounds,
     companionZoomForWidth,
+    companionEffectiveZoom,
+    stepCompanionUserZoom,
+    formatCompanionZoomPct,
   } from "$lib/companionPane";
+  import { normalizeCompanionSiteZoom } from "$lib/companion";
   import Button from "$lib/components/Button.svelte";
   import GroupAccordion from "$lib/components/GroupAccordion.svelte";
   import Icon from "$lib/components/Icon.svelte";
@@ -150,6 +156,40 @@
   // floating never shows the pane; per-monitor height ratio falls back to settings.
   let companionUrl: string | null = $state(null);
   let companionUrlList: CompanionSite[] = $state([]);
+  // Per-site browser identity (ticket 165): desktop-only sites load with the
+  // desktop Edge UA, everything else with the mobile Chromium UA. Missing or
+  // legacy entries read as mobile, matching the backend's tolerant read.
+  function companionUserAgentForUrl(url: string): string {
+    const hit = companionUrlList.find(
+      (s) => s.url.trim().toLowerCase() === url.trim().toLowerCase(),
+    );
+    return hit?.ua === "desktop" ? COMPANION_DESKTOP_UA : COMPANION_MOBILE_UA;
+  }
+  // Explicit per-site page zoom (ticket 162): null follows today's
+  // width-derived auto zoom; a set value (50–200%) overrides it. Persisted per
+  // site through the saved-site list — fully independent of the height
+  // splitter, which only ever touches `companionRatio`.
+  let companionUserZoom: number | null = $state(null);
+  let companionZoomSaving = $state(false);
+  // Last measured content-frame width (CSS px) — drives the zoom readout's
+  // effective value only; zoom never writes layout.
+  let companionFrameWidth = $state(340);
+  /** The zoom the WebView actually uses at `boundsWidth` CSS px. */
+  function companionAppliedZoom(boundsWidth: number): number {
+    return companionEffectiveZoom(companionZoomForWidth(boundsWidth), companionUserZoom);
+  }
+  /** Resolves the explicit zoom for `url` from the saved-site list. */
+  function companionStoredZoomForUrl(url: string | null): number | null {
+    if (!url) return null;
+    const hit = companionUrlList.find(
+      (s) => s.url.trim().toLowerCase() === url.trim().toLowerCase(),
+    );
+    return normalizeCompanionSiteZoom(hit?.zoom ?? null);
+  }
+  // The bar readout's effective zoom — re-derives when the frame resizes or
+  // the site's explicit zoom changes.
+  const companionShownZoom = $derived(companionAppliedZoom(companionFrameWidth));
+  const companionZoomAuto = $derived(companionUserZoom === null);
   let companionRatio = $state(0.40);
   let companionCanGoBack = $state(false);
   let companionCanGoForward = $state(false);
@@ -316,6 +356,10 @@
     companionUrl = url;
     companionRatio = clampCompanionRatio(perMonitor ?? globalRatio);
     companionRatioReady = true;
+    // The active site's explicit zoom rides the refreshed list — unset sites
+    // stay on the auto zoom. A newer persist landing after this read wins on
+    // the next quick-launch-changed pass.
+    companionUserZoom = companionStoredZoomForUrl(url);
     // Init history when url changes
     if (companionUrl) {
       if (companionHistory.length === 0 || companionHistory[0] !== companionUrl) {
@@ -425,6 +469,43 @@
     } finally {
       companionReloading = false;
     }
+  }
+  // User zoom (ticket 162): `-`/`+` step the explicit per-site zoom within
+  // 50–200%, `%` resets to the automatic width zoom. The state applies at
+  // once for feedback, then persists to the saved site — the height splitter
+  // is never touched here and zoom never touches the ratio.
+  async function persistCompanionUserZoom(next: number | null) {
+    if (!companionUrl) return;
+    companionUserZoom = next;
+    void syncCompanionWebview();
+    companionZoomSaving = true;
+    try {
+      const url = companionUrl;
+      const list = companionUrlList.map((s) =>
+        s.url.trim().toLowerCase() === url.trim().toLowerCase()
+          ? next === null
+            ? { url: s.url, name: s.name, ua: s.ua }
+            : { url: s.url, name: s.name, ua: s.ua, zoom: next }
+          : s,
+      );
+      await setCompanionUrlList(list);
+      companionUrlList = list;
+    } catch (e) {
+      console.error("companion zoom save failed", e);
+      error = `Couldn't save the Companion zoom — ${String(e)}`;
+    } finally {
+      companionZoomSaving = false;
+    }
+  }
+  async function companionZoomStep(direction: -1 | 1) {
+    if (!companionUrl || companionZoomSaving) return;
+    const width = companionFrameWrapEl?.getBoundingClientRect().width ?? 340;
+    const next = stepCompanionUserZoom(companionAppliedZoom(width), direction);
+    await persistCompanionUserZoom(next);
+  }
+  async function companionZoomReset() {
+    if (!companionUrl || companionUserZoom === null || companionZoomSaving) return;
+    await persistCompanionUserZoom(null);
   }
   function handleCompanionLoad() {
     // Track in-pane navigation for Back/Forward (0004:2 show-if-you-can).
@@ -585,12 +666,16 @@
     // We track lastUrl via a hidden prop
     const lastUrl = (companionWebview as any)?._companionUrl as string | undefined;
     const urlChanged = lastUrl !== companionUrl;
+    // An identity change needs the same recreate — the UA is fixed at child
+    // creation, so a mobile→desktop switch without a URL change still rebuilds.
+    const lastUa = (companionWebview as any)?._companionUa as string | undefined;
+    const uaChanged = lastUa !== companionUserAgentForUrl(companionUrl);
     // Launch gate: never create (or recreate) the native child before the
     // saved ratio for the actual dock monitor has resolved — the re-sync
     // after it lands performs the first sizing.
-    if ((needsCreate || urlChanged) && !companionRatioReady) return;
+    if ((needsCreate || urlChanged || uaChanged) && !companionRatioReady) return;
     const bounds = companionWebviewBounds(companionFrameWrapEl.getBoundingClientRect());
-    if (needsCreate || urlChanged) {
+    if (needsCreate || urlChanged || uaChanged) {
       if (companionWebview) {
         try { await companionWebview.close(); } catch {}
         companionWebview = null;
@@ -610,7 +695,7 @@
           y: bounds.y,
           width: bounds.width,
           height: bounds.height,
-          userAgent: COMPANION_MOBILE_UA,
+          userAgent: companionUserAgentForUrl(targetUrl),
           incognito: false,
           dataDirectory: "companion",
           transparent: false,
@@ -618,11 +703,12 @@
           dragDropEnabled: false,
         });
         (wv as any)._companionUrl = targetUrl;
+        (wv as any)._companionUa = companionUserAgentForUrl(targetUrl);
         wv.once("tauri://created", () => {
           if (companionWebview !== wv) return;
           companionWebviewBorn = true;
           console.log("companion webview created", targetUrl);
-          void wv.setZoom(companionZoomForWidth(bounds.width)).catch((e) => {
+          void wv.setZoom(companionAppliedZoom(bounds.width)).catch((e) => {
             console.error("syncCompanionWebview zoom failed", e);
           });
           // A child born while the details dialog sits above starts yielded —
@@ -699,7 +785,7 @@
     try {
       await webview.setPosition(new LogicalPosition(bounds.x, bounds.y));
       await webview.setSize(new LogicalSize(bounds.width, bounds.height));
-      await webview.setZoom(companionZoomForWidth(bounds.width));
+      await webview.setZoom(companionAppliedZoom(bounds.width));
     } catch (e) {
       // A registered child answering this way is gone without its null-out
       // landing — drop the stale handle so the next pass recreates instead of
@@ -903,7 +989,13 @@
   $effect(() => {
     const frame = companionFrameWrapEl;
     if (!frame || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(() => void syncCompanionWebview());
+    // Track the content width so the zoom readout shows the effective zoom;
+    // zoom itself never resizes the frame — only the splitter does.
+    companionFrameWidth = frame.getBoundingClientRect().width;
+    const observer = new ResizeObserver(() => {
+      companionFrameWidth = frame.getBoundingClientRect().width;
+      void syncCompanionWebview();
+    });
     observer.observe(frame);
     return () => observer.disconnect();
   });
@@ -1645,6 +1737,38 @@
             disabled={companionReloading}
             onclick={() => void companionReload()}
           />
+          <!-- User zoom (ticket 162): explicit per-site page zoom 50–200%,
+               remembered per site, falling back to the automatic width zoom.
+               Independent of the height splitter — zoom never moves it. -->
+          <IconButton
+            icon="minus"
+            label="Zoom out companion"
+            quiet
+            disabled={companionZoomSaving || companionShownZoom <= 0.5}
+            onclick={() => void companionZoomStep(-1)}
+          />
+          <button
+            type="button"
+            class="qlw__companion-zoom-pct"
+            title={companionZoomAuto
+              ? `Companion zoom ${formatCompanionZoomPct(companionShownZoom)} (automatic)`
+              : `Companion zoom ${formatCompanionZoomPct(companionShownZoom)} (explicit) — activate to reset to automatic`}
+            aria-label={companionZoomAuto
+              ? `Companion zoom ${formatCompanionZoomPct(companionShownZoom)}, automatic`
+              : `Companion zoom ${formatCompanionZoomPct(companionShownZoom)}, explicit — activate to reset to automatic`}
+            aria-disabled={companionZoomSaving || companionZoomAuto}
+            disabled={companionZoomSaving || companionZoomAuto}
+            onclick={() => void companionZoomReset()}
+          >
+            {formatCompanionZoomPct(companionShownZoom)}
+          </button>
+          <IconButton
+            icon="plus"
+            label="Zoom in companion"
+            quiet
+            disabled={companionZoomSaving || companionShownZoom >= 2}
+            onclick={() => void companionZoomStep(1)}
+          />
           <span class="qlw__companion-url" title={companionUrl ?? ""}>{companionUrl}</span>
           {#if companionPlaying}
             <!-- The playing indicator: status only, never a control — the
@@ -2242,6 +2366,37 @@
     font-family: var(--font-mono);
     font-size: var(--text-xs);
     color: var(--text-muted);
+  }
+
+  /* The zoom readout doubles as the reset-to-automatic control: token type
+     and bar spacing only, no new component — it sits in the bar's own
+     30px rhythm and truncates never (four characters max). */
+  .qlw__companion-zoom-pct {
+    flex-shrink: 0;
+    min-width: 30px;
+    height: 30px;
+    padding: 0 var(--space-1);
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    cursor: pointer;
+  }
+
+  .qlw__companion-zoom-pct:hover:not(:disabled) {
+    background: var(--bg-hover);
+    color: var(--text);
+  }
+
+  .qlw__companion-zoom-pct:disabled {
+    cursor: default;
+  }
+
+  .qlw__companion-zoom-pct:focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
   }
 
   /* The playing indicator: token color only, no motion — it must stay still

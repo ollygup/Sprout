@@ -74,13 +74,15 @@ pub const REVEAL_DWELL_MIN_MS: u64 = 0;
 pub const REVEAL_DWELL_MAX_MS: u64 = 1000;
 pub const REVEAL_SENSITIVITY_MIN_PX: i32 = 0;
 pub const REVEAL_SENSITIVITY_MAX_PX: i32 = 50;
-/// Dock width (ticket 128): % of the docked monitor's full width, 10–30%
-/// (default 18 ≈ 346px on 1920). The effective pixel width floors at today's
-/// 340 and caps at 30% of the monitor — single size source via
-/// `constants::window` (see `dock_width_px` for the ultrawide cap math).
+/// Dock width (ticket 128; per-mode caps in ADR-0021): % of the docked
+/// monitor's full width, 10–60% stored (default 18 ≈ 346px on 1920). Fixed
+/// applies at most 30% (it reserves workspace — ADR-0011); auto-hide may
+/// apply to 60% (it overlays and reserves nothing). The effective pixel width
+/// floors at today's 340 — single size source via `constants::window` (see
+/// `dock_width_px_for_mode` for the cap math).
 pub const DEFAULT_DOCK_WIDTH_PCT: u32 = crate::constants::window::DOCK_WIDTH_DEFAULT_PCT;
 pub const DOCK_WIDTH_PCT_MIN: u32 = crate::constants::window::DOCK_WIDTH_MIN_PCT;
-pub const DOCK_WIDTH_PCT_MAX: u32 = crate::constants::window::DOCK_WIDTH_MAX_PCT;
+pub const DOCK_WIDTH_PCT_MAX: u32 = crate::constants::window::DOCK_WIDTH_MAX_PCT_ABSOLUTE;
 /// Dock list density: how large the Quick Launch window's list text renders —
 /// "compact" steps each row down one type token, "default" is today's sizing,
 /// "large" steps each row up one token. Stored as a plain string so a broken
@@ -122,11 +124,60 @@ const KEY_COMPANION_MUTED: &str = "settings.companion_muted";
 /// One Companion saved site: its https URL plus the user's display name for
 /// it. A blank name renders as the URL everywhere — nothing ever renders
 /// blank (ADR: Companion is one isolated site in the docked window only).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// `ua` is the site's browser identity — "mobile" (default) or "desktop" for
+/// desktop-only sites; `zoom` is the user's explicit page zoom (50–200%,
+/// `None` follows the width-derived auto zoom).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CompanionSite {
     pub url: String,
     #[serde(default)]
     pub name: String,
+    /// Mobile/Desktop identity (ticket 165): missing/legacy reads as mobile.
+    #[serde(default = "default_companion_site_ua")]
+    pub ua: String,
+    /// Explicit page zoom as a factor (ticket 162): `None` = auto zoom.
+    #[serde(default)]
+    pub zoom: Option<f64>,
+}
+
+/// The default site identity: mobile, matching today's behavior for default
+/// and legacy sites.
+fn default_companion_site_ua() -> String {
+    "mobile".to_string()
+}
+
+/// Normalizes a site identity: "desktop" stays desktop, everything else reads
+/// as mobile — tolerant on read, strict on write (validation below).
+pub fn normalize_companion_site_ua(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "desktop" => "desktop".to_string(),
+        _ => "mobile".to_string(),
+    }
+}
+
+/// Explicit zoom bounds as factors (ticket 162): 50–200%.
+pub const COMPANION_ZOOM_MIN: f64 = 0.5;
+pub const COMPANION_ZOOM_MAX: f64 = 2.0;
+
+/// Normalizes an explicit zoom: finite values clamp into 50–200%, anything
+/// else (NaN, infinite, missing) reads as auto (`None`).
+pub fn normalize_companion_site_zoom(value: Option<f64>) -> Option<f64> {
+    match value {
+        Some(v) if v.is_finite() => Some(v.clamp(COMPANION_ZOOM_MIN, COMPANION_ZOOM_MAX)),
+        _ => None,
+    }
+}
+
+/// Validates an explicit zoom: `None` (auto) or a finite 0.5–2.0 factor.
+pub fn validate_companion_site_zoom(value: Option<f64>) -> std::result::Result<(), String> {
+    match value {
+        None => Ok(()),
+        Some(v) if !v.is_finite() => Err("Companion zoom must be between 50% and 200%".into()),
+        Some(v) if !(COMPANION_ZOOM_MIN..=COMPANION_ZOOM_MAX).contains(&v) => {
+            Err("Companion zoom must be between 50% and 200%".into())
+        }
+        Some(_) => Ok(()),
+    }
 }
 
 /// A stored list entry: either today's `{url, name}` shape or a legacy bare
@@ -139,8 +190,9 @@ enum CompanionSiteEntry {
     Legacy(String),
 }
 
-/// Migrates a stored list entry-wise: legacy strings become unnamed sites,
-/// today's shapes pass through with trimmed values.
+/// Migrates a stored list entry-wise: legacy strings become unnamed mobile
+/// sites at auto zoom; today's shapes pass through with trimmed values and
+/// tolerant identity/zoom reads.
 fn migrate_companion_site_list(entries: Vec<CompanionSiteEntry>) -> Vec<CompanionSite> {
     entries
         .into_iter()
@@ -148,10 +200,14 @@ fn migrate_companion_site_list(entries: Vec<CompanionSiteEntry>) -> Vec<Companio
             CompanionSiteEntry::Site(site) => CompanionSite {
                 url: site.url.trim().to_string(),
                 name: site.name.trim().to_string(),
+                ua: normalize_companion_site_ua(&site.ua),
+                zoom: normalize_companion_site_zoom(site.zoom),
             },
             CompanionSiteEntry::Legacy(url) => CompanionSite {
                 url: url.trim().to_string(),
                 name: String::new(),
+                ua: default_companion_site_ua(),
+                zoom: None,
             },
         })
         .collect()
@@ -181,9 +237,10 @@ pub struct Settings {
     /// "docked" — what the window reopens as, and what the in-window dock
     /// toggle writes back.
     pub dock_state: String,
-    /// The docked strip's width as % of its monitor (ticket 128): 10–30,
-    /// default 18. Docked only — floating stays 340 — shared by fixed and
-    /// auto-hide, with per-monitor memory falling back to this.
+    /// The docked strip's width as % of its monitor (ticket 128; per-mode caps
+    /// in ADR-0021): 10–60 stored, default 18. Fixed applies at most 30;
+    /// auto-hide may apply to 60. Docked only — floating stays 340 — shared
+    /// by fixed and auto-hide, with per-monitor memory falling back to this.
     pub dock_width_pct: u32,
     /// The Quick Launch window's list density: "compact", "default", or
     /// "large". Applies to the docked and floating lists only — the main app
@@ -307,9 +364,10 @@ pub fn validate_dock_state(state: &str) -> std::result::Result<(), String> {
     }
 }
 
-/// Accepts only the dock-width % the Settings slider offers (ticket 128):
-/// 10–30% inclusive. The pixel floor/cap live in `dock_width_px`, so this
-/// only guards the stored %.
+/// Accepts only the dock-width % any mode stores (ticket 128; per-mode caps
+/// in ADR-0021): 10–60% inclusive. The pixel floor/cap live in
+/// `dock_width_px_for_mode`, so this only guards the stored %; fixed clamps a
+/// stored 31–60 to 30 on apply instead of rejecting it.
 pub fn validate_dock_width_pct(value: u32) -> std::result::Result<(), String> {
     if (DOCK_WIDTH_PCT_MIN..=DOCK_WIDTH_PCT_MAX).contains(&value) {
         Ok(())
@@ -320,7 +378,7 @@ pub fn validate_dock_width_pct(value: u32) -> std::result::Result<(), String> {
     }
 }
 
-/// Clamps a width % into the slider range (ticket 128).
+/// Clamps a width % into the stored range (ticket 128).
 #[allow(dead_code)]
 pub fn clamp_dock_width_pct(value: u32) -> u32 {
     value.clamp(DOCK_WIDTH_PCT_MIN, DOCK_WIDTH_PCT_MAX)
@@ -474,6 +532,10 @@ pub fn dedup_companion_site_list(list: &[CompanionSite]) -> Vec<CompanionSite> {
         out.push(CompanionSite {
             url,
             name: site.name.trim().to_string(),
+            // Identity and zoom never affect URL identity — first occurrence
+            // wins with its own normalized preferences.
+            ua: normalize_companion_site_ua(&site.ua),
+            zoom: normalize_companion_site_zoom(site.zoom),
         });
     }
     out
@@ -487,7 +549,8 @@ pub fn companion_url_key(url: &str) -> String {
 
 /// Validates companion saved sites: every URL must be https, URLs must be
 /// unique, and non-blank names must be unique — all compared trimmed and
-/// case-insensitively, each refusal naming what collided.
+/// case-insensitively, each refusal naming what collided. Identity must be
+/// mobile/desktop; zoom must be auto or a 50–200% factor.
 pub fn validate_companion_url_list(list: &[CompanionSite]) -> std::result::Result<(), String> {
     let mut seen_urls: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -501,6 +564,11 @@ pub fn validate_companion_url_list(list: &[CompanionSite]) -> std::result::Resul
         if !name.is_empty() && !seen_names.insert(name.to_ascii_lowercase()) {
             return Err(format!("\"{name}\" is already used as a site name."));
         }
+        match site.ua.trim().to_ascii_lowercase().as_str() {
+            "mobile" | "desktop" => {}
+            _ => return Err("Companion site identity must be \"mobile\" or \"desktop\"".into()),
+        }
+        validate_companion_site_zoom(site.zoom)?;
     }
     Ok(())
 }
@@ -834,8 +902,8 @@ mod tests {
             companion_url: Some("https://music.youtube.com".to_string()),
             companion_height_ratio: 0.55,
             companion_url_list: vec![
-                CompanionSite { url: "https://music.youtube.com".to_string(), name: "Music".to_string() },
-                CompanionSite { url: "https://open.spotify.com".to_string(), name: String::new() },
+                CompanionSite { url: "https://music.youtube.com".to_string(), name: "Music".to_string(), ua: "mobile".to_string(), zoom: None },
+                CompanionSite { url: "https://open.spotify.com".to_string(), name: String::new(), ua: "mobile".to_string(), zoom: None },
             ],
             companion_muted: true,
         };
@@ -999,7 +1067,7 @@ mod tests {
 
     #[test]
     fn dock_width_validation_covers_the_slider_range() {
-        // Ticket 128: 10–30 inclusive, matching the Settings slider.
+        // Stored range is 10–60; each mode clamps on apply (ADR-0021).
         assert!(validate_dock_width_pct(DOCK_WIDTH_PCT_MIN).is_ok());
         assert!(validate_dock_width_pct(DOCK_WIDTH_PCT_MAX).is_ok());
         assert!(validate_dock_width_pct(DEFAULT_DOCK_WIDTH_PCT).is_ok());
@@ -1013,6 +1081,24 @@ mod tests {
         assert!(s.validate().is_err());
         s.dock_width_pct = DOCK_WIDTH_PCT_MAX;
         assert!(s.validate().is_ok());
+    }
+
+    #[test]
+    fn dock_width_per_mode_clamps_honestly() {
+        // Fixed stays a strip; auto-hide may overlay wide (ADR-0011). The
+        // backend stores the absolute range and clamps on apply through
+        // dock_width_px_for_mode, so the per-mode contract lives there.
+        use crate::constants::window::{
+            dock_width_max_pct_for_mode, dock_width_px_for_mode, DOCK_WIDTH,
+        };
+        assert_eq!(dock_width_max_pct_for_mode("fixed"), 30);
+        assert_eq!(dock_width_max_pct_for_mode("auto-hide"), 60);
+        assert_eq!(dock_width_px_for_mode(1920, 55, "fixed"), 576);
+        assert_eq!(dock_width_px_for_mode(1920, 55, "auto-hide"), 1056);
+        assert_eq!(
+            dock_width_px_for_mode(1920, 5, "auto-hide"),
+            DOCK_WIDTH as i32
+        );
     }
 
     #[test]
@@ -1303,31 +1389,31 @@ mod tests {
         assert!(s.validate().is_err());
         s.companion_height_ratio = 0.40;
         s.companion_url_list = vec![
-            CompanionSite { url: "https://ok.example.com".to_string(), name: String::new() },
-            CompanionSite { url: "http://bad".to_string(), name: String::new() },
+            CompanionSite { url: "https://ok.example.com".to_string(), name: String::new(), ua: "mobile".to_string(), zoom: None },
+            CompanionSite { url: "http://bad".to_string(), name: String::new(), ua: "mobile".to_string(), zoom: None },
         ];
         assert!(s.validate().is_err());
         s.companion_url_list = vec![
-            CompanionSite { url: "https://ok.example.com".to_string(), name: "OK".to_string() },
+            CompanionSite { url: "https://ok.example.com".to_string(), name: "OK".to_string(), ua: "mobile".to_string(), zoom: None },
         ];
         assert!(s.validate().is_ok());
         // Duplicate URLs and duplicate names are both refused, each naming the collision.
         s.companion_url_list = vec![
-            CompanionSite { url: "https://a.example.com".to_string(), name: String::new() },
-            CompanionSite { url: "https://A.example.com/".to_string(), name: String::new() },
+            CompanionSite { url: "https://a.example.com".to_string(), name: String::new(), ua: "mobile".to_string(), zoom: None },
+            CompanionSite { url: "https://A.example.com/".to_string(), name: String::new(), ua: "mobile".to_string(), zoom: None },
         ];
         let err = s.validate().unwrap_err();
         assert!(err.contains("already saved"), "got: {err}");
         s.companion_url_list = vec![
-            CompanionSite { url: "https://a.example.com".to_string(), name: "Music".to_string() },
-            CompanionSite { url: "https://b.example.com".to_string(), name: " music ".to_string() },
+            CompanionSite { url: "https://a.example.com".to_string(), name: "Music".to_string(), ua: "mobile".to_string(), zoom: None },
+            CompanionSite { url: "https://b.example.com".to_string(), name: " music ".to_string(), ua: "mobile".to_string(), zoom: None },
         ];
         let err = s.validate().unwrap_err();
         assert!(err.contains("already used"), "got: {err}");
         // Blank names never collide with each other.
         s.companion_url_list = vec![
-            CompanionSite { url: "https://a.example.com".to_string(), name: String::new() },
-            CompanionSite { url: "https://b.example.com".to_string(), name: "   ".to_string() },
+            CompanionSite { url: "https://a.example.com".to_string(), name: String::new(), ua: "mobile".to_string(), zoom: None },
+            CompanionSite { url: "https://b.example.com".to_string(), name: "   ".to_string(), ua: "mobile".to_string(), zoom: None },
         ];
         assert!(s.validate().is_ok());
     }
@@ -1335,17 +1421,17 @@ mod tests {
     #[test]
     fn companion_site_list_dedup_is_case_insensitive_and_trimmed() {
         let list = vec![
-            CompanionSite { url: " https://Music.Youtube.com ".to_string(), name: "First".to_string() },
-            CompanionSite { url: "https://music.youtube.com".to_string(), name: "Second".to_string() },
-            CompanionSite { url: "https://open.spotify.com".to_string(), name: String::new() },
-            CompanionSite { url: "HTTPS://OPEN.SPOTIFY.COM/ ".to_string(), name: String::new() },
-            CompanionSite { url: "http://bad.example.com".to_string(), name: String::new() },
-            CompanionSite { url: "  ".to_string(), name: String::new() },
+            CompanionSite { url: " https://Music.Youtube.com ".to_string(), name: "First".to_string(), ua: "mobile".to_string(), zoom: None },
+            CompanionSite { url: "https://music.youtube.com".to_string(), name: "Second".to_string(), ua: "mobile".to_string(), zoom: None },
+            CompanionSite { url: "https://open.spotify.com".to_string(), name: String::new(), ua: "mobile".to_string(), zoom: None },
+            CompanionSite { url: "HTTPS://OPEN.SPOTIFY.COM/ ".to_string(), name: String::new(), ua: "mobile".to_string(), zoom: None },
+            CompanionSite { url: "http://bad.example.com".to_string(), name: String::new(), ua: "mobile".to_string(), zoom: None },
+            CompanionSite { url: "  ".to_string(), name: String::new(), ua: "mobile".to_string(), zoom: None },
         ];
         let deduped = dedup_companion_site_list(&list);
         assert_eq!(deduped, vec![
-            CompanionSite { url: "https://Music.Youtube.com".to_string(), name: "First".to_string() },
-            CompanionSite { url: "https://open.spotify.com".to_string(), name: String::new() },
+            CompanionSite { url: "https://Music.Youtube.com".to_string(), name: "First".to_string(), ua: "mobile".to_string(), zoom: None },
+            CompanionSite { url: "https://open.spotify.com".to_string(), name: String::new(), ua: "mobile".to_string(), zoom: None },
         ]);
     }
 
@@ -1355,8 +1441,8 @@ mod tests {
         upsert_meta(&conn, KEY_COMPANION_URL_LIST, r#"["https://a.example.com", "https://b.example.com/"]"#).unwrap();
         let loaded = load(&conn);
         assert_eq!(loaded.companion_url_list, vec![
-            CompanionSite { url: "https://a.example.com".to_string(), name: String::new() },
-            CompanionSite { url: "https://b.example.com/".to_string(), name: String::new() },
+            CompanionSite { url: "https://a.example.com".to_string(), name: String::new(), ua: "mobile".to_string(), zoom: None },
+            CompanionSite { url: "https://b.example.com/".to_string(), name: String::new(), ua: "mobile".to_string(), zoom: None },
         ]);
         // Round-trip save keeps order and names in the new shape.
         let mut named = loaded.companion_url_list;
@@ -1375,8 +1461,8 @@ mod tests {
         s.companion_url = Some("https://music.youtube.com".to_string());
         s.companion_height_ratio = 0.55;
         s.companion_url_list = vec![
-            CompanionSite { url: "https://music.youtube.com".to_string(), name: "Music".to_string() },
-            CompanionSite { url: "https://open.spotify.com".to_string(), name: String::new() },
+            CompanionSite { url: "https://music.youtube.com".to_string(), name: "Music".to_string(), ua: "mobile".to_string(), zoom: None },
+            CompanionSite { url: "https://open.spotify.com".to_string(), name: String::new(), ua: "mobile".to_string(), zoom: None },
         ];
         {
             let conn = crate::db::init_at(&dir).unwrap();
@@ -1385,8 +1471,8 @@ mod tests {
             assert_eq!(loaded.companion_url, Some("https://music.youtube.com".to_string()));
             assert!((loaded.companion_height_ratio - 0.55).abs() < 1e-9);
             assert_eq!(loaded.companion_url_list, vec![
-                CompanionSite { url: "https://music.youtube.com".to_string(), name: "Music".to_string() },
-                CompanionSite { url: "https://open.spotify.com".to_string(), name: String::new() },
+                CompanionSite { url: "https://music.youtube.com".to_string(), name: "Music".to_string(), ua: "mobile".to_string(), zoom: None },
+                CompanionSite { url: "https://open.spotify.com".to_string(), name: String::new(), ua: "mobile".to_string(), zoom: None },
             ]);
         }
         let conn = crate::db::init_at(&dir).unwrap();
@@ -1423,17 +1509,83 @@ mod tests {
         assert!((load(&conn).companion_height_ratio - 0.55).abs() < 1e-9);
         assert!(save_companion_height_ratio(&conn, 0.90).is_err());
         let list = vec![
-            CompanionSite { url: "https://a.example.com".to_string(), name: String::new() },
-            CompanionSite { url: "https://b.example.com".to_string(), name: "B".to_string() },
+            CompanionSite { url: "https://a.example.com".to_string(), name: String::new(), ua: "mobile".to_string(), zoom: None },
+            CompanionSite { url: "https://b.example.com".to_string(), name: "B".to_string(), ua: "mobile".to_string(), zoom: None },
         ];
         save_companion_url_list(&conn, &list).unwrap();
         // trimmed values persist; duplicates are refused, not cleaned.
         assert_eq!(load(&conn).companion_url_list, list);
         let dupes = vec![
-            CompanionSite { url: "https://a.example.com".to_string(), name: String::new() },
-            CompanionSite { url: " https://A.example.com ".to_string(), name: String::new() },
+            CompanionSite { url: "https://a.example.com".to_string(), name: String::new(), ua: "mobile".to_string(), zoom: None },
+            CompanionSite { url: " https://A.example.com ".to_string(), name: String::new(), ua: "mobile".to_string(), zoom: None },
         ];
         assert!(save_companion_url_list(&conn, &dupes).is_err());
+    }
+
+    #[test]
+    fn companion_site_identity_defaults_to_mobile_and_validates() {
+        // Default and legacy sites behave exactly as today (mobile).
+        assert_eq!(default_companion_site_ua(), "mobile");
+        assert_eq!(normalize_companion_site_ua(""), "mobile");
+        assert_eq!(normalize_companion_site_ua("DESKTOP"), "desktop");
+        assert_eq!(normalize_companion_site_ua("bogus"), "mobile");
+        // Missing ua reads as mobile through the stored shape.
+        let conn = conn();
+        upsert_meta(
+            &conn,
+            KEY_COMPANION_URL_LIST,
+            r#"[{"url":"https://a.example.com","name":"A"}]"#,
+        )
+        .unwrap();
+        let loaded = load(&conn);
+        assert_eq!(loaded.companion_url_list.len(), 1);
+        assert_eq!(loaded.companion_url_list[0].ua, "mobile");
+        assert_eq!(loaded.companion_url_list[0].zoom, None);
+        // Desktop round-trips; bogus identity is refused on write, not cleaned.
+        let desktop = vec![CompanionSite {
+            url: "https://teams.example.com".to_string(),
+            name: "Teams".to_string(),
+            ua: "desktop".to_string(),
+            zoom: None,
+        }];
+        save_companion_url_list(&conn, &desktop).unwrap();
+        assert_eq!(load(&conn).companion_url_list, desktop);
+        let bogus = vec![CompanionSite {
+            url: "https://a.example.com".to_string(),
+            name: String::new(),
+            ua: "bogus".to_string(),
+            zoom: None,
+        }];
+        assert!(save_companion_url_list(&conn, &bogus).is_err());
+    }
+
+    #[test]
+    fn companion_site_zoom_clamps_and_validates() {
+        assert_eq!(normalize_companion_site_zoom(None), None);
+        assert_eq!(normalize_companion_site_zoom(Some(1.0)), Some(1.0));
+        assert_eq!(normalize_companion_site_zoom(Some(5.0)), Some(2.0));
+        assert_eq!(normalize_companion_site_zoom(Some(0.1)), Some(0.5));
+        assert_eq!(normalize_companion_site_zoom(Some(f64::NAN)), None);
+        assert!(validate_companion_site_zoom(None).is_ok());
+        assert!(validate_companion_site_zoom(Some(1.5)).is_ok());
+        assert!(validate_companion_site_zoom(Some(5.0)).is_err());
+        // Out-of-range zoom is refused on write; auto survives round-trip.
+        let conn = conn();
+        let bad = vec![CompanionSite {
+            url: "https://a.example.com".to_string(),
+            name: String::new(),
+            ua: "mobile".to_string(),
+            zoom: Some(5.0),
+        }];
+        assert!(save_companion_url_list(&conn, &bad).is_err());
+        let zoomed = vec![CompanionSite {
+            url: "https://a.example.com".to_string(),
+            name: String::new(),
+            ua: "mobile".to_string(),
+            zoom: Some(1.5),
+        }];
+        save_companion_url_list(&conn, &zoomed).unwrap();
+        assert_eq!(load(&conn).companion_url_list, zoomed);
     }
 
     #[test]

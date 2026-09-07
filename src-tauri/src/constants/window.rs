@@ -18,35 +18,56 @@ pub const DOCK_WIDTH: u32 = WINDOW_WIDTH;
 
 /// The docked strip's width as % of its monitor's full width (ticket 128):
 /// the Settings slider writes this, per-monitor memory overrides it, and the
-/// effective pixel width is `dock_width_px` below — never below [`DOCK_WIDTH`],
-/// never above [`DOCK_WIDTH_MAX_PCT`] of the monitor. The floating window
+/// effective pixel width is `dock_width_px_for_mode` below — never below
+/// [`DOCK_WIDTH`], never above the current mode's cap. The floating window
 /// ignores it entirely (stays [`WINDOW_WIDTH`]).
 ///
-/// Cap math (in-ticket research, ticket 128): 60% of a 3440px ultrawide is
+/// Cap math (in-ticket research, ticket 128; overlay-vs-reservation policy in
+/// research 0015, ADR-0011, ADR-0021): 60% of a 3440px ultrawide is
 /// 2064px as a *fixed* AppBar — wider than a whole 1080p monitor, leaving
 /// only 1376px for apps — extreme for a strip that permanently reserves
 /// workspace. 30% keeps the reservation at most a third of any screen
 /// (1920→576, 2560→768, 3440→1032, 5120→1536): meaningfully wider than
 /// today's 340 for long names, still a strip, and the auto-hide slide stays
-/// short.
+/// short. Auto-hide overlays instead of reserving (ADR-0011), so the
+/// reservation objection does not apply to it — it may run to 60%.
 pub const DOCK_WIDTH_MIN_PCT: u32 = 10;
-pub const DOCK_WIDTH_MAX_PCT: u32 = 30;
+/// Fixed keeps the reserving-strip cap (ADR-0011 fixed reserves workspace).
+pub const DOCK_WIDTH_MAX_PCT_FIXED: u32 = 30;
+/// Auto-hide overlays content and reserves nothing, so it may run wide.
+pub const DOCK_WIDTH_MAX_PCT_AUTOHIDE: u32 = 60;
+/// The widest % any mode stores — the Settings and per-monitor validation
+/// range. Kept equal to the auto-hide cap; fixed clamps into its own cap on
+/// apply, so a stored 60 never explodes a fixed strip.
+pub const DOCK_WIDTH_MAX_PCT_ABSOLUTE: u32 = DOCK_WIDTH_MAX_PCT_AUTOHIDE;
 /// ~346px on a 1920 reference monitor — the closest whole % to today's 340.
 pub const DOCK_WIDTH_DEFAULT_PCT: u32 = 18;
 
+/// The mode's width cap as % of the monitor: fixed stays a strip, auto-hide
+/// may overlay wide (ADR-0011 overlay vs reservation; ADR-0021 single size
+/// source). Unknown modes take the fixed cap — a reserving assumption never
+/// over-claims workspace.
+pub fn dock_width_max_pct_for_mode(mode: &str) -> u32 {
+    match mode {
+        "auto-hide" => DOCK_WIDTH_MAX_PCT_AUTOHIDE,
+        _ => DOCK_WIDTH_MAX_PCT_FIXED,
+    }
+}
+
 /// The effective docked-strip width in physical pixels for a monitor
-/// `monitor_width_px` wide at `pct` %: `% of monitor, floored at today's
-/// width and capped at [`DOCK_WIDTH_MAX_PCT`] of the monitor`. Pure — the
-/// single width derivation every dock placement shares. `pct` outside the
-/// slider range clamps into it first, so a broken stored value can never
-/// collapse or explode the strip; a degenerate monitor width falls back to
-/// the floor.
-pub fn dock_width_px(monitor_width_px: i32, pct: u32) -> i32 {
+/// `monitor_width_px` wide at `pct` % in `mode`: `% of monitor, floored at
+/// today's width and capped at the mode's cap`. Pure — the single width
+/// derivation every dock placement shares. `pct` outside the absolute range
+/// clamps into it first, then into the mode's cap, so a broken stored value
+/// can never collapse or explode the strip; a degenerate monitor width falls
+/// back to the floor.
+pub fn dock_width_px_for_mode(monitor_width_px: i32, pct: u32, mode: &str) -> i32 {
     if monitor_width_px <= 0 {
         return DOCK_WIDTH as i32;
     }
-    let pct = pct.clamp(DOCK_WIDTH_MIN_PCT, DOCK_WIDTH_MAX_PCT);
-    let cap = monitor_width_px * DOCK_WIDTH_MAX_PCT as i32 / 100;
+    let max = dock_width_max_pct_for_mode(mode);
+    let pct = pct.clamp(DOCK_WIDTH_MIN_PCT, DOCK_WIDTH_MAX_PCT_ABSOLUTE).min(max);
+    let cap = monitor_width_px * max as i32 / 100;
     let want = monitor_width_px * pct as i32 / 100;
     want.clamp(DOCK_WIDTH as i32, cap.max(DOCK_WIDTH as i32))
 }
@@ -104,16 +125,32 @@ mod tests {
 
     #[test]
     fn dock_width_floors_at_today_width_and_caps_at_30pct() {
-        // Ticket 128: % of monitor, floored at 340, capped at 30%.
-        assert_eq!(dock_width_px(1920, 18), 345); // 1920*18/100
-        assert_eq!(dock_width_px(1920, 10), DOCK_WIDTH as i32); // 192→floor
-        assert_eq!(dock_width_px(1920, 30), 576);
-        assert_eq!(dock_width_px(2560, 30), 768);
-        assert_eq!(dock_width_px(3440, 30), 1032);
+        // Fixed keeps the reserving-strip behavior (ADR-0011).
+        assert_eq!(dock_width_px_for_mode(1920, 18, "fixed"), 345); // 1920*18/100
+        assert_eq!(dock_width_px_for_mode(1920, 10, "fixed"), DOCK_WIDTH as i32); // 192→floor
+        assert_eq!(dock_width_px_for_mode(1920, 30, "fixed"), 576);
+        assert_eq!(dock_width_px_for_mode(2560, 30, "fixed"), 768);
+        assert_eq!(dock_width_px_for_mode(3440, 30, "fixed"), 1032);
         // Broken % clamps into range first: 5→10→floor, 99→30→cap.
-        assert_eq!(dock_width_px(1920, 5), DOCK_WIDTH as i32);
-        assert_eq!(dock_width_px(1920, 99), 576);
+        assert_eq!(dock_width_px_for_mode(1920, 5, "fixed"), DOCK_WIDTH as i32);
+        assert_eq!(dock_width_px_for_mode(1920, 99, "fixed"), 576);
         // A degenerate monitor never collapses the strip.
-        assert_eq!(dock_width_px(0, 18), DOCK_WIDTH as i32);
+        assert_eq!(dock_width_px_for_mode(0, 18, "fixed"), DOCK_WIDTH as i32);
+    }
+
+    #[test]
+    fn dock_width_splits_caps_by_mode() {
+        // Fixed stays a strip (ADR-0011 reservation); auto-hide may overlay wide.
+        assert_eq!(dock_width_max_pct_for_mode("fixed"), 30);
+        assert_eq!(dock_width_max_pct_for_mode("auto-hide"), 60);
+        assert_eq!(dock_width_max_pct_for_mode("bogus"), 30);
+        // Mode-aware: fixed clamps 45→30, auto-hide honors to 60.
+        assert_eq!(dock_width_px_for_mode(1920, 45, "fixed"), 576);
+        assert_eq!(dock_width_px_for_mode(1920, 45, "auto-hide"), 864);
+        assert_eq!(dock_width_px_for_mode(1920, 60, "auto-hide"), 1152);
+        assert_eq!(dock_width_px_for_mode(3440, 60, "auto-hide"), 2064);
+        assert_eq!(dock_width_px_for_mode(1920, 99, "auto-hide"), 1152);
+        assert_eq!(dock_width_px_for_mode(1920, 5, "auto-hide"), DOCK_WIDTH as i32);
+        assert_eq!(dock_width_px_for_mode(0, 45, "auto-hide"), DOCK_WIDTH as i32);
     }
 }

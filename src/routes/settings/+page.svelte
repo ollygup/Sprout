@@ -90,11 +90,15 @@
   let dockMode = $state("auto-hide");
   let dockEdge = $state("left");
   let dockState = $state("floating");
-  // Ticket 128 dock width: % of the docked monitor (10–30, default 18 ≈ 346px
+  // Dock width: % of the docked monitor (10–60 stored, default 18 ≈ 346px
   // on 1920). Single size source is constants/window.rs — this mirrors
-  // DOCK_WIDTH_{MIN,MAX,DEFAULT}_PCT; the backend validates and floors at 340.
+  // DOCK_WIDTH_{MIN,MAX,DEFAULT}_PCT; fixed applies at most 30 (it reserves
+  // workspace, ADR-0011) while auto-hide may apply to 60 (it overlays).
+  // The backend validates the stored range and floors at 340.
   const DOCK_WIDTH_MIN_PCT = 10;
-  const DOCK_WIDTH_MAX_PCT = 30;
+  const DOCK_WIDTH_MAX_PCT_FIXED = 30;
+  const DOCK_WIDTH_MAX_PCT_AUTOHIDE = 60;
+  const DOCK_WIDTH_MAX_PCT = DOCK_WIDTH_MAX_PCT_AUTOHIDE;
   const DOCK_WIDTH_DEFAULT_PCT = 18;
   const DOCK_WIDTH_FLOOR_PX = 340;
   let dockWidthPct = $state(DOCK_WIDTH_DEFAULT_PCT);
@@ -213,19 +217,37 @@
     if (!Number.isFinite(n)) return DOCK_WIDTH_DEFAULT_PCT;
     return Math.min(DOCK_WIDTH_MAX_PCT, Math.max(DOCK_WIDTH_MIN_PCT, n));
   }
+  /** The slider cap for a dock mode: fixed stays a strip (30), auto-hide may
+   * overlay wide (60). Unknown modes take the fixed cap — the conservative
+   * reservation assumption. */
+  function dockWidthMaxForMode(mode: string): number {
+    return mode === "auto-hide" ? DOCK_WIDTH_MAX_PCT_AUTOHIDE : DOCK_WIDTH_MAX_PCT_FIXED;
+  }
+  /** Clamps a width % into a mode's applied range, so a mode switch re-clamps
+   * honestly: 55 in auto-hide becomes 30 in fixed. */
+  function clampWidthPctForMode(v: number, mode: string): number {
+    const n = Math.floor(Number(v));
+    if (!Number.isFinite(n)) return DOCK_WIDTH_DEFAULT_PCT;
+    return Math.min(dockWidthMaxForMode(mode), Math.max(DOCK_WIDTH_MIN_PCT, n));
+  }
   /** A stored density the menu does not offer reads back as today's sizing —
    *  the same fallback the backend applies, so a broken value never leaves
    *  the knob in an unrepresentable state. */
   function validDensity(value: unknown): string {
     return value === "compact" || value === "large" ? (value as string) : "default";
   }
-  /** Effective strip px for `monitorWidth` at `pct` % (ticket 128): mirrors
-   * the backend `dock_width_px` — % of monitor, floored at 340, capped at
-   * 30% — so the slider's readout tells the truth per display. */
-  function effectiveWidthPx(monitorWidth: number, pct: number): number {
+  /** Effective strip px for `monitorWidth` at `pct` % in `mode` (ticket 128;
+   * per-mode caps in ADR-0021): mirrors the backend `dock_width_px_for_mode`
+   * — % of monitor, floored at 340, capped at the mode's cap — so the
+   * slider's readout tells the truth per display. */
+  function effectiveWidthPx(monitorWidth: number, pct: number, mode?: string): number {
     if (!Number.isFinite(monitorWidth) || monitorWidth <= 0) return DOCK_WIDTH_FLOOR_PX;
-    const p = clampWidthPct(pct);
-    const cap = Math.floor((monitorWidth * DOCK_WIDTH_MAX_PCT) / 100);
+    const max = mode ? dockWidthMaxForMode(mode) : DOCK_WIDTH_MAX_PCT;
+    const n = Math.floor(Number(pct));
+    const p = Number.isFinite(n)
+      ? Math.min(max, Math.max(DOCK_WIDTH_MIN_PCT, n))
+      : DOCK_WIDTH_DEFAULT_PCT;
+    const cap = Math.floor((monitorWidth * max) / 100);
     const want = Math.floor((monitorWidth * p) / 100);
     return Math.min(Math.max(want, DOCK_WIDTH_FLOOR_PX), Math.max(cap, DOCK_WIDTH_FLOOR_PX));
   }
@@ -247,7 +269,7 @@
     if (dockMode !== baseline.dockMode) return true;
     if (dockEdge !== baseline.dockEdge) return true;
     if (dockState !== baseline.dockState) return true;
-    if (clampWidthPct(dockWidthPct) !== baseline.dockWidthPct) return true;
+    if (clampWidthPctForMode(dockWidthPct, dockMode) !== baseline.dockWidthPct) return true;
     if (dockDensity !== baseline.dockDensity) return true;
     if (clampDwell(revealDwellMs) !== baseline.revealDwellMs) return true;
     if (clampSens(revealSensitivityPx) !== baseline.revealSensitivityPx) return true;
@@ -266,7 +288,8 @@
         if (cur !== base) return true;
       }
       for (const d of displays) {
-        const cur = clampWidthPct(displayWidths[d.device_name] ?? DOCK_WIDTH_DEFAULT_PCT);
+        const rowMode = displayModes[d.device_name] ?? dockMode;
+        const cur = clampWidthPctForMode(displayWidths[d.device_name] ?? DOCK_WIDTH_DEFAULT_PCT, rowMode);
         const base = baselineDisplayWidths[d.device_name];
         if (cur !== base) return true;
       }
@@ -294,7 +317,7 @@
       dockMode,
       dockEdge,
       dockState,
-      dockWidthPct: clampWidthPct(dockWidthPct),
+      dockWidthPct: clampWidthPctForMode(dockWidthPct, dockMode),
       dockDensity,
       revealDwellMs: clampDwell(revealDwellMs),
       revealSensitivityPx: clampSens(revealSensitivityPx),
@@ -457,9 +480,13 @@
       dockMode = loaded.dock_mode;
       dockEdge = loaded.dock_edge;
       dockState = loaded.dock_state;
-      // Ticket 128: width % falls back to the shipped default when the stored
-      // value is broken (Settings::load).
-      dockWidthPct = clampWidthPct(loaded.dock_width_pct ?? DOCK_WIDTH_DEFAULT_PCT);
+      // Width % falls back to the shipped default when the stored value is
+      // broken (Settings::load), then re-clamps into the loaded mode so the
+      // fixed slider never holds above 30%.
+      dockWidthPct = clampWidthPctForMode(
+        loaded.dock_width_pct ?? DOCK_WIDTH_DEFAULT_PCT,
+        loaded.dock_mode,
+      );
       dockDensity = validDensity(loaded.dock_density);
       // Ticket 113: reveal tuning knobs default to shipped gate constants;
       // fall back to defaults when the stored value is broken (Settings::load).
@@ -481,7 +508,10 @@
         dockMode: loaded.dock_mode,
         dockEdge: loaded.dock_edge,
         dockState: loaded.dock_state,
-        dockWidthPct: clampWidthPct(loaded.dock_width_pct ?? DOCK_WIDTH_DEFAULT_PCT),
+        dockWidthPct: clampWidthPctForMode(
+          loaded.dock_width_pct ?? DOCK_WIDTH_DEFAULT_PCT,
+          loaded.dock_mode,
+        ),
         dockDensity: validDensity(loaded.dock_density),
         revealDwellMs: loaded.reveal_dwell_ms ?? 200,
         revealSensitivityPx: loaded.reveal_sensitivity_px ?? 12,
@@ -583,9 +613,11 @@
         }
         try {
           const w = await getDisplayDockWidthPct(d.device_name);
-          nextWidths[d.device_name] = clampWidthPct(w ?? dockWidthPct);
+          const mode = nextModes[d.device_name] ?? dockMode;
+          nextWidths[d.device_name] = clampWidthPctForMode(w ?? dockWidthPct, mode);
         } catch {
-          nextWidths[d.device_name] = clampWidthPct(dockWidthPct);
+          const mode = nextModes[d.device_name] ?? dockMode;
+          nextWidths[d.device_name] = clampWidthPctForMode(dockWidthPct, mode);
         }
       }
       displayEdges = nextEdges;
@@ -612,11 +644,25 @@
   function changeDisplayMode(device: string, mode: string) {
     displayErrors = { ...displayErrors, [device]: "" };
     displayModes = { ...displayModes, [device]: mode };
+    // Switching modes re-clamps honestly: a 55% auto-hide width becomes 30%
+    // in fixed instead of exploding the reserving strip.
+    const cur = displayWidths[device];
+    if (cur !== undefined) {
+      displayWidths = { ...displayWidths, [device]: clampWidthPctForMode(cur, mode) };
+    }
+  }
+
+  /** The global dock-mode switch re-clamps the global width the same way, so
+   * the fixed slider can never hold above 30%. */
+  function changeDockMode(mode: string) {
+    dockMode = mode;
+    dockWidthPct = clampWidthPctForMode(dockWidthPct, mode);
   }
 
   function changeDisplayWidth(device: string, pct: number) {
     displayErrors = { ...displayErrors, [device]: "" };
-    displayWidths = { ...displayWidths, [device]: clampWidthPct(pct) };
+    const mode = displayModes[device] ?? dockMode;
+    displayWidths = { ...displayWidths, [device]: clampWidthPctForMode(pct, mode) };
   }
 
   // Ticket 125 companion list helpers — dedup trimmed case-insensitive on host+path, machine-local
@@ -747,10 +793,10 @@
       const clampedSens = Math.min(50, Math.max(0, Math.floor(revealSensitivityPx) || 0));
       const clampedCompanionRatio = clampCompanionRatio(companionHeightRatio);
       const normalizedList = normalizeCompanionList(companionUrlList);
-      // Ticket 128: clamp the width % to the slider range before persisting
-      // (same 10–30 the backend validates; broken stored values already fell
-      // back to the default on load).
-      const clampedWidthPct = clampWidthPct(dockWidthPct);
+      // Clamp the width % into the current mode before persisting (fixed
+      // 10–30, auto-hide 10–60 — the backend validates the stored 10–60;
+      // broken stored values already fell back to the default on load).
+      const clampedWidthPct = clampWidthPctForMode(dockWidthPct, dockMode);
       await updateSettings({
         default_timeout_minutes: Math.max(1, Math.floor(timeout) || 1),
         log_retention_days: Math.max(1, Math.floor(retention) || 1),
@@ -810,16 +856,18 @@
             perMonitorError = true;
           }
         }
-        // Ticket 128: width follows the same single-vs-multi rule — the
-        // single display's memory tracks the global slider; each display's
-        // own slider writes its own row when several are connected.
+        // Width follows the same single-vs-multi rule — the single display's
+        // memory tracks the global slider; each display's own slider writes
+        // its own row when several are connected. Each row clamps into its
+        // own mode so a fixed display never stores above 30%.
         const width =
           physicalDisplays.length > 1
             ? (displayWidths[d.device_name] ?? clampedWidthPct)
             : clampedWidthPct;
         if (width !== undefined) {
           try {
-            await setDisplayDockWidthPct(d.device_name, clampWidthPct(width));
+            const rowMode = physicalDisplays.length > 1 ? (mode ?? dockMode) : dockMode;
+            await setDisplayDockWidthPct(d.device_name, clampWidthPctForMode(width, rowMode));
           } catch (e) {
             displayErrors = { ...displayErrors, [d.device_name]: String(e) };
             perMonitorError = true;
@@ -862,11 +910,12 @@
       timeout = Math.max(1, Math.floor(timeout) || 1);
       retention = Math.max(1, Math.floor(retention) || 1);
       launchConcurrency = Math.min(50, Math.max(1, Math.floor(launchConcurrency) || 1));
-      dockWidthPct = clampWidthPct(dockWidthPct);
+      dockWidthPct = clampWidthPctForMode(dockWidthPct, dockMode);
       dockDensity = validDensity(dockDensity);
       for (const d of displays) {
         if (displayWidths[d.device_name] !== undefined) {
-          displayWidths[d.device_name] = clampWidthPct(displayWidths[d.device_name]);
+          const rowMode = displayModes[d.device_name] ?? dockMode;
+          displayWidths[d.device_name] = clampWidthPctForMode(displayWidths[d.device_name], rowMode);
         }
       }
       revealDwellMs = Math.min(1000, Math.max(0, Math.floor(revealDwellMs) || 0));
@@ -1380,7 +1429,7 @@
           </p>
         </div>
         <div class="knob__input">
-          <Select id="dock-mode" variant="small" value={dockMode} onchange={(v) => (dockMode = v)}>
+          <Select id="dock-mode" variant="small" value={dockMode} onchange={(v) => changeDockMode(v)}>
             {#each dockModeOptions as option (option.value)}
               <option value={option.value}>{option.label}</option>
             {/each}
@@ -1410,7 +1459,8 @@
           <label class="knob__label" for="dock-width">Dock width</label>
           <p class="knob__hint">
             How wide the dock is. Wider fits longer names; narrower leaves more
-            room for other windows.
+            room for other windows. Fixed caps at 30% — it reserves workspace;
+            auto-hide may run to 60% — it overlays instead.
           </p>
         </div>
         <div class="knob__input knob__input--wide">
@@ -1420,18 +1470,18 @@
             class="knob__range"
             type="range"
             min={DOCK_WIDTH_MIN_PCT}
-            max={DOCK_WIDTH_MAX_PCT}
+            max={dockWidthMaxForMode(dockMode)}
             step="1"
-            value={clampWidthPct(dockWidthPct)}
-            oninput={(e) => (dockWidthPct = clampWidthPct(Number((e.target as HTMLInputElement).value)))}
+            value={clampWidthPctForMode(dockWidthPct, dockMode)}
+            oninput={(e) => (dockWidthPct = clampWidthPctForMode(Number((e.target as HTMLInputElement).value), dockMode))}
             aria-describedby="dock-width-value"
           />
           <span class="knob__unit knob__unit--auto" id="dock-width-value" role="status">
-            {clampWidthPct(dockWidthPct)}%{
+            {clampWidthPctForMode(dockWidthPct, dockMode)}%{
               (physicalDisplays.length === 1 && physicalDisplays[0])
-                ? ` · ~${effectiveWidthPx(physicalDisplays[0].width, dockWidthPct)} px`
+                ? ` · ~${effectiveWidthPx(physicalDisplays[0].width, dockWidthPct, dockMode)} px`
                 : (displays.length > 0 && displays[0]
-                  ? ` · ~${effectiveWidthPx(displays[0].width, dockWidthPct)} px on ${displays[0].label}`
+                  ? ` · ~${effectiveWidthPx(displays[0].width, dockWidthPct, dockMode)} px on ${displays[0].label}`
                   : "")
             }
           </span>
@@ -1471,7 +1521,8 @@
             {@const widthId = `per-monitor-width-${d.device_name.replace(/[^a-zA-Z0-9]/g, "-")}`}
             {@const reasonId = `per-monitor-reason-${d.device_name.replace(/[^a-zA-Z0-9]/g, "-")}`}
             {@const hasSeam = !d.left_eligible || !d.right_eligible}
-            {@const widthPct = clampWidthPct(displayWidths[d.device_name] ?? dockWidthPct)}
+            {@const perMode = displayModes[d.device_name] ?? dockMode}
+            {@const widthPct = clampWidthPctForMode(displayWidths[d.device_name] ?? dockWidthPct, perMode)}
             <article class="knob" hidden={!knobVisible("per-monitor")}>
               <div class="knob__body">
                 <span class="knob__label">{d.label} · {d.resolution}</span>
@@ -1505,7 +1556,7 @@
               </div>
               <div class="knob__input knob__input--wide">
                 <label class="knob__unit knob__unit--auto" for={widthId}>
-                  Width · {widthPct}% · ~{effectiveWidthPx(d.width, widthPct)} px
+                  Width · {widthPct}% · ~{effectiveWidthPx(d.width, widthPct, perMode)} px
                 </label>
                 <input
                   id={widthId}
@@ -1513,7 +1564,7 @@
                   class="knob__range"
                   type="range"
                   min={DOCK_WIDTH_MIN_PCT}
-                  max={DOCK_WIDTH_MAX_PCT}
+                  max={dockWidthMaxForMode(perMode)}
                   step="1"
                   value={widthPct}
                   oninput={(e) =>

@@ -1,8 +1,12 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
+  clampCompanionUserZoom,
+  companionEffectiveZoom,
   companionWebviewBounds,
   companionZoomForWidth,
+  formatCompanionZoomPct,
+  stepCompanionUserZoom,
 } from "./companionPane";
 
 const ROUTE_SOURCE = readFileSync(
@@ -65,8 +69,18 @@ describe("Companion native WebView contract", () => {
   });
 
   it("uses a Chromium-compatible mobile identity for WebView2", () => {
-    expect(API_SOURCE).toContain("Chrome/131.0.0.0 Mobile Safari/537.36");
+    expect(API_SOURCE).toContain("Chrome/150.0.0.0 Mobile Safari/537.36");
     expect(API_SOURCE).not.toContain("CPU iPhone OS");
+  });
+
+  it("offers a per-site Desktop Edge identity with the Windows token", () => {
+    // Desktop-only sites load with the Edge variant; Win11 differs only via
+    // Client Hints so `Windows NT 10.0` covers current releases.
+    expect(API_SOURCE).toContain("COMPANION_DESKTOP_UA");
+    expect(API_SOURCE).toContain("Windows NT 10.0");
+    expect(API_SOURCE).toContain("Edg/150.0.0.0");
+    expect(ROUTE_SOURCE).toContain("companionUserAgentForUrl");
+    expect(ROUTE_SOURCE).toContain("COMPANION_DESKTOP_UA");
   });
 
   it("holds a failed URL until the user retries instead of flickering", () => {
@@ -83,8 +97,11 @@ describe("Companion native WebView contract", () => {
   });
 
   it("remeasures the native child when the content frame changes size", () => {
-    expect(ROUTE_SOURCE).toContain("new ResizeObserver(() => void syncCompanionWebview())");
+    expect(ROUTE_SOURCE).toContain("new ResizeObserver(");
     expect(ROUTE_SOURCE).toContain("observer.observe(frame)");
+    // The observer also records the content width for the zoom readout —
+    // measuring never resizes the frame itself.
+    expect(ROUTE_SOURCE).toContain("companionFrameWidth = frame.getBoundingClientRect().width");
   });
 
   it("offers a keyboard alternative for resizing the pane", () => {
@@ -263,6 +280,64 @@ describe("Companion height resolve never fails silently (ticket 143)", () => {
 
   it("says so when a drag persist fails instead of looking applied", () => {
     expect(ROUTE_SOURCE).toContain("Couldn't save the Companion height");
+  });
+});
+
+describe("Companion user zoom per site (ticket 162)", () => {
+  it("clamps explicit zoom into 50–200%, reading anything else as auto", () => {
+    expect(clampCompanionUserZoom(1)).toBe(1);
+    expect(clampCompanionUserZoom(0.1)).toBe(0.5);
+    expect(clampCompanionUserZoom(5)).toBe(2);
+    expect(clampCompanionUserZoom(null)).toBeNull();
+    expect(clampCompanionUserZoom(undefined)).toBeNull();
+    expect(clampCompanionUserZoom(Number.NaN)).toBeNull();
+  });
+
+  it("falls back to the automatic width zoom while unset", () => {
+    expect(companionEffectiveZoom(0.9, null)).toBe(0.9);
+    expect(companionEffectiveZoom(0.9, 1.5)).toBe(1.5);
+  });
+
+  it("steps ten points at a time within 50–200%", () => {
+    expect(stepCompanionUserZoom(1, 1)).toBeCloseTo(1.1);
+    expect(stepCompanionUserZoom(1, -1)).toBeCloseTo(0.9);
+    expect(stepCompanionUserZoom(2, 1)).toBe(2);
+    expect(stepCompanionUserZoom(0.5, -1)).toBe(0.5);
+  });
+
+  it("renders whole percents", () => {
+    expect(formatCompanionZoomPct(1)).toBe("100%");
+    expect(formatCompanionZoomPct(0.9)).toBe("90%");
+  });
+
+  it("puts the zoom control in the dock bar without touching the bar order", () => {
+    // Builds over 161's stabilized order: zoom sits after Reload, before the
+    // URL; mute/mixer/external order is untouched. Anchored on the bar
+    // markup (onclick wiring + row span), not on script definitions or CSS.
+    const barAt = ROUTE_SOURCE.indexOf('<div class="qlw__companion-bar">');
+    const reloadAt = ROUTE_SOURCE.indexOf("onclick={() => void companionReload()}");
+    const zoomAt = ROUTE_SOURCE.indexOf("onclick={() => void companionZoomStep");
+    const urlAt = ROUTE_SOURCE.indexOf('<span class="qlw__companion-url"');
+    expect(barAt).toBeGreaterThan(-1);
+    expect(reloadAt).toBeGreaterThan(barAt);
+    expect(zoomAt).toBeGreaterThan(reloadAt);
+    expect(urlAt).toBeGreaterThan(zoomAt);
+    expect(ROUTE_SOURCE).toContain("qlw__companion-zoom-pct");
+    expect(ROUTE_SOURCE).toContain("Zoom out companion");
+    expect(ROUTE_SOURCE).toContain("Zoom in companion");
+  });
+
+  it("persists zoom per site and never moves the height splitter", () => {
+    expect(ROUTE_SOURCE).toContain("persistCompanionUserZoom");
+    expect(ROUTE_SOURCE).toContain("setCompanionUrlList");
+    expect(ROUTE_SOURCE).toContain("companionStoredZoomForUrl");
+    // The zoom path writes only the site list's zoom; the splitter path
+    // writes only the ratio — neither function touches the other's state.
+    const persistAt = ROUTE_SOURCE.indexOf("async function persistCompanionUserZoom");
+    expect(persistAt).toBeGreaterThan(-1);
+    const persistBody = ROUTE_SOURCE.slice(persistAt, persistAt + 1500);
+    expect(persistBody).not.toContain("companionRatio");
+    expect(persistBody).not.toContain("setCompanionHeightRatio");
   });
 });
 

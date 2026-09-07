@@ -12,6 +12,7 @@
   import Dialog from "$lib/components/Dialog.svelte";
   import Badge from "$lib/components/Badge.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
+  import Select from "$lib/components/Select.svelte";
 
   // Companion manager — machine-local only, never in Preset exports (the settings
   // row itself never travels in backups either). Reuses PageHeader / Dialog /
@@ -25,6 +26,7 @@
   let editIndex: number | null = $state(null);
   let siteDraft = $state("");
   let nameDraft = $state("");
+  let uaDraft = $state<"mobile" | "desktop">("mobile");
   let formOpen = $state(false);
   let formError = $state("");
   let removeIndex: number | null = $state(null);
@@ -96,11 +98,12 @@
     const trimmed = siteDraft.trim();
     const dupe = duplicateUrl(trimmed, null) ?? duplicateName(nameDraft, null);
     if (dupe) { formError = dupe; return; }
-    const next = [...sites, { url: trimmed, name: nameDraft.trim() }];
+    const next = [...sites, { url: trimmed, name: nameDraft.trim(), ua: uaDraft }];
     try {
       await persistList(next);
       siteDraft = "";
       nameDraft = "";
+      uaDraft = "mobile";
       formOpen = false;
       formError = "";
       error = "";
@@ -111,6 +114,7 @@
     editIndex = idx;
     siteDraft = sites[idx]?.url ?? "";
     nameDraft = sites[idx]?.name ?? "";
+    uaDraft = sites[idx]?.ua === "desktop" ? "desktop" : "mobile";
     formError = "";
     formOpen = true;
   }
@@ -119,12 +123,14 @@
     editIndex = null;
     siteDraft = "";
     nameDraft = "";
+    uaDraft = "mobile";
     formError = "";
   }
   function startAdd() {
     editIndex = null;
     siteDraft = "";
     nameDraft = "";
+    uaDraft = "mobile";
     formError = "";
     formOpen = true;
   }
@@ -137,7 +143,7 @@
     if (dupe) { formError = dupe; return; }
     const wasActive = activeUrl && sites[editIndex!].url.toLowerCase() === activeUrl!.toLowerCase();
     const next = [...sites];
-    next[editIndex!] = { url: trimmed, name: nameDraft.trim() };
+    next[editIndex!] = { url: trimmed, name: nameDraft.trim(), ua: uaDraft };
     try {
       await persistList(next);
       if (wasActive) {
@@ -147,6 +153,7 @@
       editIndex = null;
       siteDraft = "";
       nameDraft = "";
+      uaDraft = "mobile";
       formOpen = false;
       formError = "";
       error = "";
@@ -219,6 +226,9 @@
                 {#if site.name.trim()}
                   <span class="saved-row__url" title={site.url}>{site.url}</span>
                 {/if}
+                {#if site.ua === "desktop"}
+                  <span class="saved-row__url">Desktop identity</span>
+                {/if}
               </span>
               {#if activeUrl && activeUrl.toLowerCase() === site.url.toLowerCase()}
                 <Badge tone="accent">Active</Badge>
@@ -281,6 +291,17 @@
     {:else}
       <p id="companion-site-hint" class="site-form__hint">Use the full https:// address.</p>
     {/if}
+    <label class="site-form__label" for="companion-site-ua">Site identity</label>
+    <Select
+      id="companion-site-ua"
+      variant="small"
+      value={uaDraft}
+      onchange={(v) => (uaDraft = v === "desktop" ? "desktop" : "mobile")}
+    >
+      <option value="mobile">Mobile — narrow-dock layout</option>
+      <option value="desktop">Desktop — desktop-only sites</option>
+    </Select>
+    <p class="site-form__hint">Desktop-only sites (e.g. Teams for Web) need the Desktop identity; everything else stays Mobile.</p>
     <div class="site-form__actions">
       <Button variant="ghost" type="button" onclick={cancelEdit}>Cancel</Button>
       <Button kind="submit">{editIndex === null ? "Add site" : "Save changes"}</Button>

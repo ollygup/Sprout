@@ -14,9 +14,9 @@
 
 ## ACs
 
-- [ ] Fixed slider refuses above 30%; auto-hide slider allows to 60%; switching modes re-clamps honestly.
-- [ ] Corrupt stored values clamp instead of collapsing or exploding the strip; per-monitor memory intact.
-- [ ] `npm.cmd run check` 0 errors; dock-width contract tests green.
+- [x] Fixed slider refuses above 30%; auto-hide slider allows to 60%; switching modes re-clamps honestly.
+- [x] Corrupt stored values clamp instead of collapsing or exploding the strip; per-monitor memory intact.
+- [x] `npm.cmd run check` 0 errors; dock-width contract tests green.
 
 ## Verification
 
