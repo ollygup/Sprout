@@ -6,6 +6,8 @@
 
 **Status:** ready-for-agent
 
+Superseded by the 156 round — the submit behavior landed in 157 (shared explicit handler; single-line Enter submits explicitly rather than natively since native implicit submission never fires in the modal WebView2); the remaining hint-line item carries on in 158.
+
 - [ ] One shared handler in the Dialog primitive serves every dialog: clip form, quick action form, launch-command form, group naming, product form, preset form
 - [ ] Ctrl+Enter from within a textarea submits; plain Enter inside textareas inserts a newline as before
 - [ ] Single-line inputs keep native Enter submission; validation errors render inline exactly as button-driven submits do
