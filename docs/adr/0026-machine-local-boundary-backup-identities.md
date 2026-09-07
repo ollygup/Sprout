@@ -1,6 +1,6 @@
 # Machine-local stays local; backups merge by identity; lists stay ordered
 
-> Status: amended 2026-09-05 — original decision text preserved; see the executable-source audit amendment for current behavior and implementation gaps.
+> Status: amended 2026-09-06 — original decision text preserved; shell-aware identity below is accepted but not implemented; audit gaps remain recorded.
 
 One portability rule generalizes ADR-0009 and ADR-0014: Launch entries, Quick Actions, Clips, Groups, Companion state, dock memory, Settings, and install directories are machine-local — never part of a Preset, a Plan payload, a Run record, or a `.sprout.json` export. Whole-app backup is the only thing that carries them, as one versioned `sprout-backup` document where a selective export is the same shape with empty arrays (no second format, ever). Restore is a merging import in one transaction: records whose identity already exists are skipped and counted, never overwritten; a halfway failure leaves nothing behind. Identities are per-collection and stable across machines: Products and Presets by id, Launch entries by kind+target, Quick Actions by command+cwd, Clips by trimmed text. Install directories are stripped on the way out and on the way in. Ordered lists (entries, actions, clips, groups) share one discipline: append at `MAX+1`, update in place, delete-then-compact, positions gapless and internal-only — reorders go through move operations, never through payload edits.
 
@@ -19,3 +19,9 @@ The local Plan-to-worker request may carry per-Product install overrides inside 
 `merge` restores in one non-overwriting transaction and skips duplicates already present or already encountered in the file. Its identities are: Products by id **or trimmed case-insensitive name**; Presets by id; Launch entries by kind plus trimmed case-folded target; Quick Actions by trimmed case-folded command plus normalized case-folded working directory; Clips by trimmed byte-exact text. In particular, Quick Action command identity is not byte-exact.
 
 The three item lists use `OrderedList` to maintain gapless positions. Groups use collection-scoped ordering: empty-group sweeps in `src-tauri/src/groups.rs` can leave gaps, whereas explicit moves renumber. The blanket gapless claim for every group position is not implemented. This records the difference without approving a change to the ordering goal.
+
+## Amendment — 2026-09-06 (accepted shell-aware identity and AI exclusions; not yet implemented)
+
+Spec 145 extends Quick Action identity to selected shell plus the existing normalized command and working-directory equality. The same text under PowerShell and CMD is not the same operation. Legacy records/backups normalize to PowerShell; case and whitespace rules within each shell remain unchanged by this round. Ticket 147 must update manual collision checks and backup merge consistently, preserving non-overwriting transactional imports and ordered-list behavior. ADR-0014 records version compatibility.
+
+Accepted AI drafts saved as Quick Actions use that same content collection and identity. AI provider settings, API keys, discovery grants, target-reference maps, transient prompts/error context, managed-runtime state, and model weights remain machine-local and excluded from existing backups and Preset exports. Saved command text can still contain paths; this exclusion does not sanitize arbitrary scripts or retract the audit's portability qualifications.

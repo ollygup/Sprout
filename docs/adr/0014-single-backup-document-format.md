@@ -1,6 +1,6 @@
 # One backup document format — partial exports are whole-app documents with empty arrays (ticket 87)
 
-> Status: amended 2026-09-05 — original decision text preserved; see the executable-source audit amendment for current behavior and implementation gaps.
+> Status: amended 2026-09-06 — original decision text preserved; shell-aware version evolution below is accepted but not implemented; audit gaps remain recorded.
 
 Settings → Backup lets the user tick which content collections an export includes (Launch entries, Quick actions, Clips, Products, Presets — all ticked by default). The exported file is always the same versioned, kind-tagged document the whole-app backup writes; an unticked collection is simply an empty array. There is no second, "partial" file format.
 
@@ -27,3 +27,7 @@ Exports leave the app: they are emailed, synced through drives, and kept as arch
 Zero-selection means no collection selected, not zero records. `export_backup` in `src-tauri/src/backup.rs` rejects an empty selection before writing, but a selected empty collection may produce a valid backup whose arrays are all empty; importing it is a no-op. The Settings confirm gate matches collection selection rather than record count.
 
 `read_document` validates the backup envelope, and `validate_records` validates Products, Launch entries, Quick Actions, and Clips. It does not rerun Preset payload validation, so the broad parse/validate wording should not imply equivalent validation for every collection. The one-format, five-array, transactional non-overwriting merge decisions remain unchanged; detailed identity and portability behavior is clarified in ADR-0026.
+
+## Amendment — 2026-09-06 (accepted shell-aware backup evolution; not yet implemented)
+
+The PowerShell/CMD extension in spec 145 changes the meaning of a Quick Action's command, so shell semantics must survive backup/restore. Ticket 147 advances the same backup document format to version 2 for new exports, with an explicit valid shell, while retaining reads of legacy version-1 documents as PowerShell actions. Version-1 records that inconsistently declare CMD are rejected. Legacy readers must reject the newer envelope rather than silently execute CMD text as PowerShell; the existing reader's strict version check is the compatibility mechanism to preserve. Unknown shells or unsupported versions fail before merge. This remains one evolving document format and one selective-export/restore flow, not a parallel AI backup format. AI settings, credentials, prompts, skills, and model files do not become new backup collections.

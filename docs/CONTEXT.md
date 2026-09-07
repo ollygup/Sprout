@@ -145,3 +145,37 @@ _Avoid_: Title, nickname, alias
 **Note**:
 Optional free-form text a user attaches to exactly one Quick Action, for whatever they want to record about it — the content and its purpose are the user's alone, and Sprout gives it no behavior (it never affects how the action runs). Short formatted text (bullets, numbered steps), authored in the main app and rendered read-only wherever shown; rows carrying one are marked so readers know the text exists before opening it. Machine-local; never part of Presets, Plan, Run, or exports.
 _Avoid_: Comment, description, remark
+
+## AI assistance (accepted language; feature implementation pending)
+
+**AI assistance**:
+Sprout's optional help for authoring and diagnosing Quick Action commands. It proposes text for the user to review; it does not execute that text.
+_Avoid_: Autonomous agent, AI runner
+
+**Script draft**:
+A proposed command that the user has not yet saved as a Quick Action or accepted as its replacement. Generating or revising a Script draft does not change the saved Quick Action.
+_Avoid_: Quick Action (before saving), executed script
+
+**Managed local model**:
+A model whose optional installation and on-device inference runtime are managed by Sprout for AI assistance.
+_Avoid_: Bundled model (weights are not installed by default), mandatory model
+
+**Existing local model**:
+A model available through the user's own on-device inference service. Sprout connects to it without taking ownership of its installation or lifetime.
+_Avoid_: Managed local model, imported model file
+
+**Cloud mode**:
+AI assistance using the user's configured third-party inference provider, which receives the prompts and context the user permits Sprout to send.
+_Avoid_: Local mode, automatic fallback
+
+**Approved discovery location**:
+A folder the user has permitted Sprout to search for local targets. Permission to discover names and paths does not itself permit reading file contents or disclosing results to a cloud provider.
+_Avoid_: Full-disk access, upload permission
+
+**Model recommendation**:
+A model Sprout offers as a tested candidate for the user's hardware and authoring tasks. A changed recommendation does not replace the user's installed selection.
+_Avoid_: Catalog (reserved for available software Products), automatic model update
+
+**AI skill**:
+A fixed set of Sprout-specific instructions for creating or diagnosing a Quick Action, used together with shared authoring rules. An AI skill grants no execution, discovery, or disclosure permission.
+_Avoid_: Plugin, security policy, user configuration

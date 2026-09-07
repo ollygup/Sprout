@@ -1,11 +1,12 @@
 # ADRs — index
 
-29 decisions. Original text is never rewritten; corrections live in dated
+32 decisions. Original text is never rewritten; corrections live in dated
 `## Amendment` sections, each file carrying a `Status` pointer up top.
 Status per file: `accurate` (verified, untouched), `amended <date>`
-(original preserved, correction appended).
+(original preserved, correction appended), or `accepted <date>` (a decision;
+implementation may still be pending).
 
-Source audit completed 2026-09-05 for all 29 decisions: **26 amended, 3 retained**.
+Source audit completed 2026-09-05 for the then-existing 29 decisions: **26 amended, 3 retained**.
 [Audit coverage and source evidence](AUDIT-2026-09-05.md). Amendments distinguish
 current implementation from accepted obligations; no application code changed.
 Historical events and operational claims were not inferred from source.
@@ -29,9 +30,9 @@ Historical events and operational claims were not inferred from source.
 - 0008 No first-run seed — `amended 2026-09-05` (seed file absent; backup restore also creates deliberate Product data)
 - 0012 Self-update from GitHub Releases (+ ed25519 scheme B) — `amended 2026-09-05` (two install affordances; signature encoding supported; custody remains operational obligation)
 - 0013 Boot to tray with dock restore — `amended 2026-09-05` (dock restore does not cover every main-window entry point or restore a saved monitor)
-- 0014 One backup document format — `amended 2026-09-05` (zero selected collections differs from zero records; Preset payloads bypass validation)
+- 0014 One backup document format — `amended 2026-09-06` (accepted shell-aware version evolution; implementation pending; audit gaps retained)
 - 0025 Logs expire, history is forever, run-active from disk — `amended 2026-09-05` (pruning triggers narrowed; completion dedup is frontend-local; durability qualified)
-- 0026 Machine-local boundary + backup identities + ordered lists — `amended 2026-09-05` (five-collection backup scope; paths/desktop assignments retained; actual dedup and ordering)
+- 0026 Machine-local boundary + backup identities + ordered lists — `amended 2026-09-06` (accepted shell-aware Quick Action identity and AI exclusions; implementation pending)
 
 ## Quick access (tray, window, dock, lists)
 
@@ -39,7 +40,7 @@ Historical events and operational claims were not inferred from source.
 - 0011 Quick Launch window + AppBar dock — `amended 2026-09-05` (auto-hide requests zero-width ABM_SETPOS; prior tab and floating corrections hold)
 - 0015 Virtual-desktop assignments activate by use — `accurate`
 - 0016 Groups: isolated namespaces, dissolve, dormant-off — `amended 2026-09-05` (create/assign is not atomic; off hides grouping but lifecycle maintenance continues)
-- 0017 Quick Action execution model — `amended 2026-09-05` (inherited token; optional logs; watchdog tracks original action tree only)
+- 0017 Quick Action execution model — `amended 2026-09-06` (accepted PowerShell/CMD authoring extension; implementation pending; privileges/tracking unchanged)
 - 0018 Launch pipeline: cap+queue, honest outcomes — `amended 2026-09-05` (basename matching; foreground outcome and Store already-open detection gaps)
 - 0019 Dock autohide: driver owns motion — `amended 2026-09-05` (driver owns animation, not every geometry write; workspace release is fallible)
 - 0020 Monitor identity + seam eligibility — `amended 2026-09-05` (duplicate native identity probes; opposite-edge migration is not revalidated)
@@ -50,6 +51,14 @@ Historical events and operational claims were not inferred from source.
 ## Frontend system
 
 - 0028 Design system + disclosure rules — `amended 2026-09-05` (design-system rule remains required; literal values and contrast gate are implementation gaps)
+
+## AI-assisted Quick Action authoring
+
+- [0030 AI drafts Quick Actions; never executes](0030-ai-drafts-quick-actions-never-executes.md) — `amended 2026-09-06` (destructive authoring refusal, plain manual boundary; user-controlled execution)
+- [0031 Optional providers and scoped context](0031-optional-ai-providers-and-scoped-context.md) — `amended 2026-09-06` (explicit install, compatible-model reuse, scoped discovery and disclosure)
+- [0032 Recommendations and skills ship with the app](0032-model-recommendations-and-skills-ship-with-app.md) — `amended 2026-09-06` (bundled JSON and Sprout skills; no Microsoft command dataset or independent backend; qualification pending)
+
+Implementation: [spec 145](../../.scratch/sprout-app/issues/145-ai-assisted-quick-action-authoring-spec.md) and tickets 146–155 in the local issues tracker. These accepted decisions are not claims of shipped AI support.
 
 ## Adding one
 
