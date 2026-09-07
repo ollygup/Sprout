@@ -18,7 +18,7 @@ This file is the seam: the topic index plus the every-session core below. Each f
 
 ## Core rules (every session — no extra read)
 
-- WHEN working on the repo → MUST work in `C:\Sprout`. MUST NOT work directly on the share — UNC paths break `.cmd`/`.bat` (npm, cargo helpers) — builds fail with "UNC paths are not supported".
+- WHEN working on the repo → MUST work in `C:\Sprout`, except coordinator-assigned local isolated writer/staging copies under `docs/agents/parallel-tickets.md`. That exception applies to the coordinator's own ticket too; sync/publish commands still run only from `C:\Sprout`. MUST NOT work directly on the share — UNC paths break `.cmd`/`.bat` (npm, cargo helpers) — builds fail with "UNC paths are not supported".
 - MUST NOT delete or restructure anything on the share — the share is the fallback if the working copy messes up.
 - Git is handled externally — MUST NOT run ANY git command here (STRICT). Git on this project belongs to the user, outside this device: MUST NOT run `git init`, `clone`, `add`, `commit`, `push`, `stash`, or ANY other git command against any path under `C:\Sprout`, ever. A `.git` directory may exist under `C:\Sprout` because it rides along with the share sync — that is fine; MUST treat it as inert data: MUST NOT create, modify, delete, or act on it. All version-control state lives elsewhere; changes made here are published by syncing (`tools\sync.ps1`), not by committing.
 - WHEN syncing → MUST use `tools\sync.ps1`, MUST NOT use raw `robocopy`. The share's git working tree is owned by the other device (the only git client); a blind robocopy overwrites whatever it committed and produces merge conflicts. The script snapshots the share's content hashes at session start and refuses to overwrite any file the other device changed mid-session — divergences are reported as `SHARE-NEWER` for explicit resolution:
@@ -57,4 +57,5 @@ Full working-copy detail (two homes, snapshot location, divergence handling, rob
 | Rust + Tauri + Svelte conventions | WHEN you touch Rust/Tauri/Svelte, constants, version, window sizing, module boundaries, `shared/`, or any Windows invocation | `docs/agents/conventions.md` |
 | Code comments | WHEN you write or edit code comments | `docs/agents/comments.md` |
 | Parallel tickets | WHEN you run 2+ tickets concurrently in one session as a batch | `docs/agents/parallel-tickets.md` |
+| Planning and ticket slicing | WHEN you grill with docs, create/revise a spec, or split work into tickets | `docs/agents/planning.md` |
 | Worker session | WHEN you were spawned as a ticket worker under a coordinator in a parallel batch | `docs/agents/worker.md` |

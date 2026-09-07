@@ -39,6 +39,11 @@
 
 - Work where the coordinator put you; write only there. Reads from anywhere
   (including `C:\Sprout` by absolute path) are allowed.
+- Use the assigned immutable baseline for implementation and review claims;
+  live `C:\Sprout` reads are orientation only. Do not silently import another
+  ticket's in-progress changes. Stay inside the path/owner allow-list; report
+  newly needed shared edits to the coordinator before writing outside it.
+  In a shared working tree, stop affected edits until ownership is resolved.
 - Run toolchain checks and the ownership gate as checks on your own tree,
   not as publish preconditions.
 - CodeGraph indexes `C:\Sprout`, not your workspace: use it for orientation,
@@ -47,3 +52,8 @@
   contents or diffs, test evidence, AC lines) instead of publishing. Your
   job's natural artifact decides the shape (patch, findings text, grill
   questions) — the coordinator tells you which it expects.
+- Include baseline ID, baseline/result hashes for changed files, explicit
+  additions/deletions, shared-contract changes, and unresolved dependencies.
+  Freeze the returned artifact; subsequent revisions need a new identified
+  return. AC changes are proposals until the coordinator validates and applies
+  them. Report coordination needs to the coordinator, not sibling workers.

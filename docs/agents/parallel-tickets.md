@@ -1,96 +1,122 @@
 # Parallel tickets — agent reference
 
-> Read this file when: you run 2+ tickets concurrently in one session as a
-> batch — i.e. you are the coordinator. Otherwise skip it: single-ticket
-> sessions use AGENTS.md Core directly, and ticket workers read
-> `docs/agents/worker.md`, not this file.
+> Read this file when: you coordinate 2+ concurrent tickets in one batch.
+> Workers read `worker.md`; planning and ticket slicing use `planning.md`.
 
-Why this exists: `tools\sync.ps1` keeps a single-writer snapshot
-(`.sync-state.json`) and uses absolute paths — a different working directory
-does NOT isolate callers. Two agents running `-Down`/`-Up` clobber each
-other's snapshot and `-Up` guard. So a batch has exactly one agent that
-syncs — the coordinator — and ticket workers that never sync. Worker rules
-live in `worker.md`; this file MUST NOT restate them (single source of
-truth, or the two drift).
+`tools\sync.ps1` owns one absolute-path snapshot. Exactly one coordinator
+syncs and publishes. Implementation runs concurrently; integration has one
+writer. Worker obligations live in `worker.md` rather than being duplicated here.
 
 ## Coordinator protocol (ordered, blocking)
 
-1. `-Down` first, then `docs/adr/README.md` + relevant ADRs in full (Core,
-   unchanged). The `-Down` snapshot is the batch baseline.
-2. Decide your own ticket versus fanned-out tickets. WHEN you also implement
-   one ticket yourself → finish your own code BEFORE fanning out (workers
-   branch from a baseline that includes it) or AFTER applying all worker
-   returns — never interleaved with the apply step.
-3. Pre-flight overlap check over writer tickets: derive each ticket's planned
-   file set + owner symbols (`codegraph_explore`) and require strict disjoint
-   (definition below). Read-only jobs (research, review, single grill rounds)
-   are exempt from disjoint — readers cannot clobber — but note the ordering
-   hazard when they share ground with a writer: a landing patch can invalidate
-   their conclusions, so run the reader first or pin it to the frozen
-   baseline. Overlap → re-scope the tickets, serialize them into separate
-   batches, or carve the shared file out as a small coordinator-owned merge
-   task. MUST NOT launch overlapping writers in parallel.
-4. Create one workspace per writer ticket: a temp copy under a local (never
-   UNC) temp dir, e.g.
-   `C:\Users\admin\AppData\Local\Temp\opencode\batch-<date>\ticket-<id>\`,
-   copying source only and excluding `node_modules target build .svelte-kit
-   .vscode .codegraph .git`; give each copy its own `CARGO_TARGET_DIR` so
-   concurrent `cargo` runs never share a target lock. The principle is
-   single-writer to the snapshot and the share; temp copies are the default
-   mechanism. Shared-`C:\Sprout` with enforced disjoint claims is allowed but
-   fragile — an allow-list violation there corrupts siblings silently.
-5. Fan out. The prompt carries exactly five things, then stops — the worker
-   reads `C:\Sprout\AGENTS.md` from there and self-directs (own topic reads,
-   own skills, own checking):
-   1. role designation ("you are a ticket worker under a coordinator —
-      `parallel-tickets.md` worker rules apply; Core sync duties are mine,
-      not yours"),
-   2. the job + ticket (paste the ticket text inline; the copy may be stale),
-   3. the workspace path,
-   4. the file/owner allow-list,
-   5. which return artifact you expect (patch, findings text, grill
-      questions — the job's nature decides).
-   The designation line is blocking: MUST NOT fan out without it. An
-   undesignated worker defaults to a full session whose FIRST action is
-   `-Down`, which clobbers your snapshot.
-6. Wait for every worker's return before staging anything. Workers report to
-   you only; they MUST NOT talk to each other or to the share.
-7. Post-flight disjoint check on the actual touched sets. Any intersection →
-   MUST NOT stage both sides; keep the non-conflicting tickets and return the
-   conflicting ticket to a later batch rebased on a fresh `-Down`. Never
-   last-writer-wins.
-8. Merge into a STAGING copy (fresh baseline copy + all writer patches in
-   ticket order) — never directly into `C:\Sprout`. Git is forbidden here so
-   there is no revert: `-Down` is add/update-only and never removes
-   worker-added files, so a failed direct apply leaves unrecoverable residue.
-   `C:\Sprout` stays clean until the batch is proven. Run full validation on
-   staging: toolchain checks (`toolchain.md`) plus
-   `node tools/ownership-gate.mjs`, which MUST pass. Gate failure → fix the
-   placement or drop the offending ticket; MUST NOT publish a violating tree.
-9. Union-copy green staging onto `C:\Sprout`. Mark ACs done as applied, each
-   ticket only in its own issue file.
-10. `-Up` once, then `-Up` again expecting `0 copied`. `SHARE-NEWER` →
-    resolve explicitly per `working-copy.md`; never raw robocopy.
+1. Run Core `-Down`, then read the ADR index and relevant ADRs. Preserve an
+   immutable source baseline plus relative-path content hashes (including
+   absence for new files) outside the synced tree. Give it a batch ID.
+2. Plan the whole batch, INCLUDING your own ticket, before implementation.
+   Record dependencies, planned paths/owner symbols, shared contracts,
+   workspace paths, and integration order in a batch record under
+   `.scratch/sprout-app/batches/<batch-id>.md`. Use CodeGraph for code
+   ownership when indexed; otherwise inspect source directly. Select all
+   dependency-ready tickets for the first wave. A coordinator-owned ticket
+   MUST NOT delay dispatch of other ready tickets.
+3. Resolve expected overlap using the rules below. Prefer disjoint work;
+   file overlap alone is not a behavioral dependency. Pin any shared
+   interface before parallel consumers start. Unresolved behavior or a
+   prerequisite implementation remains a real blocker, not a merge task.
+4. Create an isolated local source copy from the same immutable baseline
+   for EACH writer, including yourself, and another for staging. Use a
+   writable local temp directory outside the synced tree; this is the Core
+   working-directory exception. Exclude `.git`, `.sync-state.json`,
+   `.codegraph`, `node_modules`, `target`, `build`, and `.svelte-kit`;
+   do not copy dependency/build caches or link writable source across copies.
+   Install needed dependencies per toolchain rules and give concurrent Cargo
+   jobs distinct `CARGO_TARGET_DIR` values. Check tooling actually targets the
+   assigned copy. If isolation is unavailable, shared `C:\Sprout` is permitted
+   ONLY with strict disjoint path AND owner claims, including your own work.
+   Never run overlapping writers in that shared tree.
+5. Dispatch ready workers up to available concurrency BEFORE starting your
+   own implementation; queue remaining ready jobs and dispatch as slots free.
+   Reserve capacity for yourself when taking a ticket. Each
+   prompt MUST designate "ticket worker under this coordinator; Core sync
+   and publish duties belong to the coordinator", and provide the current
+   ticket text, workspace, baseline ID, path/owner allow-list, dependencies
+   and pinned contracts, plus expected return artifact. Point to `AGENTS.md`
+   and `worker.md`. Workers otherwise choose their own relevant reads,
+   skills, and checks. An undesignated worker would start a destructive
+   second sync session. While workers run, implement your own ticket in its
+   assigned copy; do not wait for their returns first.
+6. Collect completed returns and freeze each returned artifact before
+   integration. You may integrate a dependency-ready return while other
+   workers continue in their isolated copies. Your own ticket gets the same
+   handoff/checks as every other ticket; never edit its copy while applying
+   its return. In shared-tree mode, wait until all writers stop, then capture
+   their results before staging. Record actual paths, baseline/result hashes,
+   checks, proposed AC updates, and any unexpected overlaps in the batch record.
+7. Reconcile in staging against each return's exact baseline. Apply only
+   changed paths, not whole worker trees. For overlapping files, compare
+   baseline, worker result, and current staging (three-way comparison without
+   Git). Preserve both compatible changes; record ticket IDs, path/symbol,
+   competing intent, chosen result, and validation in the conflict ledger.
+   No silent last-writer-wins. Textually clean changes still need semantic
+   review of shared contracts and owners. Unresolved conflicts block only
+   affected tickets and their dependents; retain their artifacts for rework.
+8. Validate the combined staging tree using relevant `toolchain.md` checks
+   and the ownership gate. A worker's passing tests do not validate the
+   combination. Re-run affected checks after any merge correction. Failed
+   tickets and dependents are repaired or excluded by rebuilding staging
+   from the baseline plus retained returns, never by guessing an inverse edit.
+9. Before publishing, verify each destination path in `C:\Sprout` still
+   matches its expected baseline, last published result, or captured
+   shared-tree result, as recorded for that path. Unexpected
+   local changes require reconciliation too. Copy only the validated changed
+   paths from staging, explicitly accounting for additions and deletions;
+   never union-copy a whole tree over unrelated work. Share deletions remain
+   forbidden by Core: defer changes requiring them unless the user resolves
+   that constraint. Mark ACs done only for applied, validated tickets, each
+   in its own issue file, and update the batch ledger. Run
+   `node tools/ownership-gate.mjs` in `C:\Sprout` before publication.
+10. Publish each completed integration unit with Core `-Up`, then `-Up`
+    again expecting `0 copied`; do not defer a completed unit to session end.
+    Outstanding isolated workers keep their original baselines: publishing
+    does not rebase their copies. Reconcile later returns against current
+    staging. New dependent waves start from a named validated integrated
+    baseline. `SHARE-NEWER` follows `working-copy.md`; never run a fresh
+    `-Down` over active work or use raw robocopy.
 
-## Overlap — strict disjoint (v1)
+## Overlap and integration ownership
 
-- **Disjoint** = empty intersection of touched relative paths AND no shared
-  ADR-0029 owner module (`winget/`, `windows_execution/`,
-  `engine/windows/inspection.rs`, `appbar/display.rs`) AND no shared
-  single-source file (`constants/window.rs`, the `Cargo.toml`-only version,
-  the `lib/api.ts` + `lib/types.ts` seam, design tokens, the
-  `tools/ownership-gate.mjs` `OWNERS` table plus the operation inventory —
-  two tickets adding a genuinely new Windows operation collide there).
-  Same file, different lines still counts as overlap.
-- Pre-flight overlap → refuse parallel launch (re-scope / serialize /
-  coordinator-owned merge). Post-flight overlap → exclude the conflicting
-  ticket for a later batch. Line-level merging is out of scope for v1.
+- Prefer empty intersections of paths and ADR-0029 owner modules. Shared
+  owners, API/types seams, constants, design tokens, version files, and the
+  ownership inventory/gate are integration hotspots even across different
+  files. Do not create duplicate owners just to make tickets look disjoint.
+- For predictable small shared edits, designate one integration owner and
+  let other tickets return requested additions against a pinned contract.
+  For substantial compatible edits, isolated writers may touch the same file
+  when the batch record names their symbols/intent, shared contract, merge
+  owner, order, and combined checks BEFORE dispatch. Same file/different
+  lines needs this plan too; it is not automatically safe.
+- Unexpected overlap is a merge review, not automatic ticket rejection.
+  Stop affected shared-tree writers immediately and preserve current contents
+  and available baselines before repair. Lost overwritten work cannot be
+  recovered merely by knowing the file names; use isolation for planned overlap.
+- Read-only research/review/grill work may run concurrently against an
+  immutable baseline. Record that baseline and recheck conclusions affected
+  by implementation changes before using them. Interactive grills normally
+  stay with the coordinator so user answers are not lost through relay.
 
-## Failure handling
+## Batch record and failure handling
 
-- Worker failure or timeout → exclude that ticket's files, continue the rest.
-- Coordinator without a snapshot → MUST refuse `-Up` and start with `-Down`.
-- Tip, not a rule: interactive, user-facing interview jobs (`grilling`, live
-  `grill-with-docs` rounds) default to the coordinator — Task relay is lossy
-  for back-and-forth. Backgroundable jobs (implement, research, review,
-  diagnosis write-ups, synthesis) fan out.
+The batch record MUST contain a table of ticket, dependencies, baseline,
+workspace, claimed paths/owners, shared contract/integration owner, actual
+changes, validation, and state (`running`, `returned`, `integrated`,
+`blocked`, or `published`). Keep a conflict ledger beneath it; write `none`
+when there are no conflicts. Link retained baseline/return artifacts and
+their hashes so another session can identify exactly what remains to merge.
+Preserve artifacts until publication is verified and deferred work is handed off.
+
+- Failure/timeout: retain the artifact and exclude incomplete work plus its
+  dependents; continue independent tickets. Never apply a still-changing copy.
+- No snapshot: refuse `-Up`; use Core recovery rules before any `-Down`.
+- Example: if 139 and 141 are dependency-ready and disjoint, dispatch worker
+  141, then implement coordinator ticket 139 concurrently. Integrate either
+  completed return when ready; 141 does not wait for 139's implementation.

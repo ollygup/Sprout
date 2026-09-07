@@ -173,9 +173,9 @@ A folder the user has permitted Sprout to search for local targets. Permission t
 _Avoid_: Full-disk access, upload permission
 
 **Model recommendation**:
-A model Sprout offers as a tested candidate for the user's hardware and authoring tasks. A changed recommendation does not replace the user's installed selection.
+A model planned for Sprout to offer as a tested candidate for the user's hardware and authoring tasks ([spec 145; implementation pending](../.scratch/sprout-app/issues/145-ai-assisted-quick-action-authoring-spec.md)). A changed recommendation does not replace the user's installed selection.
 _Avoid_: Catalog (reserved for available software Products), automatic model update
 
 **AI skill**:
-A fixed set of Sprout-specific instructions for creating or diagnosing a Quick Action, used together with shared authoring rules. An AI skill grants no execution, discovery, or disclosure permission.
+A planned fixed set of Sprout-specific instructions for creating or diagnosing a Quick Action, used together with shared authoring rules ([spec 145; implementation pending](../.scratch/sprout-app/issues/145-ai-assisted-quick-action-authoring-spec.md)). An AI skill grants no execution, discovery, or disclosure permission.
 _Avoid_: Plugin, security policy, user configuration
