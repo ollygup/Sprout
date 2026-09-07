@@ -109,6 +109,13 @@ export function importBackup(path: string): Promise<BackupImportSummary> {
   return invoke<BackupImportSummary>("import_backup", { path });
 }
 
+/** Writes one Quick Action to `path` as the unchanged backup document — a
+ *  one-element `quick_actions` array with four empty siblings — so the file
+ *  restores through the ordinary flow with honest counts. */
+export function exportQuickAction(path: string, id: number): Promise<BackupCounts> {
+  return invoke<BackupCounts>("export_quick_action", { path, id });
+}
+
 export function takePendingImport(): Promise<string | null> {
   return invoke<string | null>("take_pending_import");
 }
@@ -232,6 +239,13 @@ export function testLaunchCommand(
  * Rejected while a run is already in flight. */
 export function startQuickLaunch(): Promise<void> {
   return invoke<void>("start_quick_launch");
+}
+
+/** Starts what the dock shows: the dock-visible subset only. The main-app
+ *  Start-all keeps `startQuickLaunch` (every entry); each surface starts
+ *  exactly what it lists. */
+export function startDockQuickLaunch(): Promise<void> {
+  return invoke<void>("start_dock_quick_launch");
 }
 
 /** Starts one Launch entry through the same pipeline as Start all (ticket

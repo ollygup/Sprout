@@ -113,6 +113,7 @@ fn migrate(conn: &Connection) -> Result<()> {
              shell       TEXT CHECK (shell IN ('powershell', 'cmd', 'none')),
              show_window INTEGER NOT NULL DEFAULT 0,
              desktop_id  TEXT,
+             show_in_dock INTEGER NOT NULL DEFAULT 1,
              position    INTEGER NOT NULL DEFAULT 0
          );
         CREATE TABLE IF NOT EXISTS quick_actions (
@@ -125,12 +126,14 @@ fn migrate(conn: &Connection) -> Result<()> {
             note         TEXT,
             notes        TEXT,
             auto_run     INTEGER NOT NULL DEFAULT 0,
+            show_in_dock INTEGER NOT NULL DEFAULT 1,
             position     INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS clips (
             id       INTEGER PRIMARY KEY AUTOINCREMENT,
             name     TEXT NOT NULL,
             content  TEXT NOT NULL,
+            show_in_dock INTEGER NOT NULL DEFAULT 1,
             position INTEGER NOT NULL DEFAULT 0
         );",
     )?;
@@ -140,6 +143,7 @@ fn migrate(conn: &Connection) -> Result<()> {
     ensure_quick_action_stoppable(conn)?;
     ensure_quick_action_note(conn)?;
     ensure_quick_action_auto_run(conn)?;
+    ensure_show_in_dock_columns(conn)?;
     ensure_item_group_columns(conn)
 }
 
@@ -297,6 +301,29 @@ fn ensure_quick_action_auto_run(conn: &Connection) -> Result<()> {
     )?;
     if !exists {
         conn.execute_batch("ALTER TABLE quick_actions ADD COLUMN auto_run INTEGER NOT NULL DEFAULT 0")?;
+    }
+    Ok(())
+}
+
+/// Upgrades databases created before per-item dock visibility existed: adds
+/// the `show_in_dock` flag to the three item tables, defaulting every
+/// existing row to visible. Fresh databases already have it. Idempotent.
+/// Default-visible matters: nothing the user never hid may vanish from the
+/// dock after an upgrade.
+fn ensure_show_in_dock_columns(conn: &Connection) -> Result<()> {
+    for table in ["launch_entries", "quick_actions", "clips"] {
+        let exists: bool = conn.query_row(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name = 'show_in_dock')"
+            ),
+            [],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            conn.execute_batch(&format!(
+                "ALTER TABLE {table} ADD COLUMN show_in_dock INTEGER NOT NULL DEFAULT 1"
+            ))?;
+        }
     }
     Ok(())
 }
@@ -1902,6 +1929,7 @@ mod tests {
             shell: None,
             show_window: false,
             desktop_id: None,
+            show_in_dock: true,
         };
         crate::launch::create_launch_entry(&conn, &entry).unwrap();
         assert_eq!(crate::launch::list_launch_entries(&conn).unwrap().len(), 1);
@@ -1987,6 +2015,7 @@ mod tests {
             stop_command: None,
             note: None,
             auto_run: false,
+            show_in_dock: true,
         };
         crate::quick_actions::create_quick_action(&conn, &action).unwrap();
         assert_eq!(crate::quick_actions::list_quick_actions(&conn).unwrap().len(), 1);
@@ -2038,6 +2067,7 @@ mod tests {
             stop_command: Some("docker compose stop".into()),
             note: None,
             auto_run: false,
+            show_in_dock: true,
         };
         crate::quick_actions::create_quick_action(&conn, &tracked).unwrap();
         let list = crate::quick_actions::list_quick_actions(&conn).unwrap();
@@ -2059,6 +2089,66 @@ mod tests {
             crate::quick_actions::list_quick_actions(&conn).unwrap().len(),
             2
         );
+    }
+
+    #[test]
+    fn migrates_item_tables_created_before_show_in_dock() {
+        // Databases from before per-item dock visibility have no
+        // `show_in_dock` column — migration adds it default-visible and every
+        // pre-existing row keeps showing.
+        let dir = test_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        {
+            let conn = Connection::open(dir.join("sprout.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE launch_entries (
+                     id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                     name        TEXT NOT NULL,
+                     kind        TEXT NOT NULL,
+                     target      TEXT NOT NULL,
+                     shell       TEXT,
+                     show_window INTEGER NOT NULL DEFAULT 0,
+                     desktop_id  TEXT,
+                     position    INTEGER NOT NULL DEFAULT 0
+                 );
+                 INSERT INTO launch_entries (name, kind, target, position)
+                 VALUES ('LegacyApp', 'app', 'C:\\Apps\\LegacyApp.exe', 0);
+                 CREATE TABLE quick_actions (
+                     id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                     name         TEXT NOT NULL,
+                     command      TEXT NOT NULL,
+                     cwd          TEXT,
+                     stoppable    INTEGER NOT NULL DEFAULT 0,
+                     stop_command TEXT,
+                     note         TEXT,
+                     notes        TEXT,
+                     auto_run     INTEGER NOT NULL DEFAULT 0,
+                     position     INTEGER NOT NULL DEFAULT 0
+                 );
+                 INSERT INTO quick_actions (name, command, position)
+                 VALUES ('legacy-action', 'echo legacy', 0);
+                 CREATE TABLE clips (
+                     id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                     name     TEXT NOT NULL,
+                     content  TEXT NOT NULL,
+                     position INTEGER NOT NULL DEFAULT 0
+                 );
+                 INSERT INTO clips (name, content, position)
+                 VALUES ('legacy', 'legacy text', 0);",
+            )
+            .unwrap();
+        }
+        let conn = init_at(&dir).unwrap();
+        let entries = crate::launch::list_launch_entries(&conn).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].entry.show_in_dock);
+        assert_eq!(crate::launch::list_dock_launch_entries(&conn).unwrap().len(), 1);
+        let actions = crate::quick_actions::list_quick_actions(&conn).unwrap();
+        assert_eq!(actions.len(), 1);
+        assert!(actions[0].action.show_in_dock);
+        let clips = crate::clips::list_clips(&conn).unwrap();
+        assert_eq!(clips.len(), 1);
+        assert!(clips[0].clip.show_in_dock);
     }
 
     #[test]

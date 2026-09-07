@@ -3,10 +3,12 @@
   import type { Group, QuickAction } from "$lib/types";
   import {
     deleteQuickAction,
+    exportQuickAction,
     getSettings,
     listQuickActions,
     moveQuickAction,
     runQuickAction,
+    updateQuickAction,
   } from "$lib/api";
   import {
     countMembers,
@@ -31,6 +33,7 @@
     type ContextMenuItem,
     type ContextMenuState,
   } from "$lib/components/ContextMenu.svelte";
+  import { save as saveDialog } from "@tauri-apps/plugin-dialog";
   import EmptyState from "$lib/components/EmptyState.svelte";
   import Notice from "$lib/components/Notice.svelte";
   import PageFeaturesButton from "$lib/components/PageFeaturesButton.svelte";
@@ -206,6 +209,52 @@
     }
   }
 
+  /** Per-item dock visibility (research 0006 pattern 4: the control lives on
+   *  its object): hidden actions stay fully listed here and runnable — only
+   *  the dock filters them out. */
+  async function toggleDockVisibility(action: QuickAction) {
+    busy = true;
+    error = "";
+    try {
+      const visible = !(action.show_in_dock ?? true);
+      await updateQuickAction({ ...action, show_in_dock: visible });
+      flash(
+        visible
+          ? `${action.name} will show in the dock.`
+          : `${action.name} hidden from the dock — still here and runnable.`
+      );
+      await load();
+    } catch (e) {
+      console.error(e);
+      error = String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
+  /** One row's export through the moment-of-use save picker (research 0007):
+   *  the file is the unchanged backup envelope with a one-element array, so
+   *  it restores through Settings → Backup with honest counts. The notice
+   *  states the payload rule up front: the same command and working directory
+   *  restores as skipped under any name, never duplicated. */
+  async function exportViaDialog(action: QuickAction) {
+    const path = await saveDialog({
+      title: `Export ${action.name} as backup`,
+      defaultPath: `${action.name}.json`,
+      filters: [{ name: "Sprout backup", extensions: ["json"] }],
+    });
+    if (!path) return;
+    try {
+      await exportQuickAction(path, action.id);
+      flash(
+        `Exported ${action.name} to ${path}. Restore it through Settings → Backup — it adds the action unless the same command and working directory already exists under any name, in which case it is skipped, not duplicated.`
+      );
+    } catch (e) {
+      console.error(e);
+      error = String(e);
+    }
+  }
+
   const featureItems = $derived([
     {
       label: "Groups",
@@ -237,8 +286,9 @@
 
   /** One ⋯ menu per action row, on the round's ordering standard (ticket
    *  106): Edit first (the row's primary verb), then the Move to group
-   *  flyout while Groups is on, Move up / Move down over the visible slice,
-   *  Remove danger-last behind a separator. */
+   *  flyout while Groups is on, the dock visibility toggle, single-action
+   *  Export, Move up / Move down over the visible slice, Remove danger-last
+   *  behind a separator. */
   function openRowMenu(
     action: QuickAction,
     anchor: HTMLButtonElement,
@@ -264,6 +314,18 @@
         children: groups.moveToGroupChildren(action, action.name),
       });
     }
+    items.push({
+      label: (action.show_in_dock ?? true) ? "Hide from dock" : "Show in dock",
+      icon: (action.show_in_dock ?? true) ? "eye-off" : "eye",
+      onselect: () => toggleDockVisibility(action),
+    });
+    // Single-action Export lands here, between the visibility toggle and
+    // the Move verbs (pinned row order across 159/160).
+    items.push({
+      label: "Export",
+      icon: "download",
+      onselect: () => exportViaDialog(action),
+    });
     items.push(
       {
         label: "Move up",

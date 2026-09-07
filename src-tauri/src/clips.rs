@@ -21,6 +21,17 @@ pub struct ClipInput {
     pub name: String,
     /// The plain text a copy puts back on the clipboard.
     pub content: String,
+    /// Whether the Quick Launch dock lists this clip. The main-app page always
+    /// sees every clip; the dock filters on this flag. Missing in legacy
+    /// backups means visible.
+    #[serde(default = "default_show_in_dock")]
+    pub show_in_dock: bool,
+}
+
+/// Missing `show_in_dock` means visible — legacy rows and backup files predate
+/// the flag and must keep showing.
+pub(crate) fn default_show_in_dock() -> bool {
+    true
 }
 
 /// A Clip as stored: the input plus its library id. Position is internal
@@ -73,6 +84,7 @@ fn clip_from_row(row: &rusqlite::Row) -> Result<Clip> {
         clip: ClipInput {
             name: row.get(1)?,
             content: row.get(2)?,
+            show_in_dock: row.get::<_, Option<i64>>(4).ok().flatten().unwrap_or(1) != 0,
         },
         group_id: row.get(3)?,
     })
@@ -81,7 +93,7 @@ fn clip_from_row(row: &rusqlite::Row) -> Result<Clip> {
 /// Every Clip in list order (position, then insertion order).
 pub fn list_clips(conn: &Connection) -> Result<Vec<Clip>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, content, group_id
+        "SELECT id, name, content, group_id, show_in_dock
          FROM clips ORDER BY position, id",
     )?;
     let rows = stmt.query_map([], clip_from_row)?;
@@ -91,7 +103,7 @@ pub fn list_clips(conn: &Connection) -> Result<Vec<Clip>> {
 /// Fetches one Clip by id — the clipboard-write command's lookup.
 pub fn get_clip(conn: &Connection, id: i64) -> Result<Option<Clip>> {
     conn.query_row(
-        "SELECT id, name, content, group_id FROM clips WHERE id = ?1",
+        "SELECT id, name, content, group_id, show_in_dock FROM clips WHERE id = ?1",
         params![id],
         clip_from_row,
     )
@@ -100,8 +112,8 @@ pub fn get_clip(conn: &Connection, id: i64) -> Result<Option<Clip>> {
 
 /// The one INSERT shape for a Clip, position as the trailing placeholder —
 /// shared by `create_clip` and `append_clip`.
-const INSERT_CLIP_SQL: &str = "INSERT INTO clips (name, content, position)
-     VALUES (?1, ?2, ?3)";
+const INSERT_CLIP_SQL: &str = "INSERT INTO clips (name, content, show_in_dock, position)
+     VALUES (?1, ?2, ?3, ?4)";
 
 /// Appends a clip at the end of the list (the next free position). Name and
 /// content store trimmed; an untitled clip persists the empty string.
@@ -109,7 +121,7 @@ pub fn create_clip(conn: &Connection, clip: &ClipInput) -> Result<Clip> {
     let id = crate::ordered_list::OrderedList::CLIPS.create_at_end(
         conn,
         INSERT_CLIP_SQL,
-        &[&clip.name.trim(), &clip.content.trim()],
+        &[&clip.name.trim(), &clip.content.trim(), &clip.show_in_dock],
     )?;
     Ok(get_clip(conn, id)?.expect("just inserted"))
 }
@@ -118,7 +130,7 @@ pub fn create_clip(conn: &Connection, clip: &ClipInput) -> Result<Clip> {
 /// backup's merge appends every clip under ONE transaction.
 pub(crate) fn append_clip(conn: &Connection, clip: &ClipInput) -> Result<()> {
     crate::ordered_list::OrderedList::CLIPS
-        .append_at_end(conn, INSERT_CLIP_SQL, &[&clip.name.trim(), &clip.content.trim()])
+        .append_at_end(conn, INSERT_CLIP_SQL, &[&clip.name.trim(), &clip.content.trim(), &clip.show_in_dock])
         .map(|_| ())
 }
 
@@ -127,8 +139,8 @@ pub(crate) fn append_clip(conn: &Connection, clip: &ClipInput) -> Result<()> {
 /// changes through `assign_to_group`/`unassign_from_group` (ticket 89).
 pub fn update_clip(conn: &Connection, clip: &Clip) -> Result<()> {
     conn.execute(
-        "UPDATE clips SET name = ?1, content = ?2 WHERE id = ?3",
-        params![clip.clip.name.trim(), clip.clip.content.trim(), clip.id],
+        "UPDATE clips SET name = ?1, content = ?2, show_in_dock = ?3 WHERE id = ?4",
+        params![clip.clip.name.trim(), clip.clip.content.trim(), clip.clip.show_in_dock, clip.id],
     )?;
     Ok(())
 }
@@ -157,6 +169,7 @@ mod tests {
         ClipInput {
             name: name.into(),
             content: content.into(),
+            show_in_dock: true,
         }
     }
 

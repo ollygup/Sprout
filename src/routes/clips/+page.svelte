@@ -7,6 +7,7 @@
     getSettings,
     listClips,
     moveClip,
+    updateClip,
   } from "$lib/api";
   import {
     countMembers,
@@ -184,6 +185,30 @@
     }
   }
 
+  /** Per-item dock visibility (research 0006 pattern 4: the control lives on
+   *  its object): hidden clips stay fully listed here and copyable — only
+   *  the dock filters them out. */
+  async function toggleDockVisibility(clip: Clip) {
+    busy = true;
+    error = "";
+    try {
+      const visible = !(clip.show_in_dock ?? true);
+      await updateClip({ ...clip, show_in_dock: visible });
+      const title = clipTitle(clip.name, clip.content);
+      flash(
+        visible
+          ? `"${title}" will show in the dock.`
+          : `"${title}" hidden from the dock — still here and copyable.`
+      );
+      await load();
+    } catch (e) {
+      console.error(e);
+      error = String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
   /** The feature switch behind the page-features menu (research 0008):
    *  persisted for this collection through the settings store. Optimistic —
    *  reverted when the save fails. */
@@ -218,8 +243,9 @@
 
   /** One ⋯ menu per clip row, on the round's ordering standard (ticket
    *  106): Edit first (the row's primary verb), then the Move to group
-   *  flyout while Groups is on, Move up / Move down over the visible slice,
-   *  Remove danger-last behind a separator. */
+   *  flyout while Groups is on, the dock visibility toggle, Move up /
+   *  Move down over the visible slice, Remove danger-last behind a
+   *  separator. */
   function openRowMenu(
     clip: Clip,
     anchor: HTMLButtonElement,
@@ -246,6 +272,11 @@
         children: groups.moveToGroupChildren(clip, title),
       });
     }
+    items.push({
+      label: (clip.show_in_dock ?? true) ? "Hide from dock" : "Show in dock",
+      icon: (clip.show_in_dock ?? true) ? "eye-off" : "eye",
+      onselect: () => toggleDockVisibility(clip),
+    });
     items.push(
       {
         label: "Move up",

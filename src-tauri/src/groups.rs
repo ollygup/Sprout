@@ -448,6 +448,7 @@ mod tests {
             shell: Some(LaunchShell::None),
             show_window: false,
             desktop_id: None,
+            show_in_dock: true,
         }
     }
 
@@ -460,6 +461,7 @@ mod tests {
             stop_command: None,
             note: None,
             auto_run: false,
+            show_in_dock: true,
         }
     }
 
@@ -467,6 +469,7 @@ mod tests {
         ClipInput {
             name: name.into(),
             content: format!("content of {name}"),
+            show_in_dock: true,
         }
     }
 

@@ -363,6 +363,9 @@ export interface LaunchEntryInput {
   show_window: boolean;
   /** Target virtual desktop GUID (ticket 44); null = current desktop. */
   desktop_id: string | null;
+  /** Whether the dock lists this entry. Main-app lists and its Start-all see
+   *  every entry; the dock filters on this. Missing (legacy) means visible. */
+  show_in_dock: boolean;
 }
 
 /** A Launch entry as stored: the input plus its library id. `group_id` is
@@ -440,6 +443,9 @@ export interface QuickActionInput {
    *  Machine-local — carried by whole-app backup, never by Presets or
    *  exports. Default off. */
   auto_run: boolean;
+  /** Whether the dock lists this action. Main-app lists see every action;
+   *  the dock filters on this. Missing (legacy) means visible. */
+  show_in_dock: boolean;
 }
 
 /** A Quick Action as stored: the input plus its library id. `group_id` is
@@ -466,6 +472,9 @@ export interface ClipInput {
   name: string;
   /** The text a copy puts back on the clipboard. Non-empty after trim. */
   content: string;
+  /** Whether the dock lists this clip. The main-app page sees every clip;
+   *  the dock filters on this. Missing (legacy) means visible. */
+  show_in_dock: boolean;
 }
 
 /** A Clip as stored: the input plus its library id. `group_id` is its

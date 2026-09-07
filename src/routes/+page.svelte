@@ -299,6 +299,7 @@
         shell: null,
         show_window: false,
         desktop_id: null,
+        show_in_dock: true,
       });
       flash(`${name ?? picked} added to Quick Launch.`);
       await load();
@@ -327,6 +328,7 @@
         shell: null,
         show_window: false,
         desktop_id: null,
+        show_in_dock: true,
       });
       flash(`${candidate.name} added to Quick Launch.`);
       query = "";
@@ -429,9 +431,11 @@
   /** One ⋯ menu per entry, on the round's ordering standard (ticket 106,
    *  research 0006 pattern 10): organizational submenus first — Move to group
    *  while Groups is on, Virtual desktop wherever supported (ticket 105:
-   *  no master switch, ADR-0015) — then Move up / Move down over the visible
-   *  slice, and Remove danger-last behind a separator. Checkmarks mark the
-   *  current state; badges in the list itself show assignments. */
+   *  no master switch, ADR-0015) — then the dock visibility toggle (per-item,
+   *  research 0006 pattern 4: the control lives on its object), then Move up
+   *  / Move down over the visible slice, and Remove danger-last behind a
+   *  separator. Checkmarks mark the current state; badges in the list itself
+   *  show assignments. */
   function openRowMenu(
     entry: LaunchEntry,
     anchor: HTMLButtonElement,
@@ -490,6 +494,11 @@
         ],
       });
     }
+    items.push({
+      label: (entry.show_in_dock ?? true) ? "Hide from dock" : "Show in dock",
+      icon: (entry.show_in_dock ?? true) ? "eye-off" : "eye",
+      onselect: () => toggleDockVisibility(entry),
+    });
     items.push(
       {
         label: "Move up",
@@ -550,6 +559,29 @@
         id
           ? `${entry.name} will open on ${desktopName(id)}.`
           : `${entry.name} will open wherever you start it — no desktop assignment.`
+      );
+      await load();
+    } catch (e) {
+      console.error(e);
+      error = String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
+  /** Per-item dock visibility (research 0006 pattern 4: the control lives on
+   *  its object): hidden entries stay fully listed here and runnable
+   *  individually — only the dock filters them out. */
+  async function toggleDockVisibility(entry: LaunchEntry) {
+    busy = true;
+    error = "";
+    try {
+      const visible = !(entry.show_in_dock ?? true);
+      await updateLaunchEntry({ ...entry, show_in_dock: visible });
+      flash(
+        visible
+          ? `${entry.name} will show in the dock.`
+          : `${entry.name} hidden from the dock — still here and runnable.`
       );
       await load();
     } catch (e) {

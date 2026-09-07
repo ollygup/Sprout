@@ -25,8 +25,8 @@
     openVolumeMixer,
     runQuickAction,
     setCompanionMuted,
+    startDockQuickLaunch,
     startLaunchEntry,
-    startQuickLaunch,
     switchQuickLaunchDockEdge,
     toggleQuickLaunchDock,
     setCompanionHeightRatio,
@@ -189,6 +189,9 @@
   let companionFailureDetail = $state("");
   let companionOpeningExternal = $state(false);
   let companionMixerOpening = $state(false);
+  // Ticket 161: Reload recreates the child WebView (bad login / dead-end
+  // recovery) — busy flag drives the bar idiom (disabled + label switch).
+  let companionReloading = $state(false);
   // Companion audio: persisted global mute plus the live playing read. The
   // toggle and the indicator render only inside the docked pane's own
   // toolbar, so floating and no-URL states gain no audio chrome.
@@ -409,6 +412,19 @@
       try { await webview.close(); } catch {}
     }
     await syncCompanionWebview();
+  }
+  // Ticket 161: Reload reuses the recreate path above (null handle, close,
+  // born/failed flags reset, resync) — the saved site URL is untouched, so a
+  // stuck login recovers to a fresh page at the same address. Busy-guarded
+  // like the bar's mixer/external buttons; never navigation chrome (ADR-0022).
+  async function companionReload() {
+    if (companionReloading || !companionUrl) return;
+    companionReloading = true;
+    try {
+      await companionRetry();
+    } finally {
+      companionReloading = false;
+    }
   }
   function handleCompanionLoad() {
     // Track in-pane navigation for Back/Forward (0004:2 show-if-you-can).
@@ -1002,8 +1018,10 @@
       actionCollapse.prune(ags.map((g) => g.id));
       clipCollapse.prune(cgs.map((g) => g.id));
       // Deleting the last clip removes the third tab again (accepted) — if
-      // it was selected, land on Launch rather than a dead selection.
-      if (clips.length === 0 && tab === "clips") tab = "launch";
+      // it was selected, land on Launch rather than a dead selection. Hiding
+      // every clip hides the tab the same way — the dock shows only what is
+      // visible.
+      if (clips.filter((c) => (c.show_in_dock ?? true) !== false).length === 0 && tab === "clips") tab = "launch";
       error = "";
     } catch (e) {
       console.error(e);
@@ -1017,7 +1035,8 @@
   // exists. Short labels and icons feed the strip's measured degradation
   // chain (research 0004 rule 4); `title` keeps every stage named for
   // tooltips and assistive tech. Icon names verified against the existing
-  // set in Icon.svelte (rocket / terminal / copy).
+  // set in Icon.svelte (rocket / terminal / copy). Hidden clips never count
+  // — the dock tab appears only while a visible clip exists.
   const qlTabs = $derived.by(() => {
     const tabs = [
       {
@@ -1035,7 +1054,7 @@
         title: "Quick Actions",
       },
     ];
-    if (clips.length > 0) {
+    if (clips.filter((c) => (c.show_in_dock ?? true) !== false).length > 0) {
       tabs.push({
         id: "clips",
         label: "Quick Clips",
@@ -1051,7 +1070,7 @@
     launching = true;
     error = "";
     try {
-      await startQuickLaunch();
+      await startDockQuickLaunch();
     } catch (e) {
       console.error(e);
       error = String(e);
@@ -1061,20 +1080,32 @@
 
   // ------------------- ticket 93/97: clickable entries + groups ----------
 
+  /** Per-item dock visibility: hidden items never reach this surface — each
+   *  Start-all starts exactly what its surface shows. Missing (legacy) means
+   *  visible. */
+  function isDockVisible(item: { show_in_dock?: boolean | null }): boolean {
+    return (item.show_in_dock ?? true) !== false;
+  }
+
+  const dockEntries = $derived(entries.filter(isDockVisible));
+  const dockActions = $derived(actions.filter(isDockVisible));
+  const dockClips = $derived(clips.filter(isDockVisible));
+
   /** Sections exist only once at least one group does — and in this
    *  read-only surface a group with no members renders nothing at all
-   *  (research 0004 rule 2): there is no ⋯ menu here to fill it from. */
+   *  (research 0004 rule 2): there is no ⋯ menu here to fill it from. A
+   *  group whose members are all hidden drops its section here. */
   const launchGrouped = $derived(launchGroupsOn && launchGroups.length > 0);
 
   const launchUngrouped = $derived(
-    entries.filter((e) => e.group_id === null)
+    dockEntries.filter((e) => e.group_id === null)
   );
 
   const launchSections = $derived(
     launchGroups
       .map((g) => ({
         group: g,
-        rows: entries.filter((e) => e.group_id === g.id),
+        rows: dockEntries.filter((e) => e.group_id === g.id),
       }))
       .filter((s) => s.rows.length > 0)
   );
@@ -1082,27 +1113,27 @@
   const actionsGrouped = $derived(actionGroupsOn && actionGroups.length > 0);
 
   const actionsUngrouped = $derived(
-    actions.filter((a) => a.group_id === null)
+    dockActions.filter((a) => a.group_id === null)
   );
 
   const actionSections = $derived(
     actionGroups
       .map((g) => ({
         group: g,
-        rows: actions.filter((a) => a.group_id === g.id),
+        rows: dockActions.filter((a) => a.group_id === g.id),
       }))
       .filter((s) => s.rows.length > 0)
   );
 
   const clipsGrouped = $derived(clipGroupsOn && clipGroups.length > 0);
 
-  const clipsUngrouped = $derived(clips.filter((c) => c.group_id === null));
+  const clipsUngrouped = $derived(dockClips.filter((c) => c.group_id === null));
 
   const clipSections = $derived(
     clipGroups
       .map((g) => ({
         group: g,
-        rows: clips.filter((c) => c.group_id === g.id),
+        rows: dockClips.filter((c) => c.group_id === g.id),
       }))
       .filter((s) => s.rows.length > 0)
   );
@@ -1420,9 +1451,9 @@
         >
       {#snippet panel(id)}
         {#if id === "launch"}
-          {#if loading && entries.length === 0}
+          {#if loading && dockEntries.length === 0}
             <p class="qlw__sifting" aria-live="polite">Loading…</p>
-          {:else if entries.length === 0}
+          {:else if dockEntries.length === 0}
             <div class="qlw__empty">
               <span class="qlw__empty-icon" aria-hidden="true">
                 <Icon name="rocket" size={22} />
@@ -1438,7 +1469,7 @@
                  scrolls beneath it. -->
             <div class="qlw__launch">
               <p class="qlw__count">
-                {entries.length} {entries.length === 1 ? "entry" : "entries"}
+                {dockEntries.length} {dockEntries.length === 1 ? "entry" : "entries"}
                 in the Quick Launch list.
               </p>
               <Button onclick={start} disabled={startInFlight}>
@@ -1448,7 +1479,7 @@
               <div class="qlw__list">
                 {#if !launchGrouped}
                   <ul class="qlw__entries">
-                    {#each entries as entry (entry.id)}
+                    {#each dockEntries as entry (entry.id)}
                       {@render launchRow(entry)}
                     {/each}
                   </ul>
@@ -1485,9 +1516,9 @@
             </div>
           {/if}
         {:else if id === "actions"}
-          {#if loading && actions.length === 0}
+          {#if loading && dockActions.length === 0}
             <p class="qlw__sifting" aria-live="polite">Loading…</p>
-          {:else if actions.length === 0}
+          {:else if dockActions.length === 0}
             <div class="qlw__empty">
               <span class="qlw__empty-icon" aria-hidden="true">
                 <Icon name="terminal" size={22} />
@@ -1504,7 +1535,7 @@
             <div class="qlw__list qlw__list--padded">
               {#if !actionsGrouped}
                 <ul class="qlw__actions">
-                  {#each actions as action (action.id)}
+                  {#each dockActions as action (action.id)}
                     {@render actionRow(action)}
                   {/each}
                 </ul>
@@ -1536,14 +1567,14 @@
             </div>
           {/if}
         {:else}
-          {#if loading && clips.length === 0}
+          {#if loading && dockClips.length === 0}
             <p class="qlw__sifting" aria-live="polite">Loading…</p>
           {:else}
             <!-- Ticket 97: same Groups mirror as the other two tabs. -->
             <div class="qlw__list qlw__list--padded">
               {#if !clipsGrouped}
                 <ul class="qlw__clips">
-                  {#each clips as clip (clip.id)}
+                  {#each dockClips as clip (clip.id)}
                     {@render clipRow(clip)}
                   {/each}
                 </ul>
@@ -1604,6 +1635,16 @@
           {#if companionCanGoForward}
             <IconButton icon="chevron-right" label="Forward" quiet onclick={companionGoForward} />
           {/if}
+          <!-- Ticket 161: Reload recreates the child WebView (bad login /
+               dead-end recovery) — left cluster, before the URL; mute/mixer/
+               external order untouched. Icon "refresh" is the verified Icon.svelte name. -->
+          <IconButton
+            icon="refresh"
+            label={companionReloading ? "Reloading companion" : "Reload companion"}
+            quiet
+            disabled={companionReloading}
+            onclick={() => void companionReload()}
+          />
           <span class="qlw__companion-url" title={companionUrl ?? ""}>{companionUrl}</span>
           {#if companionPlaying}
             <!-- The playing indicator: status only, never a control — the

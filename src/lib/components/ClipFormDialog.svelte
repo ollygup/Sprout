@@ -22,6 +22,7 @@
 
   let name = $state("");
   let content = $state("");
+  let showInDock = $state(true);
   let saving = $state(false);
   let error = $state("");
 
@@ -31,6 +32,7 @@
     if (open) {
       name = clip?.name ?? "";
       content = clip?.content ?? "";
+      showInDock = clip?.show_in_dock ?? true;
       saving = false;
       error = "";
     }
@@ -49,12 +51,13 @@
     error = "";
     try {
       if (editing && clip) {
-        await updateClip({ ...clip, name: name.trim(), content: content.trim() });
+        await updateClip({ ...clip, name: name.trim(), content: content.trim(), show_in_dock: showInDock });
         await onsave("Clip saved.");
       } else {
         const created = await createClip({
           name: name.trim(),
           content: content.trim(),
+          show_in_dock: showInDock,
         });
         await onsave(`"${clipTitle(created.name, created.content)}" added to Quick Clips.`);
       }
@@ -98,6 +101,7 @@
         value={content}
         oninput={(e) => (content = (e.target as HTMLTextAreaElement).value)}
       ></textarea>
+      <p class="field__hint">Ctrl+Enter to submit — Enter adds a new line.</p>
     </div>
 
     <TextInput
@@ -115,6 +119,19 @@
         </p>
       {/snippet}
     </TextInput>
+
+    <label class="dockvis">
+      <input
+        type="checkbox"
+        class="dockvis__check"
+        checked={showInDock}
+        onchange={(e) => (showInDock = (e.target as HTMLInputElement).checked)}
+      />
+      <span class="dockvis__title">Show in dock</span>
+      <InfoTip label="What showing in the dock does">
+        <p>Uncheck to hide this clip from the Quick Launch dock. It stays here and stays copyable.</p>
+      </InfoTip>
+    </label>
 
     {#if error}
       <p class="form__error" role="alert">{error}</p>
@@ -195,11 +212,38 @@
     opacity: 0.75;
   }
 
+  .field__hint {
+    margin: 0;
+    font-size: var(--text-xs);
+    line-height: var(--leading-tight);
+    color: var(--text-muted);
+  }
+
   .form__error {
     margin: 0;
     font-size: var(--text-sm);
     color: var(--danger-text);
     overflow-wrap: anywhere;
+  }
+
+  .dockvis {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    cursor: pointer;
+  }
+
+  .dockvis__check {
+    margin: 0;
+    accent-color: var(--accent);
+    width: 14px;
+    height: 14px;
+  }
+
+  .dockvis__title {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--text);
   }
 
   .form__actions {

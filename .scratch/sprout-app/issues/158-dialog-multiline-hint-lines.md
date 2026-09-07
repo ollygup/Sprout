@@ -13,6 +13,6 @@
 
 ## ACs
 
-- [ ] Every textarea in a Dialog form shows the submit-combination hint in existing hint styling.
-- [ ] Single-line fields gain no hint (native Enter needs none).
-- [ ] `npm.cmd run check` 0 errors; related frontend tests green.
+- [x] Every textarea in a Dialog form shows the submit-combination hint in existing hint styling.
+- [x] Single-line fields gain no hint (native Enter needs none).
+- [x] `npm.cmd run check` 0 errors; related frontend tests green.

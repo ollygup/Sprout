@@ -203,6 +203,34 @@ pub fn export_backup(
     Ok(doc.counts())
 }
 
+/// Writes one Quick Action to `path` as the unchanged whole-app document —
+/// a one-element `quick_actions` array with four empty siblings — so the
+/// file restores through the ordinary merge with honest counts (ADR-0014
+/// one-format rule). Identity stays command+cwd (ADR-0026): restoring skips
+/// when the same payload already exists under any name.
+pub fn export_quick_action(conn: &Connection, path: &str, id: i64) -> Result<BackupCounts, String> {
+    let stored = quick_actions::get_quick_action(conn, id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "That quick action is gone — refresh and try again.".to_string())?;
+    let mut doc = BackupDocument {
+        kind: BACKUP_KIND.into(),
+        version: BACKUP_VERSION,
+        exported_at: db::now_ts(),
+        products: Vec::new(),
+        presets: Vec::new(),
+        launch_entries: Vec::new(),
+        quick_actions: vec![stored.action],
+        clips: Vec::new(),
+    };
+    // Same portable form as the whole-app path, so a shared file never
+    // carries another machine's paths.
+    normalize(&mut doc);
+    let json = serde_json::to_string_pretty(&doc)
+        .map_err(|e| format!("Could not serialize the backup: {e}"))?;
+    fs::write(path, json).map_err(|e| format!("Could not write '{path}': {e}"))?;
+    Ok(doc.counts())
+}
+
 /// Parses `path` and reports what a restore would write — the parsed counts
 /// behind the confirmation dialog. Nothing is read from or written to the
 /// database.
@@ -495,6 +523,7 @@ mod tests {
             shell: None,
             show_window: false,
             desktop_id: None,
+            show_in_dock: true,
         }
     }
 
@@ -506,6 +535,7 @@ mod tests {
             shell: Some(launch::LaunchShell::Powershell),
             show_window: false,
             desktop_id: None,
+            show_in_dock: true,
         }
     }
 
@@ -518,6 +548,7 @@ mod tests {
             stop_command: None,
             note: None,
             auto_run: false,
+            show_in_dock: true,
         }
     }
 
@@ -578,11 +609,13 @@ mod tests {
         clips::create_clip(conn, &ClipInput {
             name: "reply".into(),
             content: "Thanks for the report!".into(),
+            show_in_dock: true,
         })
         .unwrap();
         clips::create_clip(conn, &ClipInput {
             name: "".into(),
             content: "git status --short".into(),
+            show_in_dock: true,
         })
         .unwrap();
     }
@@ -679,8 +712,8 @@ mod tests {
         assert_eq!(
             clips.iter().map(|c| c.clip.clone()).collect::<Vec<_>>(),
             vec![
-                ClipInput { name: "reply".into(), content: "Thanks for the report!".into() },
-                ClipInput { name: "".into(), content: "git status --short".into() },
+                ClipInput { name: "reply".into(), content: "Thanks for the report!".into(), show_in_dock: true },
+                ClipInput { name: "".into(), content: "git status --short".into(), show_in_dock: true },
             ]
         );
 
@@ -752,6 +785,7 @@ mod tests {
         clips::create_clip(&target, &ClipInput {
             name: "different title".into(),
             content: "Thanks for the report!".into(),
+            show_in_dock: true,
         })
         .unwrap();
 
@@ -798,6 +832,7 @@ mod tests {
                     shell: None,
                     show_window: false,
                     desktop_id: None,
+                    show_in_dock: true,
                 },
                 LaunchEntryInput {
                     name: "Music".into(),
@@ -806,6 +841,7 @@ mod tests {
                     shell: None,
                     show_window: false,
                     desktop_id: None,
+                    show_in_dock: true,
                 },
             ],
             quick_actions: vec![action("Build")],
@@ -1069,6 +1105,7 @@ mod tests {
         doc.clips.push(ClipInput {
             name: "broken".into(),
             content: "   ".into(),
+            show_in_dock: true,
         });
         let bad = write_file(&dir, "bad.json", &serde_json::to_string(&doc).unwrap());
 
@@ -1174,5 +1211,191 @@ mod tests {
         assert_eq!(listed.len(), 2);
         assert!(listed.iter().find(|a| a.action.name == "Starter").unwrap().action.auto_run);
         assert!(!listed.iter().find(|a| a.action.name == "Manual").unwrap().action.auto_run);
+    }
+
+    #[test]
+    fn show_in_dock_survives_backup_roundtrip() {
+        // Per-item dock visibility travels in the whole-app backup for all
+        // three collections — hidden stays hidden, visible stays visible.
+        let source = conn();
+        let mut hidden_entry = app_entry("HiddenApp");
+        hidden_entry.show_in_dock = false;
+        launch::create_launch_entry(&source, &hidden_entry).unwrap();
+        launch::create_launch_entry(&source, &app_entry("ShownApp")).unwrap();
+        let mut hidden_action = action("HiddenAction");
+        hidden_action.command = "echo hidden".into();
+        hidden_action.show_in_dock = false;
+        quick_actions::create_quick_action(&source, &hidden_action).unwrap();
+        let mut shown_action = action("ShownAction");
+        shown_action.command = "echo shown".into();
+        quick_actions::create_quick_action(&source, &shown_action).unwrap();
+        clips::create_clip(&source, &ClipInput {
+            name: "hidden".into(),
+            content: "hidden text".into(),
+            show_in_dock: false,
+        })
+        .unwrap();
+        clips::create_clip(&source, &ClipInput {
+            name: "shown".into(),
+            content: "shown text".into(),
+            show_in_dock: true,
+        })
+        .unwrap();
+
+        let dir = tempfile::tempdir().unwrap().into_path();
+        let file = write_file(&dir, "backup.json", "");
+        export_backup(&source, &file, &BackupSelection::all()).unwrap();
+
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(on_disk["launch_entries"][0]["show_in_dock"], false);
+        assert_eq!(on_disk["quick_actions"][0]["show_in_dock"], false);
+        assert_eq!(on_disk["clips"][0]["show_in_dock"], false);
+
+        let target = conn();
+        import_backup(&target, &file).unwrap();
+        let entries = launch::list_launch_entries(&target).unwrap();
+        assert!(!entries.iter().find(|e| e.entry.name == "HiddenApp").unwrap().entry.show_in_dock);
+        assert!(entries.iter().find(|e| e.entry.name == "ShownApp").unwrap().entry.show_in_dock);
+        let actions = quick_actions::list_quick_actions(&target).unwrap();
+        assert!(!actions.iter().find(|a| a.action.name == "HiddenAction").unwrap().action.show_in_dock);
+        assert!(actions.iter().find(|a| a.action.name == "ShownAction").unwrap().action.show_in_dock);
+        let clips = clips::list_clips(&target).unwrap();
+        assert!(!clips.iter().find(|c| c.clip.content == "hidden text").unwrap().clip.show_in_dock);
+        assert!(clips.iter().find(|c| c.clip.content == "shown text").unwrap().clip.show_in_dock);
+    }
+
+    #[test]
+    fn legacy_backup_without_show_in_dock_reads_as_visible() {
+        // Files written before the flag carry no `show_in_dock` key — they
+        // must restore as visible, never hidden.
+        let c = conn();
+        let dir = tempfile::tempdir().unwrap().into_path();
+        let file = write_file(
+            &dir,
+            "legacy.json",
+            r#"{
+              "kind":"sprout-backup","version":1,"exported_at":0,
+              "products":[],"presets":[],
+              "launch_entries":[{"name":"OldApp","kind":"app","target":"C:\\Apps\\OldApp.lnk","shell":null,"show_window":false,"desktop_id":null}],
+              "quick_actions":[{"name":"OldAction","command":"echo old","cwd":null,"stoppable":false,"stop_command":null,"note":null,"auto_run":false}],
+              "clips":[{"name":"old","content":"old text"}]
+            }"#,
+        );
+        import_backup(&c, &file).unwrap();
+        let entries = launch::list_launch_entries(&c).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].entry.show_in_dock);
+        let actions = quick_actions::list_quick_actions(&c).unwrap();
+        assert_eq!(actions.len(), 1);
+        assert!(actions[0].action.show_in_dock);
+        let clips = clips::list_clips(&c).unwrap();
+        assert_eq!(clips.len(), 1);
+        assert!(clips[0].clip.show_in_dock);
+    }
+
+    #[test]
+    fn single_quick_action_export_restores_through_the_ordinary_flow() {
+        // One row's export is the same versioned envelope with a one-element
+        // array and four empty siblings, so inspect/import treat it like any
+        // selective export that happened to hold one action.
+        let source = conn();
+        let mut first = action("Build");
+        first.command = "docker compose up -d".into();
+        first.cwd = Some(r"D:\Stack".into());
+        let stored_first = quick_actions::create_quick_action(&source, &first).unwrap();
+        let mut second = action("Other");
+        second.command = "echo other".into();
+        quick_actions::create_quick_action(&source, &second).unwrap();
+
+        let dir = tempfile::tempdir().unwrap().into_path();
+        let file = write_file(&dir, "single.json", "");
+        let counts = export_quick_action(&source, &file, stored_first.id).unwrap();
+        assert_eq!(
+            counts,
+            BackupCounts {
+                quick_actions: 1,
+                ..BackupCounts::default()
+            }
+        );
+
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(on_disk["kind"], BACKUP_KIND);
+        assert_eq!(on_disk["version"], 1);
+        assert_eq!(on_disk["products"].as_array().unwrap().len(), 0);
+        assert_eq!(on_disk["presets"].as_array().unwrap().len(), 0);
+        assert_eq!(on_disk["launch_entries"].as_array().unwrap().len(), 0);
+        assert_eq!(on_disk["quick_actions"].as_array().unwrap().len(), 1);
+        assert_eq!(on_disk["clips"].as_array().unwrap().len(), 0);
+        assert_eq!(on_disk["quick_actions"][0]["name"], "Build");
+        assert_eq!(on_disk["quick_actions"][0]["command"], "docker compose up -d");
+
+        assert_eq!(
+            inspect_backup(&file).unwrap(),
+            BackupCounts {
+                quick_actions: 1,
+                ..BackupCounts::default()
+            }
+        );
+        let target = conn();
+        let summary = import_backup(&target, &file).unwrap();
+        assert_eq!(summary.inserted.quick_actions, 1);
+        assert_eq!(summary.skipped, BackupCounts::default());
+        let listed = quick_actions::list_quick_actions(&target).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].action.name, "Build");
+        assert_eq!(listed[0].action.command, "docker compose up -d");
+        assert_eq!(listed[0].action.cwd.as_deref(), Some(r"D:\Stack"));
+
+        // Restoring the same file again skips — the identity already exists.
+        let again = import_backup(&target, &file).unwrap();
+        assert_eq!(again.inserted, BackupCounts::default());
+        assert_eq!(again.skipped.quick_actions, 1);
+    }
+
+    #[test]
+    fn single_quick_action_export_identity_is_payload_not_name() {
+        // Same command+cwd under a different name skips; same name with a
+        // different payload lands — the merge never consults the name.
+        let source = conn();
+        let mut exported = action("Build");
+        exported.command = "docker compose up -d".into();
+        let stored = quick_actions::create_quick_action(&source, &exported).unwrap();
+        let dir = tempfile::tempdir().unwrap().into_path();
+        let file = write_file(&dir, "single.json", "");
+        export_quick_action(&source, &file, stored.id).unwrap();
+
+        let target = conn();
+        let mut twin = action("Renamed twin");
+        twin.command = "DOCKER COMPOSE UP -D".into();
+        quick_actions::create_quick_action(&target, &twin).unwrap();
+        let summary = import_backup(&target, &file).unwrap();
+        assert_eq!(summary.inserted.quick_actions, 0);
+        assert_eq!(summary.skipped.quick_actions, 1);
+        assert_eq!(quick_actions::list_quick_actions(&target).unwrap().len(), 1);
+
+        let other = conn();
+        let mut namesake = action("Build");
+        namesake.command = "echo something else".into();
+        quick_actions::create_quick_action(&other, &namesake).unwrap();
+        let summary = import_backup(&other, &file).unwrap();
+        assert_eq!(summary.inserted.quick_actions, 1);
+        assert_eq!(summary.skipped.quick_actions, 0);
+        assert_eq!(quick_actions::list_quick_actions(&other).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn single_quick_action_export_of_a_missing_row_fails_cleanly() {
+        let source = conn();
+        let dir = tempfile::tempdir().unwrap().into_path();
+        let file = write_file(&dir, "single.json", "");
+        let err = export_quick_action(&source, &file, 999).unwrap_err();
+        assert!(err.contains("gone"), "got: {err}");
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "",
+            "the refusal happens before serialization"
+        );
     }
 }

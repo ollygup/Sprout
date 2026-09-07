@@ -290,6 +290,20 @@ fn import_backup(state: State<'_, AppState>, path: String) -> Result<ImportSumma
     backup::import_backup(&conn, &path)
 }
 
+/// Writes one Quick Action to `path` as the unchanged backup document — a
+/// one-element `quick_actions` array with four empty siblings — so the file
+/// restores through the ordinary flow with honest counts (ADR-0014
+/// one-format rule; identity stays command+cwd per ADR-0026).
+#[tauri::command]
+fn export_quick_action(
+    state: State<'_, AppState>,
+    path: String,
+    id: i64,
+) -> Result<BackupCounts, String> {
+    let conn = lock(&state)?;
+    backup::export_quick_action(&conn, &path, id)
+}
+
 /// Returns the `.sprout.json` path the app was launched with, once; `None`
 /// when there is none or it was already consumed.
 #[tauri::command]
@@ -740,6 +754,20 @@ fn start_quick_launch(state: State<'_, AppState>, app: AppHandle) -> Result<(), 
     drop(conn);
     if entries.is_empty() {
         return Err("Quick Launch list is empty — add entries first.".into());
+    }
+    launch_entries(&app, &state, entries)
+}
+
+/// Starts what the dock shows: the same pipeline as [`start_quick_launch`]
+/// but over the dock-visible subset only. The main-app Start-all keeps the
+/// unfiltered list above — each surface starts exactly what it lists.
+#[tauri::command]
+fn start_dock_quick_launch(state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
+    let conn = lock(&state)?;
+    let entries = launch::list_dock_launch_entries(&conn).map_err(|e| e.to_string())?;
+    drop(conn);
+    if entries.is_empty() {
+        return Err("No entries are shown in the dock — show an entry in the dock first.".into());
     }
     launch_entries(&app, &state, entries)
 }
@@ -2588,6 +2616,7 @@ pub fn run() {
             export_backup,
             inspect_backup,
             import_backup,
+            export_quick_action,
             take_pending_import,
             compute_plan,
             quick_install_plan,
@@ -2614,6 +2643,7 @@ pub fn run() {
             move_launch_entry,
             test_launch_command,
             start_quick_launch,
+            start_dock_quick_launch,
             start_launch_entry,
             list_launch_candidates,
             candidate_icon,

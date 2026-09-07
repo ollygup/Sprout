@@ -15,11 +15,11 @@
 
 ## ACs
 
-- [ ] A hidden item is invisible in every dock tab yet fully listed, editable, and individually runnable in the main app.
-- [ ] Dock Start-all skips hidden entries; main Start-all runs everything the main shows.
-- [ ] A group whose members are all hidden drops its section in the dock and keeps it (with hint) in the main app.
-- [ ] Backup round-trip preserves the flag; legacy backups without it read as visible.
-- [ ] `npm.cmd run check` 0 errors; related frontend slices green.
+- [x] A hidden item is invisible in every dock tab yet fully listed, editable, and individually runnable in the main app.
+- [x] Dock Start-all skips hidden entries; main Start-all runs everything the main shows.
+- [x] A group whose members are all hidden drops its section in the dock and keeps it (with hint) in the main app.
+- [x] Backup round-trip preserves the flag; legacy backups without it read as visible.
+- [x] `npm.cmd run check` 0 errors; related frontend slices green.
 
 ## Implementation notes
 

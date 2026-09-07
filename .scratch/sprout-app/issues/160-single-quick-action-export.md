@@ -13,10 +13,10 @@
 
 ## ACs
 
-- [ ] Exported file restores through the ordinary Restore flow with true inserted/skipped counts.
-- [ ] Same command+cwd under a different name skips (and the copy says so); same name with different target lands.
-- [ ] Whole-collection export and all other collections are untouched.
-- [ ] `npm.cmd run check` 0 errors; related backend/frontend tests green.
+- [x] Exported file restores through the ordinary Restore flow with true inserted/skipped counts.
+- [x] Same command+cwd under a different name skips (and the copy says so); same name with different target lands.
+- [x] Whole-collection export and all other collections are untouched.
+- [x] `npm.cmd run check` 0 errors; related backend/frontend tests green.
 
 ## Implementation notes
 

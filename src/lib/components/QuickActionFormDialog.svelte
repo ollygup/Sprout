@@ -47,6 +47,7 @@
   let stoppable = $state(false);
   let stopCommand = $state("");
   let autoRun = $state(false);
+  let showInDock = $state(true);
   let advancedOpen = $state(false);
   let saving = $state(false);
   let error = $state("");
@@ -68,6 +69,7 @@
       stoppable = action?.stoppable ?? false;
       stopCommand = action?.stop_command ?? "";
       autoRun = action?.auto_run ?? false;
+      showInDock = action?.show_in_dock ?? true;
       advancedOpen = false;
       saving = false;
       error = "";
@@ -133,6 +135,7 @@
           stop_command: stoppable ? stopCommand.trim() || null : null,
           note: trimmedNote,
           auto_run: autoRun,
+          show_in_dock: showInDock,
         });
         // Group membership rides outside the edit payload (ticket 89) — the
         // same assign/unassign the row menu uses.
@@ -158,6 +161,7 @@
           stop_command: stoppable ? stopCommand.trim() || null : null,
           note: trimmedNote,
           auto_run: autoRun,
+          show_in_dock: showInDock,
         });
         if (placing) {
           if (creatingGroup) {
@@ -223,6 +227,7 @@
         value={command}
         oninput={(e) => (command = (e.target as HTMLTextAreaElement).value)}
       ></textarea>
+      <p class="field__hint">Ctrl+Enter to submit — Enter adds a new line.</p>
     </div>
 
     <TextInput
@@ -288,6 +293,7 @@
         oninput={(e) => (note = (e.target as HTMLTextAreaElement).value)}
       ></textarea>
       <p class="field__hint">Plain text — use - or * for bullets, 1. for numbered steps. Blank line starts a new paragraph.</p>
+      <p class="field__hint">Ctrl+Enter to submit — Enter adds a new line.</p>
     </div>
 
     <label class="stoppable">
@@ -326,6 +332,7 @@
           value={stopCommand}
           oninput={(e) => (stopCommand = (e.target as HTMLTextAreaElement).value)}
         ></textarea>
+        <p class="field__hint">Ctrl+Enter to submit — Enter adds a new line.</p>
       </div>
     {/if}
 
@@ -356,6 +363,23 @@
         </label>
       </div>
     </div>
+
+    <!-- Dock visibility (research 0006 pattern 4: the control lives on its
+         object; 0004 rule 2 keeps it out of Settings — hiding is per-item,
+         not a feature switch). A checkbox, not a switch: the choice applies
+         on Save, never immediately (research 0008 rule 2). -->
+    <label class="stoppable">
+      <input
+        type="checkbox"
+        class="stoppable__check"
+        checked={showInDock}
+        onchange={(e) => (showInDock = (e.target as HTMLInputElement).checked)}
+      />
+      <span class="stoppable__title">Show in dock</span>
+      <InfoTip label="What showing in the dock does">
+        <p>Uncheck to hide this action from the Quick Launch dock. It stays here and stays runnable.</p>
+      </InfoTip>
+    </label>
 
     <TestResult
       {open}

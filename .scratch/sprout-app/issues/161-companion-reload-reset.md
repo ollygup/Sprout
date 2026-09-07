@@ -13,9 +13,9 @@
 
 ## ACs
 
-- [ ] A stuck login page recovers via Reload; the saved site URL is unchanged.
-- [ ] Companion bar order, mute/mixer/external behavior, and floating/off teardown are unchanged.
-- [ ] `npm.cmd run check` 0 errors; related frontend tests green.
+- [x] A stuck login page recovers via Reload; the saved site URL is unchanged.
+- [x] Companion bar order, mute/mixer/external behavior, and floating/off teardown are unchanged.
+- [x] `npm.cmd run check` 0 errors; related frontend tests green.
 
 ## Verification
 

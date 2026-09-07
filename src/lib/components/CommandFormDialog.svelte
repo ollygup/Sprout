@@ -22,6 +22,7 @@
   let shell = $state<LaunchShell>("powershell");
   let command = $state("");
   let showWindow = $state(false);
+  let showInDock = $state(true);
   let saving = $state(false);
   let error = $state("");
   let testing = $state(false);
@@ -35,6 +36,7 @@
       shell = "powershell";
       command = "";
       showWindow = false;
+      showInDock = true;
       saving = false;
       error = "";
       nameAuto = true;
@@ -86,6 +88,7 @@
         shell,
         show_window: showWindow,
         desktop_id: null,
+        show_in_dock: showInDock,
       });
       await onsave(`${name.trim()} added to Quick Launch.`);
     } catch (e) {
@@ -144,6 +147,7 @@
             ? "Runs as: cmd /c {command}"
             : "Runs the command line as-is; quote paths that contain spaces."}
       </p>
+      <p class="field__hint">Ctrl+Enter to submit — Enter adds a new line.</p>
     </div>
 
     <label class="showwin">
@@ -158,6 +162,21 @@
         <span class="showwin__hint">
           Hidden by default — the command runs with no console window. Turn this
           on to see the window the command creates.
+        </span>
+      </span>
+    </label>
+
+    <label class="showwin">
+      <input
+        type="checkbox"
+        class="showwin__check"
+        checked={showInDock}
+        onchange={(e) => (showInDock = (e.target as HTMLInputElement).checked)}
+      />
+      <span class="showwin__body">
+        <span class="showwin__title">Show in dock</span>
+        <span class="showwin__hint">
+          Listed in the Quick Launch dock. Uncheck to keep it in the main app only.
         </span>
       </span>
     </label>

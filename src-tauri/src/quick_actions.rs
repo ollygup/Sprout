@@ -48,6 +48,17 @@ pub struct QuickActionInput {
     /// so existing records and old backup files stay manual until flagged.
     #[serde(default)]
     pub auto_run: bool,
+    /// Whether the Quick Launch dock lists this action. Main-app lists always
+    /// see every action; the dock filters on this flag. Missing in legacy
+    /// backups means visible.
+    #[serde(default = "default_show_in_dock")]
+    pub show_in_dock: bool,
+}
+
+/// Missing `show_in_dock` means visible — legacy rows and backup files predate
+/// the flag and must keep showing.
+pub(crate) fn default_show_in_dock() -> bool {
+    true
 }
 
 /// A Quick Action as stored: the input plus its library id. Position is
@@ -256,6 +267,8 @@ fn action_from_row(row: &rusqlite::Row) -> Result<QuickAction> {
             // the flag have no such column value yet the same reader serves
             // them — a missing value means manual, never auto-run.
             auto_run: row.get::<_, i64>(8).unwrap_or(0) != 0,
+            // Missing dock visibility means visible — legacy rows predate it.
+            show_in_dock: row.get::<_, Option<i64>>(10).ok().flatten().unwrap_or(1) != 0,
         },
         group_id: row.get(9)?,
     })
@@ -264,7 +277,7 @@ fn action_from_row(row: &rusqlite::Row) -> Result<QuickAction> {
 /// Every Quick Action in list order (position, then insertion order).
 pub fn list_quick_actions(conn: &Connection) -> Result<Vec<QuickAction>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, command, cwd, stoppable, stop_command, note, notes, auto_run, group_id
+        "SELECT id, name, command, cwd, stoppable, stop_command, note, notes, auto_run, group_id, show_in_dock
          FROM quick_actions ORDER BY position, id",
     )?;
     let rows = stmt.query_map([], action_from_row)?;
@@ -274,7 +287,7 @@ pub fn list_quick_actions(conn: &Connection) -> Result<Vec<QuickAction>> {
 /// Fetches one action by id — the runner's lookup (ticket 50).
 pub fn get_quick_action(conn: &Connection, id: i64) -> Result<Option<QuickAction>> {
     conn.query_row(
-        "SELECT id, name, command, cwd, stoppable, stop_command, note, notes, auto_run, group_id
+        "SELECT id, name, command, cwd, stoppable, stop_command, note, notes, auto_run, group_id, show_in_dock
          FROM quick_actions WHERE id = ?1",
         params![id],
         action_from_row,
@@ -295,8 +308,8 @@ pub fn list_auto_run_actions(conn: &Connection) -> Result<Vec<QuickAction>> {
 /// The one INSERT shape for a Quick Action, position as the trailing
 /// placeholder — shared by `create_quick_action` and `append_action`.
 const INSERT_ACTION_SQL: &str =
-    "INSERT INTO quick_actions (name, command, cwd, stoppable, stop_command, note, notes, auto_run, position)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)";
+    "INSERT INTO quick_actions (name, command, cwd, stoppable, stop_command, note, notes, auto_run, show_in_dock, position)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)";
 
 /// Appends an action at the end of the list (the next free position).
 pub fn create_quick_action(conn: &Connection, action: &QuickActionInput) -> Result<QuickAction> {
@@ -313,6 +326,7 @@ pub fn create_quick_action(conn: &Connection, action: &QuickActionInput) -> Resu
             &note,
             &note,
             &action.auto_run,
+            &action.show_in_dock,
         ],
     )?;
     Ok(get_quick_action(conn, id)?.expect("just inserted"))
@@ -335,6 +349,7 @@ pub(crate) fn append_action(conn: &Connection, action: &QuickActionInput) -> Res
                 &note,
                 &note,
                 &action.auto_run,
+                &action.show_in_dock,
             ],
         )
         .map(|_| ())
@@ -348,8 +363,8 @@ pub fn update_quick_action(conn: &Connection, action: &QuickAction) -> Result<()
     conn.execute(
         "UPDATE quick_actions
          SET name = ?1, command = ?2, cwd = ?3, stoppable = ?4, stop_command = ?5, note = ?6, notes = ?6,
-             auto_run = ?7
-         WHERE id = ?8",
+             auto_run = ?7, show_in_dock = ?8
+         WHERE id = ?9",
         params![
             action.action.name.trim(),
             action.action.command.trim(),
@@ -358,6 +373,7 @@ pub fn update_quick_action(conn: &Connection, action: &QuickAction) -> Result<()
             normalized_stop_command(&action.action),
             note,
             action.action.auto_run,
+            action.action.show_in_dock,
             action.id,
         ],
     )?;
@@ -666,6 +682,7 @@ mod tests {
             stop_command: None,
             note: None,
             auto_run: false,
+            show_in_dock: true,
         }
     }
 
@@ -940,6 +957,7 @@ mod tests {
             stop_command: None,
             note: None,
             auto_run: false,
+            show_in_dock: true,
         };
         let mut child = spawn_quick_action(&action, None).expect("spawned");
         let _ = child.wait();
@@ -1070,6 +1088,7 @@ mod tests {
             stop_command: None,
             note: None,
             auto_run: false,
+            show_in_dock: true,
         };
         let mut child = spawn_quick_action(&action, Some(&output)).expect("spawned");
         let _ = child.wait();

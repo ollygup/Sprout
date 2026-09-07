@@ -98,6 +98,10 @@ _Avoid_: Miniature window, palette, tray menu
 The Quick Launch window's docked form — a little window that can be pinned [Win32 AppBar] to the left or right side of a screen. **Fixed** keeps a thin strip always visible and squeezes other windows. **Auto-hide** hides completely [off-screen, no handle] and slides in [~0.18 s ease-out] only when you push the mouse into that screen's outer wall and hold a moment — otherwise other windows keep their full size, even if the system says that edge is busy. Whether it is pinned or floating is remembered for each screen [per-monitor] and restored when Sprout starts — even on auto-start [ADR-0013]. Never part of Presets or exports.
 _Avoid_: Sidebar, tray bar, launcher bar
 
+**Dock visibility**:
+Whether one Launch entry, Quick Action, or Clip appears in the Quick Launch dock. Any item can be hidden from the dock from its own row menu or edit dialog ("Hide from dock" / "Show in dock", per-item, research 0006 pattern 4) while staying fully listed, editable, and individually runnable in the main app. Each Start-all starts exactly what its own surface shows: the dock's Start-all skips hidden entries, the main app's runs everything it lists. A group whose members are all hidden drops its section in the dock and keeps it in the main app. The flag travels in whole-app backup; backups without it read as visible. Not to be confused with `show_window` (console visibility) or `auto_run` (startup runs).
+_Avoid_: Dock settings, hidden item (without saying where)
+
 **Display arrangement**:
 How your screens sit together — each screen's rectangle [rcMonitor] placed on a big invisible canvas [virtual-screen] whose zero point is the main screen [primary]. The user can move screens, but they must touch at least a little; this layout is the single place Sprout looks to tell screens apart and to know which edges are real walls.
 _Avoid_: Screen layout, monitor topology

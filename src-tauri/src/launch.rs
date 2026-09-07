@@ -96,6 +96,17 @@ pub struct LaunchEntryInput {
     /// The target virtual desktop's GUID (ticket 44); `None` = launch on the
     /// current desktop.
     pub desktop_id: Option<String>,
+    /// Whether the Quick Launch dock lists this entry. Main-app lists and the
+    /// main Start-all always see every entry; the dock filters on this flag.
+    /// Missing in legacy backups means visible.
+    #[serde(default = "default_show_in_dock")]
+    pub show_in_dock: bool,
+}
+
+/// Missing `show_in_dock` means visible — legacy rows and backup files predate
+/// the flag and must keep showing.
+pub(crate) fn default_show_in_dock() -> bool {
+    true
 }
 
 /// A Launch entry as stored: the input plus its library id. Position is
@@ -214,6 +225,7 @@ fn entry_from_row(row: &rusqlite::Row) -> Result<LaunchEntry> {
             },
             show_window: row.get(5)?,
             desktop_id: row.get(6)?,
+            show_in_dock: row.get::<_, Option<i64>>(8).ok().flatten().unwrap_or(1) != 0,
         },
         group_id: row.get(7)?,
     })
@@ -222,7 +234,7 @@ fn entry_from_row(row: &rusqlite::Row) -> Result<LaunchEntry> {
 /// Every Launch entry in list order (position, then insertion order).
 pub fn list_launch_entries(conn: &Connection) -> Result<Vec<LaunchEntry>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, kind, target, shell, show_window, desktop_id, group_id
+        "SELECT id, name, kind, target, shell, show_window, desktop_id, group_id, show_in_dock
          FROM launch_entries ORDER BY position, id",
     )?;
     let rows = stmt.query_map([], entry_from_row)?;
@@ -231,7 +243,7 @@ pub fn list_launch_entries(conn: &Connection) -> Result<Vec<LaunchEntry>> {
 
 fn get_entry(conn: &Connection, id: i64) -> Result<Option<LaunchEntry>> {
     conn.query_row(
-        "SELECT id, name, kind, target, shell, show_window, desktop_id, group_id
+        "SELECT id, name, kind, target, shell, show_window, desktop_id, group_id, show_in_dock
          FROM launch_entries WHERE id = ?1",
         params![id],
         entry_from_row,
@@ -239,10 +251,20 @@ fn get_entry(conn: &Connection, id: i64) -> Result<Option<LaunchEntry>> {
     .optional()
 }
 
+/// The dock's subset of [`list_launch_entries`], same order — what the Quick
+/// Launch dock lists and its Start-all runs. The main-app list and its
+/// Start-all keep the unfiltered list.
+pub fn list_dock_launch_entries(conn: &Connection) -> Result<Vec<LaunchEntry>> {
+    Ok(list_launch_entries(conn)?
+        .into_iter()
+        .filter(|entry| entry.entry.show_in_dock)
+        .collect())
+}
+
 /// The one INSERT shape for a Launch entry, position as the trailing
 /// placeholder — shared by `create_launch_entry` and `append_entry`.
-const INSERT_ENTRY_SQL: &str = "INSERT INTO launch_entries (name, kind, target, shell, show_window, desktop_id, position)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
+const INSERT_ENTRY_SQL: &str = "INSERT INTO launch_entries (name, kind, target, shell, show_window, desktop_id, show_in_dock, position)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
 
 /// Appends an entry at the end of the list (the next free position).
 pub fn create_launch_entry(conn: &Connection, entry: &LaunchEntryInput) -> Result<LaunchEntry> {
@@ -256,6 +278,7 @@ pub fn create_launch_entry(conn: &Connection, entry: &LaunchEntryInput) -> Resul
             &entry.shell.map(shell_to_str),
             &entry.show_window,
             &entry.desktop_id,
+            &entry.show_in_dock,
         ],
     )?;
     Ok(get_entry(conn, id)?.expect("just inserted"))
@@ -275,6 +298,7 @@ pub(crate) fn append_entry(conn: &Connection, entry: &LaunchEntryInput) -> Resul
                 &entry.shell.map(shell_to_str),
                 &entry.show_window,
                 &entry.desktop_id,
+                &entry.show_in_dock,
             ],
         )
         .map(|_| ())
@@ -286,8 +310,8 @@ pub(crate) fn append_entry(conn: &Connection, entry: &LaunchEntryInput) -> Resul
 pub fn update_launch_entry(conn: &Connection, entry: &LaunchEntry) -> Result<()> {
     conn.execute(
         "UPDATE launch_entries
-         SET name = ?1, kind = ?2, target = ?3, shell = ?4, show_window = ?5, desktop_id = ?6
-         WHERE id = ?7",
+         SET name = ?1, kind = ?2, target = ?3, shell = ?4, show_window = ?5, desktop_id = ?6, show_in_dock = ?7
+         WHERE id = ?8",
         params![
             entry.entry.name.trim(),
             kind_to_str(entry.entry.kind),
@@ -295,6 +319,7 @@ pub fn update_launch_entry(conn: &Connection, entry: &LaunchEntry) -> Result<()>
             entry.entry.shell.map(shell_to_str),
             entry.entry.show_window,
             entry.entry.desktop_id,
+            entry.entry.show_in_dock,
             entry.id,
         ],
     )?;
@@ -831,6 +856,7 @@ mod tests {
             shell: None,
             show_window: false,
             desktop_id: None,
+            show_in_dock: true,
         }
     }
 
@@ -842,6 +868,7 @@ mod tests {
             shell: Some(LaunchShell::Cmd),
             show_window: false,
             desktop_id: None,
+            show_in_dock: true,
         }
     }
 
@@ -933,6 +960,35 @@ mod tests {
         assert_eq!(list.len(), 3);
         assert_eq!(list[1].entry.name, "Postgres");
         assert_eq!(list[2].entry.name, "Postman");
+    }
+
+    #[test]
+    fn dock_visibility_filters_and_updates() {
+        let conn = conn();
+        create_launch_entry(&conn, &app_input("Shown")).unwrap();
+        let mut hidden = app_input("Hidden");
+        hidden.show_in_dock = false;
+        create_launch_entry(&conn, &hidden).unwrap();
+        // The main list sees everything; the dock sees only the visible.
+        assert_eq!(list_launch_entries(&conn).unwrap().len(), 2);
+        let dock = list_dock_launch_entries(&conn).unwrap();
+        assert_eq!(dock.len(), 1);
+        assert_eq!(dock[0].entry.name, "Shown");
+        // Toggling back restores the dock row.
+        let mut stored = list_launch_entries(&conn).unwrap();
+        let hidden_row = stored.iter().find(|e| e.entry.name == "Hidden").unwrap().clone();
+        let mut flipped = hidden_row.clone();
+        flipped.entry.show_in_dock = true;
+        update_launch_entry(&conn, &flipped).unwrap();
+        assert_eq!(list_dock_launch_entries(&conn).unwrap().len(), 2);
+        // Hiding the other one leaves only the previously hidden.
+        stored = list_launch_entries(&conn).unwrap();
+        let mut shown_row = stored.iter().find(|e| e.entry.name == "Shown").unwrap().clone();
+        shown_row.entry.show_in_dock = false;
+        update_launch_entry(&conn, &shown_row).unwrap();
+        let dock = list_dock_launch_entries(&conn).unwrap();
+        assert_eq!(dock.len(), 1);
+        assert_eq!(dock[0].entry.name, "Hidden");
     }
 
     #[test]
@@ -1123,6 +1179,7 @@ mod tests {
                 shell: None,
                 show_window: false,
                 desktop_id: Some(guid.into()),
+                show_in_dock: true,
             },
             group_id: None,
         }
@@ -2135,6 +2192,7 @@ mod tests {
                 shell: None,
                 show_window: false,
                 desktop_id: None,
+                show_in_dock: true,
             },
             group_id: None,
         }
@@ -2150,6 +2208,7 @@ mod tests {
                 shell: None,
                 show_window: false,
                 desktop_id: Some(guid.into()),
+                show_in_dock: true,
             },
             group_id: None,
         }
@@ -2315,6 +2374,7 @@ mod live_probe {
                 shell: None,
                 show_window: false,
                 desktop_id: Some(desktop_two.id.clone()),
+                show_in_dock: true,
             },
             group_id: None,
         };
