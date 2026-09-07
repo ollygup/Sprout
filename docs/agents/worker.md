@@ -44,16 +44,34 @@
   ticket's in-progress changes. Stay inside the path/owner allow-list; report
   newly needed shared edits to the coordinator before writing outside it.
   In a shared working tree, stop affected edits until ownership is resolved.
-- Run toolchain checks and the ownership gate as checks on your own tree,
-  not as publish preconditions.
+- Reuse the coordinator's discovery brief against your assigned baseline.
+  Inspect relevant source and verify assumptions; broaden discovery for a
+  specific gap, contradiction, or implementation need. Do not repeat shared
+  architecture searches or re-plan the whole batch. Required instruction and
+  ADR reads still apply. Report material deviations from the brief.
+- Own the ticket's relevant test coverage, reproduction steps, and failure
+  fixes. Run only assigned lightweight checks locally. Do not automatically
+  install dependencies, compile, run project-wide checks, start watchers/dev
+  apps, or create a separate build environment. A narrow Rust test may still
+  require a heavy build. Queue heavy checks with exact commands and expected
+  outcomes; the coordinator runs them against an identified candidate in
+  `C:\Sprout`, including the ownership gate. Needed early runtime feedback or
+  an isolated runtime exception goes through the coordinator's heavy slot.
+  Never write into or borrow writable caches from `C:\Sprout` yourself.
 - CodeGraph indexes `C:\Sprout`, not your workspace: use it for orientation,
   but re-read directly any file you modified — never trust the index there.
-- Hand results back to the coordinator (touched repo-relative paths,
-  contents or diffs, test evidence, AC lines) instead of publishing. Your
+- Hand results back to the coordinator (touched repo-relative paths/symbols,
+  contents or diffs, acceptance evidence, checks run and explicitly pending,
+  proposed AC lines) instead of publishing. Link full artifacts/logs and keep
+  the message compact; do not narrate the investigation again. Your
   job's natural artifact decides the shape (patch, findings text, grill
   questions) — the coordinator tells you which it expects.
 - Include baseline ID, baseline/result hashes for changed files, explicit
   additions/deletions, shared-contract changes, and unresolved dependencies.
   Freeze the returned artifact; subsequent revisions need a new identified
   return. AC changes are proposals until the coordinator validates and applies
-  them. Report coordination needs to the coordinator, not sibling workers.
+  them. A return is implemented, awaiting validation, not a claim that checks
+  passed. Remain available for diagnostics and repairs; use the coordinator's
+  tested candidate ID and reproduction evidence, and return an identified
+  revision without changing the frozen artifact. Report coordination needs
+  to the coordinator, not sibling workers.

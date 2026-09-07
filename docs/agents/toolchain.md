@@ -9,6 +9,17 @@
 - WebView2 runtime present.
 - App data is created lazily on first launch under `%LOCALAPPDATA%\Sprout` (sprout.db + logs\) — never ship or commit it.
 
+## Parallel batches
+
+Follow `parallel-tickets.md` for coordinator scheduling and `worker.md` for
+worker checks. Heavy checks use one batch-wide slot in `C:\Sprout` and its
+existing dependency/build caches; isolated source copies do not each need an
+installation, build, or running app. Workers own relevant tests and repairs;
+the coordinator runs queued heavy checks and final combined validation.
+Required checks remain required; a pending check must not be reported as passed.
+
+## Commands
+
 ```powershell
 # from C:\Sprout
 npm.cmd run tauri dev    # launch the app window (cargo must be on PATH — it is)
