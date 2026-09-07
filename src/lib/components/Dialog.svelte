@@ -2,6 +2,7 @@
   import type { Snippet } from "svelte";
   import { fade } from "svelte/transition";
   import Icon from "./Icon.svelte";
+  import { dialogSubmitAction } from "$lib/dialogSubmit";
 
   let {
     open,
@@ -52,6 +53,39 @@
   }
 
   function onKeydown(event: KeyboardEvent) {
+    // Native implicit submission is unreliable inside modal WebViews, so the
+    // shared Dialog submits explicitly instead of letting each form
+    // re-decide it (research 0010 enter-key submit conventions). Already
+    // handled keys (e.g. a search field consuming Enter) keep precedence.
+    if (!event.defaultPrevented && event.key === "Enter") {
+      const target = event.target as HTMLElement | null;
+      const action = dialogSubmitAction(
+        target
+          ? { tagName: target.tagName, type: (target as HTMLInputElement).type }
+          : null,
+        event.key,
+        {
+          ctrl: event.ctrlKey,
+          meta: event.metaKey,
+          shift: event.shiftKey,
+          alt: event.altKey,
+        },
+      );
+      if (action === "submit") {
+        const form = target?.closest?.("form") ?? null;
+        if (form) {
+          // Cancelling the keydown pre-empts the native chain, so exactly
+          // one submit fires even where the platform would also submit.
+          event.preventDefault();
+          const submitter = form.querySelector<HTMLButtonElement>(
+            'button[type="submit"]:not([disabled])',
+          );
+          if (submitter) form.requestSubmit(submitter);
+          else form.requestSubmit();
+        }
+      }
+      return;
+    }
     if (event.key === "Escape") {
       event.preventDefault();
       onclose();
