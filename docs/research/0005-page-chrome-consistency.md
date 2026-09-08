@@ -53,3 +53,28 @@ sat inside the actions row and stretched its Add button taller than every
 other add in the app; Products used a text "+" while every other page used
 the icon. After: every main-app page renders through PageHeader; the only
 per-page code left is the snippets (buttons, subtitle text, search binding).
+
+## Evidence update — 2026-09-08: dock visibility in main-app lists
+
+**Research only; proposals unaccepted.** [NN/g heuristics](https://www.nngroup.com/articles/ten-usability-heuristics/)
+support visible state and recognition while excluding irrelevant detail.
+Research 0006 patterns 12/14 supplies the existing conditional-annotation analogy.
+
+**Sprout inference:** a quiet metadata icon on cards hidden from the dock,
+with tooltip and accessible meaning `Hidden from dock`, avoids memorizing past
+visibility changes. Its exact glyph/placement still needs usability review;
+do not imply the item is disabled or make the status a hidden toggle.
+
+Use an explicit `Dock visibility` filter beside search in shared toolbar rule
+4: `All`, `Shown in dock`, `Hidden from dock`. [GOV.UK radios](https://design-system.service.gov.uk/components/radios/)
+express mutually exclusive choices; a compact select or radio menu avoids the
+ambiguous neither-checkbox state. This is a list filter, not a feature-enable
+switch under research 0008. Focusing text search should continue to mean
+search. A disclosed filter should keep its active value visible and offer a
+reset even with no matches. Persistence and Start-all semantics need explicit
+product decisions before implementation. These are evidence-informed proposals,
+not findings from testing Sprout users.
+
+## Decision update — 2026-09-08
+
+The user accepted the informational Hidden from dock eye-off indicator and exclusive All / Shown in dock / Hidden from dock filter, explicitly requiring progressive disclosure. The choices open from a clear trigger beside search; active filtering stays visible and resettable. Spec 166 records remaining lifetime, content-gating, launch-scope and reordering questions. Implementation remains pending.

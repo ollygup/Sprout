@@ -14,3 +14,7 @@ Superseded by the 156 round — the submit behavior landed in 157 (shared explic
 - [ ] Hint line appears beneath each multi-line field stating the submit combination
 - [ ] Escape-cancel and the focus trap are unaffected; focus returns as before after save/cancel
 - [ ] No app-exclusive combinations introduced anywhere; `svelte-check` clean
+
+## Amendment — 2026-09-08 (hint requirement superseded)
+
+The user accepted removing the repeated Ctrl+Enter hint lines in spec 166 (166-field-cleanup-dock-filter-companion-navigation-spec.md). Preserve submission behavior owned by 157; the old requirement to show a hint beneath every textarea is historical and must not be reimplemented. Source audit found all five hints already present, so removing them is pending cleanup, not a claim that they never shipped. Other scope and historical checkboxes above are unchanged.

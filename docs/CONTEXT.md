@@ -102,6 +102,10 @@ _Avoid_: Sidebar, tray bar, launcher bar
 Whether one Launch entry, Quick Action, or Clip appears in the Quick Launch dock. Any item can be hidden from the dock from its own row menu or edit dialog ("Hide from dock" / "Show in dock", per-item, research 0006 pattern 4) while staying fully listed, editable, and individually runnable in the main app. Each Start-all starts exactly what its own surface shows: the dock's Start-all skips hidden entries, the main app's runs everything it lists. A group whose members are all hidden drops its section in the dock and keeps it in the main app. The flag travels in whole-app backup; backups without it read as visible. Not to be confused with `show_window` (console visibility) or `auto_run` (startup runs).
 _Avoid_: Dock settings, hidden item (without saying where)
 
+**Dock visibility filter**:
+A planned main-app list filter selecting all items, items shown in the dock, or items hidden from the dock ([spec 166](../.scratch/sprout-app/issues/166-field-cleanup-dock-filter-companion-navigation-spec.md)). It describes which items are being viewed, independently of each item's Dock visibility.
+_Avoid_: Hide toggle, disabled-items filter
+
 **Display arrangement**:
 How your screens sit together — each screen's rectangle [rcMonitor] placed on a big invisible canvas [virtual-screen] whose zero point is the main screen [primary]. The user can move screens, but they must touch at least a little; this layout is the single place Sprout looks to tell screens apart and to know which edges are real walls.
 _Avoid_: Screen layout, monitor topology

@@ -64,3 +64,23 @@ must be measured at runtime or tested per-DPI.
    row height per density (Compact stays above the 24px AA floor), and the
    three hand-copied geometries merged into one `QuickLaunchRow` shell, the
    0005-PageHeader cure applied to rows.
+
+## Evidence update — 2026-09-08: Companion saved-site switching
+
+**Research only; proposal unaccepted.** The [WAI-APG menu-button pattern](https://www.w3.org/WAI/ARIA/apg/patterns/menu-button/)
+describes a button with a downward arrow as a menu signifier, Enter/Space
+operation and expanded-state semantics. It does not prove best placement.
+
+**Sprout inference:** with multiple saved sites, an active saved-site name
+(or readable host) plus chevron can reveal the configured alternatives, marking
+the active choice. Keep external opening a separate explicit action: a plain
+URL alone does not clearly announce a picker. This applies rule 2's frequency
+split and rule 3's quick-access/configuration boundary: switch existing sites
+here; author them in the main app. Reconcile with ADR-0022 and the current
+Settings-owned Active site decision before accepting. Test discoverability,
+external-open distinction, narrow widths and keyboard focus. No user study
+has established this as the universally natural or optimal placement.
+
+## Decision update — 2026-09-08
+
+The user accepted the saved-site label-plus-chevron selector for multiple configured sites, with authoring in the main app and external opening separate. Spec 166 and ADR-0022 record the boundary; switching lifecycle and navigation handling remain unsettled. This is accepted design, not a claim of implementation or usability-test results.

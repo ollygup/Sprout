@@ -105,3 +105,7 @@ Five frictions compound on daily surfaces. A user docking the Quick Launch windo
 - Evidence base: research 0003 addendum (Windows taskbar internals; GNOME PressureBarrier, KDE screen edges, macOS dwell; triangle-filter debunked; the layer-by-layer benefit table; topology-independence rule), research 0009 (Discord/GitLab intercept practice; scroll-to-warning documented as counter-evidence; accessibility recipe), research 0010 (submit conventions split by content class, with official receipts), research 0006 patterns 13–14 (peek/detail grammar; content-gated glyphs).
 - The grilling transcript's decisions (Q1–Q15 and the Round-2 confirmations) are consolidated here; user corrections applied: the design is explicitly monitor-count/device agnostic, and the Note is purpose-free by definition.
 - Machine diagnostics from this session explain the reported left/right asymmetry (AppBar reservation + pointer-hotspot geometry) but are evidence only, never design inputs.
+
+## Amendment — 2026-09-08 (hint requirement superseded)
+
+The user accepted removing the repeated Ctrl+Enter hint lines in spec 166 (166-field-cleanup-dock-filter-companion-navigation-spec.md). Preserve submission behavior owned by 157; the old requirement to show a hint beneath every textarea is historical and must not be reimplemented. Source audit found all five hints already present, so removing them is pending cleanup, not a claim that they never shipped. Other scope and historical checkboxes above are unchanged.

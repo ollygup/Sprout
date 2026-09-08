@@ -45,12 +45,12 @@ Historical events and operational claims were not inferred from source.
 - 0019 Dock autohide: driver owns motion — `amended 2026-09-05` (driver owns animation, not every geometry write; workspace release is fallible)
 - 0020 Monitor identity + seam eligibility — `amended 2026-09-05` (duplicate native identity probes; opposite-edge migration is not revalidated)
 - 0021 Single size source + dock-width math — `amended 2026-09-05` (Settings duplicates width formula/constants; floor priority and logical/physical units)
-- 0022 Companion: one isolated site, docked only — `amended 2026-09-05` (whole-URL dedup; best-effort mute application and explicit external-opening scope)
+- 0022 Companion: one isolated site, docked only — `amended 2026-09-08` (saved-site selector accepted; implementation pending in spec 166; earlier navigation qualifications retained)
 - 0027 App discovery snapshot; winget authoring-only — `amended 2026-09-05` (backend freshness vs retained picker snapshot; dedup, registry fallback, and icon behavior)
 
 ## Frontend system
 
-- 0028 Design system + disclosure rules — `amended 2026-09-05` (design-system rule remains required; literal values and contrast gate are implementation gaps)
+- 0028 Design system + disclosure rules — `amended 2026-09-08` (selective field guidance and dock-visibility discovery accepted; implementation pending in spec 166)
 
 ## AI-assisted Quick Action authoring
 

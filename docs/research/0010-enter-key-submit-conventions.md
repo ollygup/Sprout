@@ -51,3 +51,26 @@ GitHub class: **Ctrl+Enter submits, Enter keeps making newlines**, with the
 hint shown under each such field. Single-line inputs keep the native
 plain-Enter submit they already have. Implemented once in the shared `Dialog`
 component so every form inherits it identically.
+
+## Evidence update — 2026-09-08: hint placement
+
+**Research only; proposals unaccepted.** Shortcut precedents support the key
+binding, not an instruction below every multiline field. [DWP hint guidance](https://design-system.dwp.gov.uk/guidance/hint-text)
+says to improve the question first and use short, field-specific hints only
+for a clear need. Essential information should not depend on low-salience hint
+styling. [GOV.UK text input guidance](https://design-system.service.gov.uk/components/text-input/)
+limits descriptions to short sentences because screen readers announce them
+when interacting with the field. These established services explicitly use
+hints; their presence is not inherently unconventional UI.
+
+**Sprout inference:** remove repeated Ctrl+Enter teaching while retaining the
+key behavior and visible submit button. Audit each field: remove label
+repetition, shorten useful format examples, disclose long explanations, retain
+necessary constraints and validation feedback. A button tooltip may teach the
+shortcut, but must not hold instructions needed to complete the field. Do not
+replace labels with placeholders. Source guidance supports selective cleanup;
+it is not a user study validating every proposed Sprout removal.
+
+## Decision update — 2026-09-08
+
+The user accepted selective helper cleanup and removal of repeated Ctrl+Enter hints while preserving submission behavior. This supersedes the original permanent-hint placement requirement. Implementation remains pending in spec 166; evidence above and the field-by-field inventory in 0017 are retained for review.

@@ -58,3 +58,38 @@ Can the Quick Launch dock host one chosen HTTPS site as a narrow responsive surf
 - The child uses the `companion` data directory for persistent isolated cookies and an Android Chrome identity compatible with WebView2's Chromium renderer.
 - The child keeps the content frame's exact measured bounds and applies a width-derived 70–100% zoom after creation and on later bounds updates; this changes the page's effective responsive viewport without clipping or widening Sprout's dock.
 - Creation failures stop after one attempt and expose stable retry / external-browser actions; a reactive effect must not automatically recreate the same failed URL or the failure UI flickers.
+
+## Evidence update — 2026-09-08: routing and apparently inert buttons
+
+**Research only; no root cause or new navigation policy accepted.** Frequent
+URL changes alone do not establish incompatibility. [Microsoft navigation events](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/navigation-events)
+distinguishes document loads, redirects and same-document changes. A fragment
+can update SourceChanged without NavigationStarting; redirects can produce
+multiple starts with one navigation ID. Document-start observation alone is
+therefore insufficient to represent every location change.
+
+Investigate distinct categories:
+
+- Ordinary routes: verify navigation and child lifetime; distinguish the live
+  location from the saved launch URL. A stale toolbar does not prove failure.
+- Popups: [NewWindowRequested](https://learn.microsoft.com/en-us/dotnet/api/microsoft.web.webview2.core.corewebview2.newwindowrequested)
+  lets a host supply a WebView or mark a request handled; handling without a
+  destination suppresses opening. `_blank` and `window.open` require a separate
+  policy. External opening may break opener-dependent workflows (inference).
+- Load errors: inspect IsSuccess and WebErrorStatus in [NavigationCompleted](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2navigationcompletedeventargs).
+  Distinguish cancellation/superseding navigation from actual load failure.
+- Authentication/site behavior: the [WebView2 user-data folder](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/user-data-folder)
+  owns cookies and browser data. Sprout's isolated profile therefore cannot
+  promise session continuity on an external-browser escape. Site scripts,
+  browser identity and authentication restrictions need concrete reproduction.
+
+**Proposed investigation:** obtain site, exact button, before/after URL and
+whether a normal browser opens a new tab. Cover same-origin routes,
+fragment/history changes, redirects, user popups, login return, load failure
+and external escape. Do not add tabs, relax isolation or reload on every URL
+change speculatively. Reconcile any selected policy with ADR-0022 and pending
+per-site browser identity work in spec 156 before implementation.
+
+## Decision update — 2026-09-08
+
+ADR-0022's final amendment and spec 166 now accept choosing an existing saved site directly from the dock through a name-plus-chevron selector. This supersedes Settings-only active-site selection, while main-app authoring, dock-only visibility and profile isolation remain required. Navigation failure policy and switching lifecycle remain open; no routing repair is accepted by this selection decision.

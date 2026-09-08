@@ -16,3 +16,7 @@
 - [x] Every textarea in a Dialog form shows the submit-combination hint in existing hint styling.
 - [x] Single-line fields gain no hint (native Enter needs none).
 - [x] `npm.cmd run check` 0 errors; related frontend tests green.
+
+## Amendment — 2026-09-08 (hint requirement superseded)
+
+The user accepted removing the repeated Ctrl+Enter hint lines in spec 166 (166-field-cleanup-dock-filter-companion-navigation-spec.md). Preserve submission behavior owned by 157; the old requirement to show a hint beneath every textarea is historical and must not be reimplemented. Source audit found all five hints already present, so removing them is pending cleanup, not a claim that they never shipped. Other scope and historical checkboxes above are unchanged.

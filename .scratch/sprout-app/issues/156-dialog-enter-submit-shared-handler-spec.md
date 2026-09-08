@@ -69,3 +69,9 @@ From the user's perspective: Logs reads Quick Launch runs, Quick Action runs, th
 | 163 (ready) | none | `companion/+page.svelte` Notice+flash, `setCompanionUrl` activate | Enable-now action; dock refresh event | 1 |
 | 164 (ready) | none | `constants/window.rs`, Settings slider, per-monitor memory | single size source; mode-following max | 1 |
 | 165 (ready) | none | `settings.rs` site shape + tolerant read, companion create, site edit UI | default Mobile; Desktop override; token refresh | 1 |
+
+## Amendment — 2026-09-08 (follow-on design round)
+
+Spec 166 records accepted selective helper cleanup, hidden-from-dock card indicators, a progressively disclosed main-app Dock visibility filter, and a dock Companion saved-site selector. Its implementation remains pending. The old 158 hint-under-every-textarea requirement is superseded; 157 submission behavior remains required. The new presentation builds on the existing 159 visibility state and 162/165 site preferences. Source inspection on 2026-09-08 found hints, visibility, Reload, zoom and UA controls already implemented despite stale ready-for-agent headers; this is source evidence, not fresh runtime verification.
+
+The earlier phrase Start-all starts what its surface shows does not accurately describe search: the main page calls startQuickLaunch without a selection, and backend start_quick_launch loads the full list. Spec 166 leaves the new filter's launch/reorder scope open for explicit decision. Do not infer a filtered-run contract from this historical prose. No blanket navigation fix is accepted.
