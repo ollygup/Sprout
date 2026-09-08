@@ -13,9 +13,9 @@
 
 ## ACs
 
-- [ ] After add, the notice offers Enable-now; tapping it shows the site in the dock with no Settings visit.
-- [ ] Dismissal timing and error paths match today's flash behavior.
-- [ ] `npm.cmd run check` 0 errors; related frontend tests green.
+- [x] After add, the notice offers Enable-now; tapping it shows the site in the dock with no Settings visit.
+- [x] Dismissal timing and error paths match today's flash behavior.
+- [x] `npm.cmd run check` 0 errors; related frontend tests green.
 
 ## Implementation notes
 

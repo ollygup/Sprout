@@ -33,6 +33,7 @@
   let loading = $state(true);
   let error = $state("");
   let notice = $state("");
+  let noticeSiteUrl: string | null = $state(null);
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;
 
   function normalizeList(list: CompanionSite[]): CompanionSite[] {
@@ -58,8 +59,34 @@
   }
   function flash(msg: string) {
     notice = msg;
+    noticeSiteUrl = null;
     clearTimeout(noticeTimer);
-    noticeTimer = setTimeout(() => (notice = ""), 3200);
+    noticeTimer = setTimeout(() => {
+      notice = "";
+      noticeSiteUrl = null;
+    }, 3200);
+  }
+  function flashAdded(site: CompanionSite) {
+    notice = `Added ${companionDisplayName(site)}`;
+    noticeSiteUrl = site.url;
+    clearTimeout(noticeTimer);
+    noticeTimer = setTimeout(() => {
+      notice = "";
+      noticeSiteUrl = null;
+    }, 3200);
+  }
+  async function enableNoticedSite() {
+    const url = noticeSiteUrl;
+    if (!url) return;
+    try {
+      await setCompanionUrl(url);
+      activeUrl = url;
+      error = "";
+      const saved = sites.find((s) => s.url.toLowerCase() === url.toLowerCase());
+      flash(`Enabled ${companionDisplayName(saved ?? { url, name: "", ua: "mobile" })}`);
+    } catch (e) {
+      error = String(e);
+    }
   }
 
   onMount(() => {
@@ -107,7 +134,7 @@
       formOpen = false;
       formError = "";
       error = "";
-      flash(`Added ${companionDisplayName(next[next.length - 1])}`);
+      flashAdded(sites[sites.length - 1]);
     } catch (e) { formError = String(e); }
   }
   function startEdit(idx: number) {
@@ -203,7 +230,16 @@
     <Notice tone="error">{error}</Notice>
   {/if}
   {#if notice}
-    <Notice tone="ok">{notice}</Notice>
+    {#if noticeSiteUrl}
+      <Notice tone="ok">
+        {notice}
+        {#snippet action()}
+          <Button onclick={() => void enableNoticedSite()}>Enable now</Button>
+        {/snippet}
+      </Notice>
+    {:else}
+      <Notice tone="ok">{notice}</Notice>
+    {/if}
   {/if}
 
   {#if loading}
