@@ -29,3 +29,7 @@
 ## Verification
 
 - `npm.cmd run check`, affected frontend tests; manual: hide across all three collections → dock/main list comparison → both Start-alls → backup round-trip.
+
+## Amendment — 2026-09-09 (accepted follow-on discovery and launch scope)
+
+Spec 166's second round is accepted. Tickets 168/169 add main-app Hidden from dock indicators, a progressively disclosed visibility filter, and Start matching (N) for combined text/visibility matches; zero matches cannot launch. Main Start's old search-insensitive behavior is superseded when 169 lands, not by this documentation alone. Reordering is disabled while filters are active and visibility resets to All on page exit. The persisted visibility flag, dock filtering, backup compatibility and startup behavior remain owned by this ticket's existing implementation. New requirements are pending in 168/169 and must be delivered together on Quick Launch.

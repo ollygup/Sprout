@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { QuickAction } from "$lib/types";
+  import { quickActionShellLabel } from "$lib/types";
   import { formatNote, hasNote } from "$lib/noteFormat";
   import Dialog from "./Dialog.svelte";
   import Button from "./Button.svelte";
@@ -180,22 +181,24 @@
       {/if}
     </div>
 
-    {#if action.cwd || action.stoppable}
-      <dl class="details">
-        {#if action.cwd}
-          <div class="details__row">
-            <dt>Working directory</dt>
-            <dd class="mono">{action.cwd}</dd>
-          </div>
-        {/if}
-        {#if action.stoppable}
-          <div class="details__row">
-            <dt>Stop</dt>
-            <dd class="mono">{action.stop_command ?? "kills the process tree"}</dd>
-          </div>
-        {/if}
-      </dl>
-    {/if}
+    <dl class="details">
+      <div class="details__row">
+        <dt>Shell</dt>
+        <dd class="mono">{quickActionShellLabel[action.shell ?? "powershell"]}</dd>
+      </div>
+      {#if action.cwd}
+        <div class="details__row">
+          <dt>Working directory</dt>
+          <dd class="mono">{action.cwd}</dd>
+        </div>
+      {/if}
+      {#if action.stoppable}
+        <div class="details__row">
+          <dt>Stop</dt>
+          <dd class="mono">{action.stop_command ?? "kills the process tree"}</dd>
+        </div>
+      {/if}
+    </dl>
 
     <div class="details__actions">
       <Button variant="secondary" onclick={onclose}>Close</Button>

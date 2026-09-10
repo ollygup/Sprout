@@ -316,6 +316,16 @@ export interface Settings {
   /** Companion mute (global, persisted): the dock toolbar's mute toggle writes
    *  it; the live WebView heals toward it on every read. Default unmuted. */
   companion_muted: boolean;
+  /** AI assistance route (ADR-0031): "off" (default), "existing-local" (the
+   *  user's own loopback service), "managed", or "cloud". Managed and cloud
+   *  save as discoverable selections; generation through them fails closed
+   *  until their own slices land. Machine-local, never backed up. */
+  ai_provider: string;
+  /** The existing-local service root, e.g. http://127.0.0.1:11434.
+   *  Loopback HTTP only. */
+  ai_base_url: string;
+  /** The exact model name the local service exposes. Never substituted. */
+  ai_model: string;
 }
 
 /** One Companion saved site: its https URL plus the user's display name for
@@ -424,15 +434,25 @@ export interface VirtualDesktop {
   current: boolean;
 }
 
-/** The editable shape of a Quick Action (ticket 50): a named PowerShell
- *  command with an optional working directory, run from the Quick Launch
- *  window's Quick Actions tab. Machine-local — never part of Presets, Plan,
- *  Run, or exports. Ticket 117 adds an optional free-form note — stored raw,
- *  trimmed-or-empty => null, carried through create/update/list and the
- *  whole-app backup. */
+/** The shell a Quick Action runs under: explicit PowerShell or CMD. */
+export type QuickActionShell = "powershell" | "cmd";
+
+/** How the Quick Action shell choices read in the add/edit dialog. */
+export const quickActionShellLabel: Record<QuickActionShell, string> = {
+  powershell: "PowerShell",
+  cmd: "cmd",
+};
+
+/** The editable shape of a Quick Action: a named shell command with an
+ *  optional working directory, run from the Quick Launch window's Quick
+ *  Actions tab. Machine-local — never part of Presets, Plan, Run, or
+ *  exports. */
 export interface QuickActionInput {
   name: string;
-  /** The PowerShell script, multi-line allowed. */
+  /** The shell the command runs under — explicit since the PowerShell/CMD
+   *  extension. Legacy records without one read back as PowerShell. */
+  shell: QuickActionShell;
+  /** The shell script, multi-line allowed. */
   command: string;
   /** Working directory the command starts in; null = the app's own. */
   cwd: string | null;
@@ -612,4 +632,155 @@ export interface BackupSelection {
   launch_entries: boolean;
   quick_actions: boolean;
   clips: boolean;
+}
+
+/** The AI assistance routes (ADR-0031): off until configured, the user's own
+ *  loopback service, managed local, or the later cloud slice. */
+export type AiProvider = "off" | "existing-local" | "managed" | "cloud";
+
+/** How the AI provider choices read in Settings. */
+export const aiProviderLabel: Record<AiProvider, string> = {
+  off: "Off",
+  "existing-local": "Existing local service",
+  managed: "Managed local",
+  cloud: "Cloud provider (later)",
+};
+
+/** One reviewable Script draft (ADR-0030): data, never an executed thing.
+ *  `executed` is always false — the shape marks what review means. */
+export interface AiDraft {
+  shell: QuickActionShell;
+  command: string;
+  assumptions: string[];
+  affected_targets: string[];
+  explanation: string;
+  executed: boolean;
+}
+
+export interface ManagedRuntimeStatus {
+  name: string;
+  version: string;
+  artifact: string;
+  source: string;
+  license: string;
+  status: string;
+  blocker: string;
+  qualified: boolean;
+  download_size_bytes: number | null;
+}
+
+export interface ManagedModelStatus {
+  id: string;
+  intent: string;
+  artifact: string;
+  source: string;
+  revision: string | null;
+  quantization: string | null;
+  sha256: string | null;
+  download_size_bytes: number | null;
+  license: string;
+  license_source: string;
+  status: string;
+  blocker: string;
+  context_limit_tokens: number | null;
+  template_requirements: string | null;
+  memory_needs_mb: number | null;
+  minimum_runtime_version: string | null;
+  installable: boolean;
+  installed: boolean;
+}
+
+export interface ManagedCatalogStatus {
+  schema_version: number;
+  note: string;
+  runtime: ManagedRuntimeStatus;
+  models: ManagedModelStatus[];
+}
+
+export interface ManagedInstallResult {
+  model_id: string;
+  installed: boolean;
+  message: string;
+}
+
+/** One generation request's outcome: a candidate, a refusal, a
+ *  clarification, or an actionable failure. Refused, clarified, and failed
+ *  outcomes carry no executable text. */
+export type AiDraftOutcome =
+  | { kind: "draft"; draft: AiDraft }
+  | { kind: "refused"; message: string }
+  | { kind: "clarify"; message: string }
+  | { kind: "failed"; message: string };
+
+/** Rechecking a candidate accepted through AI assistance: the same output
+ *  checks, no provider, no persistence, no execution. */
+export interface AiCheckVerdict {
+  verdict: "allow" | "refuse" | "clarify";
+  message: string | null;
+}
+
+/** Scoped local target discovery (ADR-0031): an explicit find request over
+ *  installed apps and approved folders. Matches carry opaque request-scoped
+ *  references — trusted local code binds them, the model never sees paths. */
+export type AiDiscoveryScope = "apps" | "files" | "both";
+
+/** One folder approved for local target discovery: names/paths only, never
+ *  contents, never disclosure. */
+export interface AiApprovedRoot {
+  path: string;
+  added_at: number;
+}
+
+/** What a local match is: an installed app, or a file/folder under an
+ *  approved root. */
+export type AiTargetKind = "app" | "file" | "folder";
+
+/** One user-visible match: names/paths for review, plus the opaque
+ *  reference binding uses. Never carries file contents. */
+export interface AiFoundTarget {
+  ref_id: string;
+  kind: AiTargetKind;
+  name: string;
+  path: string;
+  publisher: string | null;
+}
+
+/** One find request's answer: the session its references belong to, the
+ *  bounded matches, whether more existed, and an honest notice when part of
+ *  the answer needs explaining. */
+export interface AiFindOutcome {
+  session_id: number;
+  matches: AiFoundTarget[];
+  truncated: boolean;
+  notice: string | null;
+}
+
+/** A separately requested file preview: bounded and labeled untrusted —
+ *  previewing never authorizes disclosure or execution. */
+export interface AiFileContent {
+  ref_id: string;
+  path: string;
+  content: string;
+  truncated: boolean;
+  bytes: number;
+  untrusted: boolean;
+}
+
+/** One locally bound target: the shell-quoted command plus the actual
+ *  target for review. A non-null warning carries the output-check verdict
+ *  when it is anything but allow. */
+export interface AiBoundTarget {
+  ref_id: string;
+  shell: QuickActionShell;
+  command: string;
+  target: string;
+  warning: string | null;
+}
+
+/** Which raw fields of one reference the user approved for disclosure to a
+ *  provider. Discovery never implies this; the grant dies with its request. */
+export interface AiDisclosureGrant {
+  session_id: number;
+  ref_id: string;
+  fields: string[];
 }

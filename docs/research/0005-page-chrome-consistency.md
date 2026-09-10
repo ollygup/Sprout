@@ -78,3 +78,7 @@ not findings from testing Sprout users.
 ## Decision update — 2026-09-08
 
 The user accepted the informational Hidden from dock eye-off indicator and exclusive All / Shown in dock / Hidden from dock filter, explicitly requiring progressive disclosure. The choices open from a clear trigger beside search; active filtering stays visible and resettable. Spec 166 records remaining lifetime, content-gating, launch-scope and reordering questions. Implementation remains pending.
+
+## Decision update — 2026-09-09
+
+The user accepted resetting Dock visibility to All on page exit; omitting its trigger when the full collection has no hidden items and All is selected; retaining active state and reset with zero matches; and disabling reordering while text or visibility filters are active. Main Quick Launch starts only the combined matching set with Start matching (N), disabled at zero. Tickets 168/169 implement these together. These are accepted product decisions, not new research findings or claims of delivery.

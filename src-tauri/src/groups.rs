@@ -455,6 +455,7 @@ mod tests {
     fn action(name: &str) -> QuickActionInput {
         QuickActionInput {
             name: name.into(),
+            shell: quick_actions::QuickActionShell::Powershell,
             command: "echo hi".into(),
             cwd: None,
             stoppable: false,

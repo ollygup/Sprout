@@ -39,6 +39,18 @@
      *  Pointer opens never steal focus — focus stays where it is. */
     focusFirst?: boolean;
     returnTo?: HTMLElement | null;
+    /** Anchored placement: below drops the menu under the trigger (default);
+     *  above opens it over the content above the trigger — used where the
+     *  content below cannot host web menus (e.g. above the native Companion
+     *  child, which paints above all CSS). */
+    placement?: "below" | "above";
+    /** Anchored horizontal alignment: end right-aligns the menu to the
+     *  trigger (default — correct for ⋯ row menus); start left-aligns it
+     *  (for full-width selectors that read as a select popup). */
+    align?: "start" | "end";
+    /** Stretch the menu to at least the anchor's width — only meaningful
+     *  with align start; ignored for cursor menus. */
+    matchAnchorWidth?: boolean;
   }
 
   let {
@@ -52,6 +64,7 @@
   let menuEl: HTMLDivElement | undefined = $state();
   let activeIndex = $state(0);
   let pos = $state({ x: 0, y: 0 });
+  let menuMinWidth = $state(0);
   let itemEls: (HTMLButtonElement | undefined)[] = [];
 
   let openIndex = $state<number | null>(null);
@@ -67,13 +80,21 @@
     openIndex = null;
     const raf = requestAnimationFrame(() => {
       if (!menuEl) return;
+      // Stretch to the anchor first so the measured size — and the rendered
+      // width below, which Svelte rewrites wholesale on each pos update —
+      // both follow the trigger.
+      const anchorWidth =
+        ctx.anchor && ctx.matchAnchorWidth
+          ? Math.max(0, ctx.anchor.getBoundingClientRect().width)
+          : 0;
+      menuEl.style.minWidth = anchorWidth ? `${anchorWidth}px` : "";
       const size = menuEl.getBoundingClientRect();
       let x: number;
       let y: number;
       if (ctx.anchor) {
         const r = ctx.anchor.getBoundingClientRect();
-        x = r.right - size.width;
-        y = r.bottom + 6;
+        x = ctx.align === "start" ? r.left : r.right - size.width;
+        y = ctx.placement === "above" ? r.top - size.height - 6 : r.bottom + 6;
       } else {
         x = ctx.x ?? 0;
         y = ctx.y ?? 0;
@@ -81,6 +102,7 @@
       x = Math.max(8, Math.min(x, window.innerWidth - size.width - 8));
       y = Math.max(8, Math.min(y, window.innerHeight - size.height - 8));
       pos = { x, y };
+      menuMinWidth = anchorWidth;
       if (ctx.focusFirst) itemEls[firstFocusable()]?.focus();
     });
     return () => {
@@ -187,7 +209,10 @@
     };
     const onWindowPointerDown = (e: PointerEvent) => {
       if (menuEl?.contains(e.target as Node)) return;
-      if ((e.target as HTMLElement | null)?.dataset?.ctxTrigger) return;
+      // The trigger carries `data-ctx-trigger` on the button, but pointer
+      // targets land on inner content (label span, chevron, icon svg) — walk
+      // up so trigger clicks toggle instead of closing-then-reopening.
+      if ((e.target as Element | null)?.closest?.("[data-ctx-trigger]")) return;
       onclose();
     };
     window.addEventListener("keydown", onWindowKeydown);
@@ -313,7 +338,7 @@
     class="ctx-menu"
     role="menu"
     aria-label={ctx.label}
-    style="left: {pos.x}px; top: {pos.y}px;"
+    style="left: {pos.x}px; top: {pos.y}px;{menuMinWidth ? ` min-width: ${menuMinWidth}px;` : ""}"
   >
     {#each ctx.items as item, i}
       {#if item.separator}

@@ -87,9 +87,6 @@
     <div class="field">
       <div class="field__label-row">
         <label class="field__label" for="clip-content">Text</label>
-        <InfoTip label="What the text is for">
-          <p>Paste the text here; clicking the clip later puts it back on your clipboard.</p>
-        </InfoTip>
       </div>
       <textarea
         id="clip-content"
@@ -101,7 +98,6 @@
         value={content}
         oninput={(e) => (content = (e.target as HTMLTextAreaElement).value)}
       ></textarea>
-      <p class="field__hint">Ctrl+Enter to submit — Enter adds a new line.</p>
     </div>
 
     <TextInput
@@ -210,13 +206,6 @@
   .field__text::placeholder {
     color: var(--text-muted);
     opacity: 0.75;
-  }
-
-  .field__hint {
-    margin: 0;
-    font-size: var(--text-xs);
-    line-height: var(--leading-tight);
-    color: var(--text-muted);
   }
 
   .form__error {

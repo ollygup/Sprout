@@ -150,8 +150,7 @@
       <div class="section-head">
         <p class="section-head__title">Applications</p>
         <InfoTip label="What an application is">
-          <p>What the machine must have. Each application picks a product, a version policy,
-            optional dependencies, timeout, env wiring, and verify commands.</p>
+          <p>Each application picks a product, a version policy, and optional settings.</p>
         </InfoTip>
       </div>
 

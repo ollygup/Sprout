@@ -297,7 +297,7 @@
         <p class="field__hint">
           {chosen
             ? "Picked from the registry; this ID drives the install step."
-            : "Live search of the winget registry; picking a match fills the ID."}
+            : "Picking a match fills the ID."}
         </p>
 
         {#if chosen}
@@ -421,6 +421,7 @@
               <Select
                 variant="compact"
                 value={row.action}
+                aria-label={`Env wiring ${i + 1} action`}
                 onchange={(v) => setEnv(i, { action: v as EnvAction })}
               >
                 <option value="set">set</option>

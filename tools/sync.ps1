@@ -40,14 +40,24 @@ $local = "C:\Sprout"
 $stateFile = Join-Path $local ".sync-state.json"
 # Same list as the AGENTS.md robocopy /XD (minus .git) - checked against
 # EVERY path segment, so nested build dirs like src-tauri\target are caught.
-$excludeSegments = @("node_modules", "target", "build", ".svelte-kit", ".vscode", ".codegraph", ".git")
+# dist/ rides along too: local-only installer output (releases publish from
+# CI), never share content.
+$excludeSegments = @("node_modules", "target", "build", "dist", ".svelte-kit", ".vscode", ".codegraph", ".git")
 $excludeFiles = @(".sync-state.json")
+# Loose run artifacts that must never ride to the share - screenshots/logs
+# spilled by repro runs. Top-level .scratch only: the issue tracker under
+# .scratch/sprout-app stays synced.
+$excludeGlobs = @(".scratch/*.png", ".scratch/*.log")
 # Sanity ceiling: a legit session touches a handful of files; anything near
 # this is a runaway copy (e.g. build output) - abort before writing.
 $maxCopy = 500
 
 function Is-Excluded([string]$rel) {
     if ($rel -in $excludeFiles) { return $true }
+    $flat = $rel -replace "\\", "/"
+    foreach ($glob in $excludeGlobs) {
+        if ($flat -like $glob) { return $true }
+    }
     foreach ($segment in $rel -split "\\") {
         if ($segment -in $excludeSegments) { return $true }
     }

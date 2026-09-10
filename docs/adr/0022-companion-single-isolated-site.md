@@ -1,6 +1,6 @@
 # Companion is one isolated site in the docked window only
 
-> Latest status: amended 2026-09-08 for saved-site selection; accepted design, implementation pending in spec 166. See the final amendment; earlier text is preserved.
+> Latest status: amended 2026-09-09 for saved-site selection and switching lifecycle; accepted design, implementation pending in 170 under spec 166. See the final amendments; earlier text is preserved.
 
 > Status: amended 2026-09-07 — original decision text preserved; see the executable-source audit amendment for current behavior and the 156-round amendment for readability zoom and per-site identity.
 
@@ -34,3 +34,7 @@ Two refinements inside the glanceable single-site scope — omnibox, tabs, histo
 Accepted in the design interview; implementation pending. With multiple configured sites, the dock's Companion site label becomes a name (address fallback) plus chevron that reveals the saved sites and marks the active choice. Selecting an existing site is quick access; creating, editing and ordering sites remain in the main app. This refines the Settings-only activation placement without adding tabs, an omnibox, history chrome, a bridge, or floating Companion. Open externally remains a separate action. Selection lifetime and navigation failure policy are still under discussion in spec 166; this amendment does not accept a routing fix.
 
 Research 0004 rules 2–3 supports on-surface frequent selection with authoring elsewhere. The earlier 0012 statement that the manager/Settings alone owns active-site selection is superseded to this extent. See ../../.scratch/sprout-app/issues/166-field-cleanup-dock-filter-companion-navigation-spec.md.
+
+## Amendment — 2026-09-09 (accepted switching lifecycle, tickets 166/170)
+
+The second design round is accepted. Choosing a different saved site replaces the live Companion page at that site's saved address, with its saved identity and zoom and the existing persistent Companion cookie profile. Returning to a site does not restore its prior route, unsaved form or a background tab; choosing the already-active site is not a reload. This settles the lifecycle question left open in the earlier amendment. The native routing report remains an evidence-gathering task in 171; no navigation interception or new-window policy is accepted. Implementation is pending in 170.

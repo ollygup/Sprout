@@ -170,7 +170,12 @@
     if (dupe) { formError = dupe; return; }
     const wasActive = activeUrl && sites[editIndex!].url.toLowerCase() === activeUrl!.toLowerCase();
     const next = [...sites];
-    next[editIndex!] = { url: trimmed, name: nameDraft.trim(), ua: uaDraft };
+    next[editIndex!] = {
+      ...sites[editIndex!]!,
+      url: trimmed,
+      name: nameDraft.trim(),
+      ua: uaDraft,
+    };
     try {
       await persistList(next);
       if (wasActive) {
@@ -249,7 +254,6 @@
       <div class="saved-sites__header">
         <div>
           <h2 id="saved-sites-title" class="saved-sites__title">Saved sites</h2>
-          <p class="saved-sites__hint">The first site is your quickest pick; reorder the list anytime.</p>
         </div>
         <span class="saved-sites__count">{sites.length}</span>
       </div>
@@ -379,7 +383,6 @@
     text-transform: uppercase;
     color: var(--accent);
   }
-  .saved-sites__hint,
   .site-form__hint {
     margin: 0;
     font-size: var(--text-xs);

@@ -1,7 +1,7 @@
 # 168 - Reveal dock-hidden cards and filter their main-app lists
 
 **Parent:** [166](166-field-cleanup-dock-filter-companion-navigation-spec.md)
-**Status:** ready-for-agent
+**Status:** implemented batch-149-168-20260909 — published via sync (keyboard/light-dark/narrow pass pending)
 **Blocked by:** none in this round; builds on 159's existing per-item visibility state.
 **Delivery coupling:** ship the Quick Launch filter with 169's matching launch scope, not ahead of it.
 
@@ -25,15 +25,17 @@ Likely paths: `src/routes/+page.svelte`, `quick-actions/+page.svelte`, `clips/+p
 
 Ticket 167 may edit help copy in the same pages; restrict overlap by region. Ticket 169 integrates the Quick Launch Start button and API call after this contract is available. The spec-166 coordinator owns cross-ticket integration and shared docs. No storage migration or new hidden-state flag.
 
+Current reusable primitive: `ContextMenu.svelte` supports anchored triggers, checked radio items, disabled choices, keyboard navigation and focus return. Prefer it where the pattern fits. Existing row snippets own card metadata; do not invent a generic card abstraction for this annotation. SearchInput remains a text-entry control; compose the filter beside it through shared PageHeader chrome.
+
 ## Acceptance criteria
 
-- [ ] All three main-app collections render conditional, accessible Hidden from dock annotations without changing normal card actions.
-- [ ] The filter follows the content gate, clear-trigger disclosure, exclusive choices, active-state visibility, reset and page-exit lifetime above.
-- [ ] Combined text/visibility matching is the one collection used for display and exported to Quick Launch Start integration; group collapse/scroll viewport do not change which items match.
-- [ ] Hide/show/edit/delete and external data refresh update results correctly; the last-hidden-item and zero-match cases always have a recovery path.
-- [ ] All reorder entry points refuse to reorder under an effective text query or non-All visibility choice; clearing filters restores ordinary ordering controls.
+- [x] All three main-app collections render conditional, accessible Hidden from dock annotations without changing normal card actions.
+- [x] The filter follows the content gate, clear-trigger disclosure, exclusive choices, active-state visibility, reset and page-exit lifetime above.
+- [x] Combined text/visibility matching is the one collection used for display and exported to Quick Launch Start integration; group collapse/scroll viewport do not change which items match.
+- [x] Hide/show/edit/delete and external data refresh update results correctly; the last-hidden-item and zero-match cases always have a recovery path.
+- [x] All reorder entry points refuse to reorder under an effective text query or non-All visibility choice; clearing filters restores ordinary ordering controls.
 - [ ] Verify keyboard opening/selection/Escape/focus restoration, accessible state, light/dark, narrow main-window layout, and empty/single/multiple/grouped lists.
-- [ ] Add meaningful behavioral coverage for combined predicates, default-visible legacy items, last-hidden reset access and reorder gating. `npm.cmd run check` and relevant tests pass.
-- [ ] Combined acceptance with 169 proves Start cannot launch an entry excluded by these filters before this filter is delivered.
+- [x] Add meaningful behavioral coverage for combined predicates, default-visible legacy items, last-hidden reset access and reorder gating. `npm.cmd run check` and relevant tests pass.
+- [x] Combined acceptance with 169 proves Start cannot launch an entry excluded by these filters before this filter is delivered.
 
 Research: 0004 rule 2 (content/frequency disclosure), 0005 rule 4 (toolbar), 0006 patterns 12/14 (conditional metadata), 0008 rule 1 (filter versus feature setting). These are accepted design applications, not claims of completed usability testing.

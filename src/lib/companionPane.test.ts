@@ -314,7 +314,7 @@ describe("Companion user zoom per site (ticket 162)", () => {
     // Builds over 161's stabilized order: zoom sits after Reload, before the
     // URL; mute/mixer/external order is untouched. Anchored on the bar
     // markup (onclick wiring + row span), not on script definitions or CSS.
-    const barAt = ROUTE_SOURCE.indexOf('<div class="qlw__companion-bar">');
+    const barAt = ROUTE_SOURCE.indexOf('<div class="qlw__companion-bar"');
     const reloadAt = ROUTE_SOURCE.indexOf("onclick={() => void companionReload()}");
     const zoomAt = ROUTE_SOURCE.indexOf("onclick={() => void companionZoomStep");
     const urlAt = ROUTE_SOURCE.indexOf('<span class="qlw__companion-url"');
@@ -325,6 +325,79 @@ describe("Companion user zoom per site (ticket 162)", () => {
     expect(ROUTE_SOURCE).toContain("qlw__companion-zoom-pct");
     expect(ROUTE_SOURCE).toContain("Zoom out companion");
     expect(ROUTE_SOURCE).toContain("Zoom in companion");
+  });
+
+  it("keeps the single-row bar intact at the 340px floor (ticket 170 follow-on)", () => {
+    // The bar stays one row: fixed 30px controls never crush (only the site
+    // trigger squeezes, through its ellipsis), and no second row wrapper
+    // exists. The chevron signals expanded state by rotation (Disclosure
+    // precedent), collapsing under the global reduced-motion rule.
+    expect(ROUTE_SOURCE).not.toContain("qlw__companion-site-row");
+    expect(ROUTE_SOURCE).not.toContain("qlw__companion-actions");
+    expect(ROUTE_SOURCE).toContain(".qlw__companion-bar :global(.icon-btn)");
+    expect(ROUTE_SOURCE).toContain("flex: none;");
+    expect(ROUTE_SOURCE).toContain(
+      '.qlw__companion-site-trigger[aria-expanded="true"]',
+    );
+    expect(ROUTE_SOURCE).toContain("rotate(180deg)");
+  });
+
+  it("left-aligns the site picker to the full trigger width", () => {
+    // The shared ContextMenu still right-aligns by default (⋯ row menus);
+    // the Companion selector opts into start alignment + anchor width so the
+    // popup reads as a select dropdown, not a right-edge menu.
+    expect(ROUTE_SOURCE).toContain('align: "start"');
+    expect(ROUTE_SOURCE).toContain("matchAnchorWidth: true");
+  });
+
+  it("moves infrequent controls behind the ⋯ menu only while overflowing", () => {
+    // Priority+ as a last resort (0004:1): the ⋯ trigger (shared IconButton
+    // + shared ContextMenu, currentTarget-anchored) exists only at stage > 0;
+    // zoom + mixer hide at stage 1, mute at stage 2 — trigger, Reload and
+    // Open externally never hide. The overflow menu reuses the same handlers,
+    // never duplicates behavior.
+    expect(ROUTE_SOURCE).toContain('icon="dots"');
+    expect(ROUTE_SOURCE).toContain("More Companion actions");
+    expect(ROUTE_SOURCE).toContain("data-ctx-more");
+    expect(ROUTE_SOURCE).toContain("companionOverflowStage < 1");
+    expect(ROUTE_SOURCE).toContain("companionOverflowStage < 2");
+    expect(ROUTE_SOURCE).toContain("companionOverflowStage > 0");
+    expect(ROUTE_SOURCE).toContain("fitCompanionBar");
+    expect(ROUTE_SOURCE).toContain("scrollWidth");
+    expect(ROUTE_SOURCE).toContain("ResizeObserver");
+    const menuAt = ROUTE_SOURCE.indexOf("const companionMoreMenu");
+    expect(menuAt).toBeGreaterThan(-1);
+    const menuBody = ROUTE_SOURCE.slice(menuAt, menuAt + 2400);
+    expect(menuBody).toContain("companionZoomStep");
+    expect(menuBody).toContain("companionZoomReset");
+    expect(menuBody).toContain("openMixer");
+    expect(menuBody).toContain("toggleCompanionMute");
+    expect(menuBody).not.toContain("companionReload");
+    expect(menuBody).not.toContain("companionOpenExternal");
+    expect(menuBody).not.toContain("chooseCompanionSite");
+  });
+
+  it("keeps ⋯ labels short with a reset icon", () => {
+    const menuAt = ROUTE_SOURCE.indexOf("const companionMoreMenu");
+    const menuBody = ROUTE_SOURCE.slice(menuAt, menuAt + 2400);
+    expect(menuBody).toContain('label: "Zoom out"');
+    expect(menuBody).toContain('label: "Zoom in"');
+    expect(menuBody).toContain('label: "Reset zoom"');
+    expect(menuBody).toContain('icon: "refresh"');
+    expect(menuBody).not.toContain("Zoom out companion");
+  });
+
+  it("keeps only one companion menu open at a time", () => {
+    const siteToggleAt = ROUTE_SOURCE.indexOf("function toggleCompanionSiteMenu");
+    expect(siteToggleAt).toBeGreaterThan(-1);
+    expect(ROUTE_SOURCE.slice(siteToggleAt, siteToggleAt + 400)).toContain(
+      "companionMoreMenuOpen = false",
+    );
+    const moreToggleAt = ROUTE_SOURCE.indexOf("function toggleCompanionMoreMenu");
+    expect(moreToggleAt).toBeGreaterThan(-1);
+    expect(ROUTE_SOURCE.slice(moreToggleAt, moreToggleAt + 500)).toContain(
+      "companionSiteMenuOpen = false",
+    );
   });
 
   it("persists zoom per site and never moves the height splitter", () => {

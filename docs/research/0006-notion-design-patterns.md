@@ -177,3 +177,14 @@ unbounded note content. Rows carrying a note show a small content-gated glyph
 (pattern 14), including in the Quick Launch window/dock lists where the glyph
 alone appears — level-1 signal only, content stays out per research 0004
 rule 3. Notes render read-only from authored markdown-lite text.
+
+### Applied case study (2026-09, AI-gated AI-first Quick Action authoring)
+
+Pattern 3 (explicit-setup gating) applied to AI drafting: the authoring
+dialog renders zero AI chrome until an existing-local route is configured
+with a named model — setup lives in Settings, drafting lives in the dialog
+(patterns 1/4, never duplicated). When ready, the drafting block leads the
+dialog above the manual fields (pattern 2's minimal-until-content ordering:
+intent first, rare fields behind one Details disclosure per pattern 7),
+with Add opening it expanded and Edit keeping manual fields in front.
+Evidence for the entry-point choice lives in research 0019.

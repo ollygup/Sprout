@@ -4,20 +4,20 @@
 
 **Blocked by:** 148 — local drafting workflow.
 
-**Status:** ready-for-agent
+**Status:** implemented batch-149-168-20260909 — published via sync (manual real-target demo pending)
 
 **Parent:** [145 — AI-assisted Quick Action authoring](145-ai-assisted-quick-action-authoring-spec.md).
 
 ## ACs
 
-- [ ] An explicit find request can query existing installed-app discovery and approved-folder names/paths; no background disk crawl, automatic file-body reading, or execution of discovered targets is introduced.
-- [ ] Provide approve/revoke location controls and a separate request to expand scope or read contents. Enforce approved roots, canonical paths, reparse-point containment, limits, cancellation, and bounded results outside the model.
-- [ ] Show ambiguous matches for user selection; report no match, stale/missing target, inaccessible folder, cancellation, and lookup failure honestly rather than fabricating a path.
-- [ ] Return request-scoped opaque target references to inference where possible. Trusted local code binds validated references using shell-appropriate quoting; unknown, modified, cross-request, or stale references cannot become arbitrary paths or code.
-- [ ] Validate the final locally bound command and expose its actual target to the user before saving. A reference grants no execution and cannot be used to run a target merely to identify it.
-- [ ] Keep discovery grants separate from disclosure grants. A request context records which raw fields were approved so the later cloud path cannot inherit filesystem access as upload permission.
-- [ ] Cover duplicate app names, paths containing spaces/quotes/metacharacters/Unicode, reparse-point escape attempts, revoked roots, truncated result sets, stale references, and injected filenames/content through observable workflow tests.
-- [ ] Extend existing discovery/Windows operation owners; do not duplicate Start Menu/registry/Store enumeration or introduce a model-facing general shell command.
+- [x] An explicit find request can query existing installed-app discovery and approved-folder names/paths; no background disk crawl, automatic file-body reading, or execution of discovered targets is introduced.
+- [x] Provide approve/revoke location controls and a separate request to expand scope or read contents. Enforce approved roots, canonical paths, reparse-point containment, limits, cancellation, and bounded results outside the model.
+- [x] Show ambiguous matches for user selection; report no match, stale/missing target, inaccessible folder, cancellation, and lookup failure honestly rather than fabricating a path.
+- [x] Return request-scoped opaque target references to inference where possible. Trusted local code binds validated references using shell-appropriate quoting; unknown, modified, cross-request, or stale references cannot become arbitrary paths or code.
+- [x] Validate the final locally bound command and expose its actual target to the user before saving. A reference grants no execution and cannot be used to run a target merely to identify it.
+- [x] Keep discovery grants separate from disclosure grants. A request context records which raw fields were approved so the later cloud path cannot inherit filesystem access as upload permission.
+- [x] Cover duplicate app names, paths containing spaces/quotes/metacharacters/Unicode, reparse-point escape attempts, revoked roots, truncated result sets, stale references, and injected filenames/content through observable workflow tests.
+- [x] Extend existing discovery/Windows operation owners; do not duplicate Start Menu/registry/Store enumeration or introduce a model-facing general shell command.
 
 ## Verification
 

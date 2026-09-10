@@ -84,3 +84,7 @@ has established this as the universally natural or optimal placement.
 ## Decision update — 2026-09-08
 
 The user accepted the saved-site label-plus-chevron selector for multiple configured sites, with authoring in the main app and external opening separate. Spec 166 and ADR-0022 record the boundary; switching lifecycle and navigation handling remain unsettled. This is accepted design, not a claim of implementation or usability-test results.
+
+## Decision update — 2026-09-09
+
+The user accepted the current single-live-page lifecycle for the new selector: switching opens the chosen saved address with its saved identity/zoom and persistent Companion cookies. Returning does not restore a prior route, unsaved form or background tab. Ticket 170 owns delivery; ADR-0022 carries the accepted scope. Navigation failure investigation remains separate in 171.

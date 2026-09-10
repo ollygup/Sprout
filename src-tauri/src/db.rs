@@ -119,6 +119,7 @@ fn migrate(conn: &Connection) -> Result<()> {
         CREATE TABLE IF NOT EXISTS quick_actions (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             name         TEXT NOT NULL,
+            shell        TEXT NOT NULL DEFAULT 'powershell' CHECK (shell IN ('powershell', 'cmd')),
             command      TEXT NOT NULL,
             cwd          TEXT,
             stoppable    INTEGER NOT NULL DEFAULT 0,
@@ -143,8 +144,51 @@ fn migrate(conn: &Connection) -> Result<()> {
     ensure_quick_action_stoppable(conn)?;
     ensure_quick_action_note(conn)?;
     ensure_quick_action_auto_run(conn)?;
+    ensure_quick_action_shell(conn)?;
     ensure_show_in_dock_columns(conn)?;
-    ensure_item_group_columns(conn)
+    ensure_item_group_columns(conn)?;
+    ensure_ai_approved_roots(conn)
+}
+
+/// Upgrades databases created before AI scoped discovery existed: creates the
+/// `ai_approved_roots` table holding the folders the user permitted Sprout to
+/// search for local targets (ADR-0031). Fresh databases gain it here too.
+/// Idempotent — re-runs change nothing. Permission to discover names/paths
+/// never implies reading contents or disclosing results; those need their own
+/// explicit requests.
+fn ensure_ai_approved_roots(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS ai_approved_roots (
+             path     TEXT PRIMARY KEY,
+             added_at INTEGER NOT NULL DEFAULT 0
+         );",
+    )?;
+    Ok(())
+}
+
+/// Every folder the user approved for local target discovery, in approval
+/// order: the canonical path plus when it was approved.
+pub fn list_approved_roots(conn: &Connection) -> Result<Vec<(String, i64)>> {
+    let mut stmt = conn.prepare("SELECT path, added_at FROM ai_approved_roots ORDER BY rowid")?;
+    let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?;
+    rows.collect()
+}
+
+/// Records one approved discovery folder (already canonicalized by the
+/// caller): re-approving refreshes its timestamp instead of duplicating.
+pub fn add_approved_root(conn: &Connection, path: &str, added_at: i64) -> Result<()> {
+    conn.execute(
+        "INSERT INTO ai_approved_roots (path, added_at) VALUES (?1, ?2)
+         ON CONFLICT(path) DO UPDATE SET added_at = excluded.added_at",
+        params![path, added_at],
+    )?;
+    Ok(())
+}
+
+/// Forgets one approved discovery folder. `true` when a row was removed.
+pub fn remove_approved_root(conn: &Connection, path: &str) -> Result<bool> {
+    let changed = conn.execute("DELETE FROM ai_approved_roots WHERE path = ?1", params![path])?;
+    Ok(changed > 0)
 }
 
 /// Upgrades databases created before Groups existed (any database from
@@ -301,6 +345,25 @@ fn ensure_quick_action_auto_run(conn: &Connection) -> Result<()> {
     )?;
     if !exists {
         conn.execute_batch("ALTER TABLE quick_actions ADD COLUMN auto_run INTEGER NOT NULL DEFAULT 0")?;
+    }
+    Ok(())
+}
+
+/// Upgrades databases created before the Quick Action shell choice existed:
+/// adds the `shell` column, defaulting every existing row to PowerShell so
+/// prior behavior is preserved. Fresh databases already have it. Idempotent.
+/// Default-PowerShell matters: nothing the user authored as PowerShell may
+/// change shells after an upgrade (ADR-0017 shell extension).
+fn ensure_quick_action_shell(conn: &Connection) -> Result<()> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('quick_actions') WHERE name = 'shell')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        conn.execute_batch(
+            "ALTER TABLE quick_actions ADD COLUMN shell TEXT NOT NULL DEFAULT 'powershell' CHECK (shell IN ('powershell', 'cmd'))",
+        )?;
     }
     Ok(())
 }
@@ -1142,6 +1205,27 @@ mod tests {
         drop(conn);
         let conn = init_at(&dir).unwrap();
         assert_eq!(list_products(&conn, None).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn ai_approved_roots_record_reapprove_and_revoke() {
+        let dir = test_dir();
+        let conn = init_at(&dir).unwrap();
+        assert!(list_approved_roots(&conn).unwrap().is_empty());
+        add_approved_root(&conn, r"C:\Tools", 100).unwrap();
+        add_approved_root(&conn, r"D:\Work", 200).unwrap();
+        // Re-approving refreshes the timestamp instead of duplicating.
+        add_approved_root(&conn, r"C:\Tools", 300).unwrap();
+        let roots = list_approved_roots(&conn).unwrap();
+        assert_eq!(roots.len(), 2);
+        assert!(roots.iter().any(|(p, at)| p == r"C:\Tools" && *at == 300));
+        assert!(remove_approved_root(&conn, r"C:\Tools").unwrap());
+        assert!(!remove_approved_root(&conn, r"C:\Tools").unwrap());
+        assert_eq!(list_approved_roots(&conn).unwrap().len(), 1);
+        // The table survives a reopen (the migration is idempotent).
+        drop(conn);
+        let conn = init_at(&dir).unwrap();
+        assert_eq!(list_approved_roots(&conn).unwrap().len(), 1);
     }
 
     #[test]
@@ -2009,6 +2093,7 @@ mod tests {
         assert_eq!(get_product(&conn, "vscode").unwrap().unwrap().product.name, "Visual Studio Code");
         let action = crate::quick_actions::QuickActionInput {
             name: "docker-start".into(),
+            shell: crate::quick_actions::QuickActionShell::Powershell,
             command: "docker compose up -d".into(),
             cwd: None,
             stoppable: false,
@@ -2061,6 +2146,7 @@ mod tests {
         // The migrated table is fully usable for the new fields.
         let mut tracked = crate::quick_actions::QuickActionInput {
             name: "dev-services".into(),
+            shell: crate::quick_actions::QuickActionShell::Powershell,
             command: "docker compose up".into(),
             cwd: None,
             stoppable: true,

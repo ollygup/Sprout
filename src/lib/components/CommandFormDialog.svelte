@@ -147,7 +147,6 @@
             ? "Runs as: cmd /c {command}"
             : "Runs the command line as-is; quote paths that contain spaces."}
       </p>
-      <p class="field__hint">Ctrl+Enter to submit — Enter adds a new line.</p>
     </div>
 
     <label class="showwin">
@@ -188,7 +187,7 @@
       placeholder="e.g. dev server"
       value={name}
       onchange={onNameInput}
-      hint="Suggestions come from the command; edit freely."
+      hint="Suggestions come from the command."
     />
 
     <TestResult

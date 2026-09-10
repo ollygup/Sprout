@@ -1,4 +1,12 @@
-use std::{fs::File, io::{self, BufRead, BufReader, Read}, os::windows::process::CommandExt, process::{Child, Command, Output, Stdio}, sync::{Arc, Mutex}, time::{Duration, Instant}};
+use std::{
+    fs::File,
+    io::{self, BufRead, BufReader, Read},
+    os::windows::process::CommandExt,
+    path::Path,
+    process::{Child, Command, Output, Stdio},
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub(crate) fn capture_hidden(exe: &str, args: &[&str]) -> io::Result<Output> {
@@ -16,18 +24,106 @@ pub(crate) fn spawn_user_command(exe: &str, args: &[String], show_window: bool) 
     command.args(args).spawn().map_err(|e| format!("failed to start '{exe}': {e}"))
 }
 
+pub(crate) struct OwnedProcess {
+    child: Child,
+}
+
+impl OwnedProcess {
+    pub(crate) fn exited(&mut self) -> Result<Option<i32>, String> {
+        self.child
+            .try_wait()
+            .map(|status| status.and_then(|value| value.code()))
+            .map_err(|error| format!("could not inspect the owned process: {error}"))
+    }
+
+    pub(crate) fn stop(&mut self) {
+        kill_tree(self.child.id());
+        let _ = self.child.wait();
+    }
+}
+
+pub(crate) fn spawn_owned_hidden(exe: &Path, args: &[String]) -> Result<OwnedProcess, String> {
+    let mut command = hidden(Command::new(exe));
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
+        .spawn()
+        .map(|child| OwnedProcess { child })
+        .map_err(|error| format!("failed to start '{}': {error}", exe.display()))
+}
+
+fn powershell_literal(path: &Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "''"))
+}
+
+pub(crate) fn extract_zip_hidden(archive: &Path, destination: &Path) -> Result<(), String> {
+    let script = format!(
+        "$ErrorActionPreference='Stop'; Expand-Archive -LiteralPath {} -DestinationPath {} -Force",
+        powershell_literal(archive),
+        powershell_literal(destination)
+    );
+    powershell_output(&script, Duration::from_secs(120)).map(|_| ())
+}
+
+pub(crate) fn available_disk_bytes(path: &Path) -> Result<u64, String> {
+    let script = format!(
+        "$p={}; $d=Get-Item -LiteralPath $p; [uint64]$d.PSDrive.Free",
+        powershell_literal(path)
+    );
+    powershell_output(&script, Duration::from_secs(15))?
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| "Windows did not report available disk space as a byte count".into())
+}
+
+pub(crate) fn system_memory_mb() -> Result<u64, String> {
+    powershell_output(
+        "[uint64]((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1MB)",
+        Duration::from_secs(15),
+    )?
+    .trim()
+    .parse::<u64>()
+    .map_err(|_| "Windows did not report physical memory as a megabyte count".into())
+}
+
 enum LogAttachment { Required, BestEffort }
 
-pub(crate) fn spawn_action(script: &str, cwd: Option<&str>, output: Option<&File>) -> Result<Child, String> {
-    spawn_script(script, cwd, output, LogAttachment::Required)
+pub(crate) fn spawn_action(
+    shell: &str,
+    script: &str,
+    cwd: Option<&str>,
+    output: Option<&File>,
+) -> Result<Child, String> {
+    spawn_script(shell, script, cwd, output, LogAttachment::Required)
 }
 
-pub(crate) fn spawn_action_stop(script: &str, cwd: Option<&str>, output: Option<&File>) -> Result<(), String> {
-    spawn_script(script, cwd.map(str::trim).filter(|c| !c.is_empty()), output, LogAttachment::BestEffort).map(|_| ())
+pub(crate) fn spawn_action_stop(
+    shell: &str,
+    script: &str,
+    cwd: Option<&str>,
+    output: Option<&File>,
+) -> Result<(), String> {
+    spawn_script(
+        shell,
+        script,
+        cwd.map(str::trim).filter(|c| !c.is_empty()),
+        output,
+        LogAttachment::BestEffort,
+    )
+    .map(|_| ())
 }
 
-fn spawn_script(script: &str, cwd: Option<&str>, output: Option<&File>, policy: LogAttachment) -> Result<Child, String> {
-    let (exe, args) = powershell_argv(script);
+fn spawn_script(
+    shell: &str,
+    script: &str,
+    cwd: Option<&str>,
+    output: Option<&File>,
+    policy: LogAttachment,
+) -> Result<Child, String> {
+    let (exe, args) = action_argv(shell, script)?;
     let mut command = hidden(Command::new(&exe));
     command.args(args);
     if let Some(cwd) = cwd { command.current_dir(cwd); }
@@ -58,8 +154,8 @@ fn hidden(mut command: Command) -> Command {
 
 /// Builds the argv for PowerShell's non-interactive one-liner convention —
 /// the shape every scripted command in the app runs under: launch pipeline
-/// command entries (ticket 42), Quick Actions and their Test button (tickets
-/// 50 & 62), and the engine's own PowerShell calls (bootstrap, verify).
+/// command entries, Quick Actions and their Test button, and the engine's own
+/// PowerShell calls (bootstrap, verify).
 pub(crate) fn powershell_argv(command: &str) -> (String, Vec<String>) {
     (
         "powershell".into(),
@@ -70,6 +166,28 @@ pub(crate) fn powershell_argv(command: &str) -> (String, Vec<String>) {
             command.into(),
         ],
     )
+}
+
+/// Builds the argv for CMD's one-liner convention: the same hidden,
+/// no-window policy as PowerShell, only the shell differs (ADR-0017 shell
+/// extension keeps one execution owner rather than a second runner).
+pub(crate) fn cmd_argv(command: &str) -> (String, Vec<String>) {
+    ("cmd".into(), vec!["/c".into(), command.into()])
+}
+
+/// Resolves a Quick Action shell name to its argv through the single execution
+/// owner (ADR-0029): callers pass domain intent (`powershell`/`cmd`), never a
+/// reconstructed Windows call. Unknown values fail honestly instead of
+/// falling back to PowerShell, so a corrupt record can never run under the
+/// wrong shell (ADR-0017 shell extension).
+pub(crate) fn action_argv(shell: &str, command: &str) -> Result<(String, Vec<String>), String> {
+    match shell {
+        "powershell" => Ok(powershell_argv(command)),
+        "cmd" => Ok(cmd_argv(command)),
+        other => Err(format!(
+            "'{other}' is not a supported Quick Action shell — expected 'powershell' or 'cmd'"
+        )),
+    }
 }
 
 /// Runs one PowerShell one-liner under a timebox and returns its stdout.
@@ -259,5 +377,30 @@ fn missing_executable_is_a_clean_failure() {
     assert!(!run.timed_out);
     assert_eq!(run.exit_code, None);
     assert!(run.output.contains("failed to start"));
+}
+
+#[test]
+fn shell_argv_routes_through_the_single_owner() {
+    assert_eq!(
+        action_argv("powershell", "Write-Output hi").unwrap(),
+        (
+            "powershell".into(),
+            vec![
+                "-NoProfile".into(),
+                "-NonInteractive".into(),
+                "-Command".into(),
+                "Write-Output hi".into()
+            ]
+        )
+    );
+    assert_eq!(
+        action_argv("cmd", "echo hi").unwrap(),
+        ("cmd".into(), vec!["/c".into(), "echo hi".into()])
+    );
+    assert_eq!(cmd_argv("echo hi"), ("cmd".into(), vec!["/c".into(), "echo hi".into()]));
+    let err = action_argv("none", "echo hi").unwrap_err();
+    assert!(err.contains("not a supported Quick Action shell"), "{err}");
+    let err = action_argv("PowerShell", "echo hi").unwrap_err();
+    assert!(err.contains("not a supported Quick Action shell"), "{err}");
 }
 }

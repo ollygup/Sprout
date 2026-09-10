@@ -78,8 +78,13 @@ impl BackupSelection {
 /// `.sprout.json` Preset, for one, is rejected here with its own message).
 pub const BACKUP_KIND: &str = "sprout-backup";
 
-/// The only document version this build reads and writes.
-pub const BACKUP_VERSION: u32 = 1;
+/// The document version this build writes. Reads accept version 1 as legacy
+/// PowerShell actions plus version 2 (ADR-0014 shell-aware evolution).
+pub const BACKUP_VERSION: u32 = 2;
+/// The last legacy version: its Quick Actions carry no shell and read back as
+/// PowerShell. A version-1 record that declares CMD is inconsistent and
+/// rejected rather than silently reinterpreted.
+pub const BACKUP_LEGACY_VERSION: u32 = 1;
 
 /// The whole-app backup document. One array per content collection; the
 /// collections reuse the stored domain types, so Preset requirement
@@ -206,8 +211,8 @@ pub fn export_backup(
 /// Writes one Quick Action to `path` as the unchanged whole-app document —
 /// a one-element `quick_actions` array with four empty siblings — so the
 /// file restores through the ordinary merge with honest counts (ADR-0014
-/// one-format rule). Identity stays command+cwd (ADR-0026): restoring skips
-/// when the same payload already exists under any name.
+/// one-format rule). Identity stays shell+command+cwd (ADR-0026): restoring
+/// skips when the same payload already exists under any name.
 pub fn export_quick_action(conn: &Connection, path: &str, id: i64) -> Result<BackupCounts, String> {
     let stored = quick_actions::get_quick_action(conn, id)
         .map_err(|e| e.to_string())?
@@ -251,10 +256,13 @@ pub fn import_backup(conn: &Connection, path: &str) -> Result<ImportSummary, Str
 
 /// Reads and shape-checks a backup file, returning it in portable form:
 /// wrong files (junk, `.sprout.json` presets, future versions) are rejected
-/// with authored messages mirroring the preset-import behavior.
+/// with authored messages mirroring the preset-import behavior. Version 1
+/// reads as legacy PowerShell actions; a version-1 CMD declaration is
+/// rejected rather than silently run as PowerShell (ADR-0014). Version 2
+/// requires an explicit valid shell on every Quick Action (ADR-0017).
 fn read_document(path: &str) -> Result<BackupDocument, String> {
     let text = fs::read_to_string(path).map_err(|e| format!("Could not read '{path}': {e}"))?;
-    let value: serde_json::Value =
+    let mut value: serde_json::Value =
         serde_json::from_str(&text).map_err(|_| format!("'{path}' is not a Sprout backup file"))?;
     if value.get("kind").and_then(|k| k.as_str()) != Some(BACKUP_KIND) {
         return Err(format!(
@@ -263,9 +271,12 @@ fn read_document(path: &str) -> Result<BackupDocument, String> {
     }
     match value.get("version").and_then(|v| v.as_u64()) {
         Some(v) if v == BACKUP_VERSION as u64 => {}
+        Some(v) if v == BACKUP_LEGACY_VERSION as u64 => {
+            apply_legacy_shell_defaults(&mut value, path)?;
+        }
         Some(other) => {
             return Err(format!(
-                "Unsupported backup version {other} — only version {BACKUP_VERSION} is supported"
+                "Unsupported backup version {other} — only versions {BACKUP_LEGACY_VERSION} and {BACKUP_VERSION} are supported"
             ))
         }
         None => return Err(format!("'{path}' is not a valid Sprout backup")),
@@ -274,6 +285,39 @@ fn read_document(path: &str) -> Result<BackupDocument, String> {
         .map_err(|e| format!("'{path}' is not a valid Sprout backup: {e}"))?;
     normalize(&mut doc);
     Ok(doc)
+}
+
+/// Fills legacy version-1 Quick Actions without a shell as PowerShell so the
+/// required version-2 field can deserialize. A version-1 record that declares
+/// any shell other than PowerShell is inconsistent — accepting it would
+/// silently reinterpret CMD text as PowerShell — so it fails before any merge
+/// writes (ADR-0014).
+fn apply_legacy_shell_defaults(value: &mut serde_json::Value, path: &str) -> Result<(), String> {
+    let actions = value
+        .get_mut("quick_actions")
+        .and_then(|v| v.as_array_mut());
+    let Some(actions) = actions else {
+        return Ok(());
+    };
+    for action in actions.iter_mut() {
+        match action.get("shell") {
+            None => {
+                action["shell"] = serde_json::Value::String("powershell".into());
+            }
+            Some(serde_json::Value::String(shell)) if shell == "powershell" => {}
+            Some(serde_json::Value::String(shell)) => {
+                return Err(format!(
+                    "'{path}' is not a valid Sprout backup: version 1 Quick Action declares shell '{shell}' — version 1 actions are PowerShell-only"
+                ));
+            }
+            Some(_) => {
+                return Err(format!(
+                    "'{path}' is not a valid Sprout backup: version 1 Quick Action has a malformed shell"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The portable form of every record: install directories are stripped in
@@ -381,11 +425,11 @@ fn merge(conn: &Connection, doc: &BackupDocument) -> Result<ImportSummary, Strin
     }
 
     // Launch entries and Quick Actions skip on PAYLOAD identity — the same
-    // rule the create/update commands enforce since ticket 103: kind + target
-    // for entries, command + working directory for actions, all case-folded
-    // (Windows paths) and trimmed. Names are display-only for both lists; a
-    // same-name-different-target entry from a backup is a distinct item and
-    // must land.
+    // rule the create/update commands enforce: kind + target for entries,
+    // shell + command + working directory for actions (ADR-0026 shell-aware
+    // identity), all case-folded (Windows paths) and trimmed. Names are
+    // display-only for both lists; a same-name-different-target entry from a
+    // backup is a distinct item and must land.
     let mut entry_keys: HashSet<String> = column_set(
         &tx,
         "SELECT kind, target FROM launch_entries",
@@ -414,12 +458,13 @@ fn merge(conn: &Connection, doc: &BackupDocument) -> Result<ImportSummary, Strin
 
     let mut action_keys: HashSet<String> = column_set(
         &tx,
-        "SELECT command, cwd FROM quick_actions",
+        "SELECT shell, command, cwd FROM quick_actions",
         |row| {
             Ok(format!(
-                "{0}\u{1f}{1}",
-                row.get::<_, String>(0)?.trim().to_lowercase(),
-                row.get::<_, Option<String>>(1)?
+                "{0}\u{1f}{1}\u{1f}{2}",
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?.trim().to_lowercase(),
+                row.get::<_, Option<String>>(2)?
                     .map(|cwd| cwd.to_lowercase())
                     .unwrap_or_default()
             ))
@@ -427,7 +472,8 @@ fn merge(conn: &Connection, doc: &BackupDocument) -> Result<ImportSummary, Strin
     )?;
     for action in &doc.quick_actions {
         let key = format!(
-            "{0}\u{1f}{1}",
+            "{0}\u{1f}{1}\u{1f}{2}",
+            action.shell.as_str(),
             action.command.trim().to_lowercase(),
             quick_actions::normalized_cwd(action)
                 .map(|cwd| cwd.to_lowercase())
@@ -542,6 +588,7 @@ mod tests {
     fn action(name: &str) -> QuickActionInput {
         QuickActionInput {
             name: name.into(),
+            shell: quick_actions::QuickActionShell::Powershell,
             command: "docker compose up -d".into(),
             cwd: None,
             stoppable: false,
@@ -644,7 +691,7 @@ mod tests {
         let on_disk: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
         assert_eq!(on_disk["kind"], BACKUP_KIND);
-        assert_eq!(on_disk["version"], 1);
+        assert_eq!(on_disk["version"], BACKUP_VERSION);
         assert!(on_disk["exported_at"].is_i64());
         assert_eq!(on_disk["products"].as_array().unwrap().len(), 2);
         assert_eq!(on_disk["presets"].as_array().unwrap().len(), 2);
@@ -820,7 +867,7 @@ mod tests {
 
         let doc = BackupDocument {
             kind: BACKUP_KIND.into(),
-            version: 1,
+            version: BACKUP_VERSION,
             exported_at: 0,
             products: vec![],
             presets: vec![],
@@ -851,7 +898,7 @@ mod tests {
         let summary = merge(&target, &doc).unwrap();
         assert_eq!(summary.inserted.launch_entries, 1, "different target = distinct");
         assert_eq!(summary.skipped.launch_entries, 1, "same target folds");
-        assert_eq!(summary.inserted.quick_actions, 0, "same command+cwd skips");
+        assert_eq!(summary.inserted.quick_actions, 0, "same shell+command+cwd skips");
         assert_eq!(summary.skipped.quick_actions, 1);
 
         let entries = launch::list_launch_entries(&target).unwrap();
@@ -988,7 +1035,7 @@ mod tests {
         let on_disk: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
         assert_eq!(on_disk["kind"], BACKUP_KIND);
-        assert_eq!(on_disk["version"], 1);
+        assert_eq!(on_disk["version"], BACKUP_VERSION);
         assert_eq!(on_disk["products"].as_array().unwrap().len(), 0);
         assert_eq!(on_disk["presets"].as_array().unwrap().len(), 0);
         assert_eq!(on_disk["launch_entries"].as_array().unwrap().len(), 2);
@@ -1322,7 +1369,7 @@ mod tests {
         let on_disk: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
         assert_eq!(on_disk["kind"], BACKUP_KIND);
-        assert_eq!(on_disk["version"], 1);
+        assert_eq!(on_disk["version"], BACKUP_VERSION);
         assert_eq!(on_disk["products"].as_array().unwrap().len(), 0);
         assert_eq!(on_disk["presets"].as_array().unwrap().len(), 0);
         assert_eq!(on_disk["launch_entries"].as_array().unwrap().len(), 0);
@@ -1330,6 +1377,7 @@ mod tests {
         assert_eq!(on_disk["clips"].as_array().unwrap().len(), 0);
         assert_eq!(on_disk["quick_actions"][0]["name"], "Build");
         assert_eq!(on_disk["quick_actions"][0]["command"], "docker compose up -d");
+        assert_eq!(on_disk["quick_actions"][0]["shell"], "powershell");
 
         assert_eq!(
             inspect_backup(&file).unwrap(),
@@ -1356,8 +1404,8 @@ mod tests {
 
     #[test]
     fn single_quick_action_export_identity_is_payload_not_name() {
-        // Same command+cwd under a different name skips; same name with a
-        // different payload lands — the merge never consults the name.
+        // Same shell+command+cwd under a different name skips; same name with
+        // a different payload lands — the merge never consults the name.
         let source = conn();
         let mut exported = action("Build");
         exported.command = "docker compose up -d".into();
@@ -1397,5 +1445,147 @@ mod tests {
             "",
             "the refusal happens before serialization"
         );
+    }
+
+    #[test]
+    fn same_command_under_a_different_shell_is_a_distinct_action() {
+        let source = conn();
+        let mut exported = action("PsBuild");
+        exported.shell = quick_actions::QuickActionShell::Powershell;
+        exported.command = "echo same".into();
+        let stored = quick_actions::create_quick_action(&source, &exported).unwrap();
+        let dir = tempfile::tempdir().unwrap().into_path();
+        let file = write_file(&dir, "single.json", "");
+        export_quick_action(&source, &file, stored.id).unwrap();
+
+        let target = conn();
+        let mut cmd_twin = action("CmdBuild");
+        cmd_twin.shell = quick_actions::QuickActionShell::Cmd;
+        cmd_twin.command = "echo same".into();
+        quick_actions::create_quick_action(&target, &cmd_twin).unwrap();
+        let summary = import_backup(&target, &file).unwrap();
+        assert_eq!(summary.inserted.quick_actions, 1);
+        assert_eq!(summary.skipped.quick_actions, 0);
+        assert_eq!(quick_actions::list_quick_actions(&target).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn version1_backup_without_shell_reads_as_powershell() {
+        let c = conn();
+        let dir = tempfile::tempdir().unwrap().into_path();
+        let file = write_file(
+            &dir,
+            "v1.json",
+            r#"{
+              "kind":"sprout-backup","version":1,"exported_at":0,
+              "products":[],"presets":[],"launch_entries":[],
+              "quick_actions":[{"name":"Legacy","command":"echo legacy","cwd":null,"stoppable":false,"stop_command":null,"note":null,"auto_run":false,"show_in_dock":true}],
+              "clips":[]
+            }"#,
+        );
+        let summary = import_backup(&c, &file).unwrap();
+        assert_eq!(summary.inserted.quick_actions, 1);
+        let listed = quick_actions::list_quick_actions(&c).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].action.shell, quick_actions::QuickActionShell::Powershell);
+    }
+
+    #[test]
+    fn version1_backup_declaring_cmd_is_rejected_before_any_write() {
+        let c = conn();
+        let dir = tempfile::tempdir().unwrap().into_path();
+        let file = write_file(
+            &dir,
+            "v1cmd.json",
+            r#"{
+              "kind":"sprout-backup","version":1,"exported_at":0,
+              "products":[],"presets":[],"launch_entries":[],
+              "quick_actions":[{"name":"Sneaky","shell":"cmd","command":"echo hi","cwd":null,"stoppable":false,"stop_command":null}],
+              "clips":[]
+            }"#,
+        );
+        let err = import_backup(&c, &file).unwrap_err();
+        assert!(err.contains("version 1") && err.contains("cmd"), "got: {err}");
+        assert!(quick_actions::list_quick_actions(&c).unwrap().is_empty());
+    }
+
+    #[test]
+    fn version2_backup_without_shell_is_rejected_before_any_write() {
+        let c = conn();
+        let dir = tempfile::tempdir().unwrap().into_path();
+        let file = write_file(
+            &dir,
+            "v2noshell.json",
+            r#"{
+              "kind":"sprout-backup","version":2,"exported_at":0,
+              "products":[],"presets":[],"launch_entries":[],
+              "quick_actions":[{"name":"NoShell","command":"echo hi","cwd":null,"stoppable":false,"stop_command":null}],
+              "clips":[]
+            }"#,
+        );
+        let err = import_backup(&c, &file).unwrap_err();
+        assert!(err.contains("not a valid Sprout backup"), "got: {err}");
+        assert!(quick_actions::list_quick_actions(&c).unwrap().is_empty());
+    }
+
+    #[test]
+    fn version2_backup_with_unknown_shell_is_rejected_before_any_write() {
+        let c = conn();
+        let dir = tempfile::tempdir().unwrap().into_path();
+        let file = write_file(
+            &dir,
+            "v2bad.json",
+            r#"{
+              "kind":"sprout-backup","version":2,"exported_at":0,
+              "products":[],"presets":[],"launch_entries":[],
+              "quick_actions":[{"name":"Weird","shell":"none","command":"echo hi","cwd":null,"stoppable":false,"stop_command":null}],
+              "clips":[]
+            }"#,
+        );
+        let err = import_backup(&c, &file).unwrap_err();
+        assert!(err.contains("not a valid Sprout backup"), "got: {err}");
+        assert!(quick_actions::list_quick_actions(&c).unwrap().is_empty());
+    }
+
+    #[test]
+    fn legacy_version1_reader_rejects_version2_rather_than_misreading_cmd() {
+        let source = conn();
+        let mut cmd_action = action("CmdOnly");
+        cmd_action.shell = quick_actions::QuickActionShell::Cmd;
+        cmd_action.command = "echo cmd-text".into();
+        let stored = quick_actions::create_quick_action(&source, &cmd_action).unwrap();
+        let dir = tempfile::tempdir().unwrap().into_path();
+        let file = write_file(&dir, "v2.json", "");
+        export_quick_action(&source, &file, stored.id).unwrap();
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(on_disk["version"], BACKUP_VERSION);
+        assert_eq!(on_disk["quick_actions"][0]["shell"], "cmd");
+        let version = on_disk["version"].as_u64().unwrap();
+        assert!(
+            version != BACKUP_LEGACY_VERSION as u64,
+            "a strict version-1 reader accepts only version 1 and must refuse this file"
+        );
+    }
+
+    #[test]
+    fn failed_restore_leaves_nothing_behind() {
+        let c = conn();
+        db::create_product(&c, &product("git")).unwrap();
+        let dir = tempfile::tempdir().unwrap().into_path();
+        let file = write_file(
+            &dir,
+            "bad.json",
+            r#"{
+              "kind":"sprout-backup","version":2,"exported_at":0,
+              "products":[{"id":"git","name":"git display","winget_id":"Vendor.git","install_location_hint":null,"install_dir":null,"default_env":[]}],
+              "presets":[],"launch_entries":[],
+              "quick_actions":[{"name":"Bad","shell":"none","command":"echo hi","cwd":null,"stoppable":false,"stop_command":null}],
+              "clips":[]
+            }"#,
+        );
+        assert!(import_backup(&c, &file).is_err());
+        assert_eq!(db::list_products(&c, None).unwrap().len(), 1);
+        assert!(quick_actions::list_quick_actions(&c).unwrap().is_empty());
     }
 }

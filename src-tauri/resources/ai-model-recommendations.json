@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "note": "Bundled recommendation list. Installed selections never change automatically; a removed or changed entry never switches or erases an installed selection. Measured fields are null until real Windows measurements land — no invented hardware requirements.",
+  "managed_runtime": {
+    "name": "llama.cpp",
+    "candidate_version": "b10702",
+    "windows_cpu_x64_artifact": "llama-b10702-bin-win-cpu-x64.zip",
+    "source": "https://github.com/ggml-org/llama.cpp/releases/tag/b10702",
+    "license": "MIT (llama.cpp)",
+    "status": "candidate-not-qualified",
+    "verified": {
+      "download": false,
+      "per_user_launch": false,
+      "health": false,
+      "cancellation": false,
+      "model_release": false,
+      "process_ownership": false,
+      "exit_behavior": false
+    },
+    "blocker": "No Windows download, launch, health, cancellation, release, ownership, or exit measurement was taken in this session. A model file alone is not an inference service; qualification must exercise llama-server per-user startup, /health, request abort, model unload, single-owner process lifetime, and actual Sprout exit."
+  },
+  "tiers": [
+    {
+      "id": "lightweight-candidate",
+      "intent": "Tested lightweight tier for PowerShell/CMD authoring and diagnosis on limited hardware.",
+      "candidate_artifact": "Qwen/Qwen2.5-Coder-3B-Instruct-GGUF Q4_K_M",
+      "artifact_source": "https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct-GGUF",
+      "revision": null,
+      "quantization": "Q4_K_M (candidate; revision unpinned)",
+      "download_hash": null,
+      "download_size_bytes": null,
+      "license": "Qwen Research License Agreement (non-commercial only; commercial use requires a separate license from Alibaba Cloud)",
+      "license_source": "https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct/blob/main/LICENSE",
+      "status": "blocked-not-shippable-as-proposed",
+      "blocker": "The 3B Instruct artifact carries a research-only license with separate commercial terms. It must NOT be approved by assuming it shares the 7B license. Sprout distribution needs a permissively licensed lightweight alternative or a commercial grant; none is qualified here.",
+      "context_limit_tokens": null,
+      "template_requirements": null,
+      "memory_needs_mb": null,
+      "minimum_runtime_version": null,
+      "measured": {
+        "windows_ram_vram": null,
+        "cpu_gpu_config": null,
+        "context_budget": null,
+        "startup_latency": null,
+        "generation_latency": null,
+        "cancellation": null,
+        "output_usability": null
+      }
+    },
+    {
+      "id": "stronger-candidate",
+      "intent": "Tested stronger tier for PowerShell/CMD authoring and diagnosis on stronger hardware.",
+      "candidate_artifact": "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF",
+      "artifact_source": "https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF",
+      "revision": null,
+      "quantization": null,
+      "download_hash": null,
+      "download_size_bytes": null,
+      "license": "unverified-in-this-session (a secondary mirror reports Apache-2.0; primary HuggingFace license text was not confirmed here — do not ship on mirror evidence)",
+      "license_source": "https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF (verify LICENSE file and per-file revision before approval)",
+      "status": "blocked-pending-license-verification-and-measurements",
+      "blocker": "Exact artifact revision, quantization, hash, size, template, context limit, memory needs, and minimum runtime version are unrecorded. No Windows RAM/VRAM, CPU/GPU, context-budget, startup/generation latency, cancellation, or usability measurement was taken in this session.",
+      "context_limit_tokens": null,
+      "template_requirements": null,
+      "memory_needs_mb": null,
+      "minimum_runtime_version": null,
+      "measured": {
+        "windows_ram_vram": null,
+        "cpu_gpu_config": null,
+        "context_budget": null,
+        "startup_latency": null,
+        "generation_latency": null,
+        "cancellation": null,
+        "output_usability": null
+      }
+    }
+  ]
+}

@@ -261,6 +261,33 @@ pub fn list_dock_launch_entries(conn: &Connection) -> Result<Vec<LaunchEntry>> {
         .collect())
 }
 
+/// Resolves an explicit Start-matching id subset against the authoritative
+/// saved entries (ADR-0018's batch pipeline stays the only runner: the
+/// resolved records feed `launch_entries` once, never a loop of singles).
+/// An explicit empty set launches nothing and is rejected; unknown ids mean
+/// the list changed under the filter, so the whole request is rejected
+/// before any batch starts rather than launching a partial surprise. The
+/// result follows canonical saved order, so caller order and duplicates
+/// can never reorder or repeat a launch.
+pub fn resolve_launch_selection(
+    saved: &[LaunchEntry],
+    ids: &[i64],
+) -> std::result::Result<Vec<LaunchEntry>, String> {
+    if ids.is_empty() {
+        return Err("No entries match the current filters — nothing to start.".into());
+    }
+    for id in ids {
+        if !saved.iter().any(|entry| entry.id == *id) {
+            return Err("The Quick Launch list changed — refresh and try again.".into());
+        }
+    }
+    Ok(saved
+        .iter()
+        .filter(|entry| ids.contains(&entry.id))
+        .cloned()
+        .collect())
+}
+
 /// The one INSERT shape for a Launch entry, position as the trailing
 /// placeholder — shared by `create_launch_entry` and `append_entry`.
 const INSERT_ENTRY_SQL: &str = "INSERT INTO launch_entries (name, kind, target, shell, show_window, desktop_id, show_in_dock, position)
@@ -989,6 +1016,41 @@ mod tests {
         let dock = list_dock_launch_entries(&conn).unwrap();
         assert_eq!(dock.len(), 1);
         assert_eq!(dock[0].entry.name, "Hidden");
+    }
+
+    #[test]
+    fn resolve_launch_selection_keeps_saved_order_and_dedupes() {
+        let conn = conn();
+        create_launch_entry(&conn, &app_input("A")).unwrap();
+        create_launch_entry(&conn, &app_input("B")).unwrap();
+        create_launch_entry(&conn, &app_input("C")).unwrap();
+        let saved = list_launch_entries(&conn).unwrap();
+        let ids: Vec<i64> = saved.iter().map(|e| e.id).collect();
+
+        // Caller order never becomes launch order; duplicates never repeat.
+        let selected = resolve_launch_selection(&saved, &[ids[2], ids[0], ids[2]]).unwrap();
+        assert_eq!(
+            selected.iter().map(|e| e.id).collect::<Vec<_>>(),
+            vec![ids[0], ids[2]]
+        );
+        // The full set resolves to the same records in the same order.
+        let all = resolve_launch_selection(&saved, &ids).unwrap();
+        assert_eq!(all, saved);
+    }
+
+    #[test]
+    fn resolve_launch_selection_rejects_empty_and_stale() {
+        let conn = conn();
+        create_launch_entry(&conn, &app_input("A")).unwrap();
+        create_launch_entry(&conn, &app_input("B")).unwrap();
+        let saved = list_launch_entries(&conn).unwrap();
+        let ids: Vec<i64> = saved.iter().map(|e| e.id).collect();
+
+        // An explicit empty set is never equivalent to omitting the filter.
+        assert!(resolve_launch_selection(&saved, &[]).is_err());
+        // A stale id rejects the whole request — no partial launch set.
+        assert!(resolve_launch_selection(&saved, &[ids[0], 9999]).is_err());
+        assert!(resolve_launch_selection(&saved, &[9999]).is_err());
     }
 
     #[test]

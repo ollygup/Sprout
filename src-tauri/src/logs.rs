@@ -636,6 +636,9 @@ mod tests {
                 companion_height_ratio: settings::DEFAULT_COMPANION_HEIGHT_RATIO,
                 companion_url_list: Vec::new(),
                 companion_muted: false,
+                ai_provider: settings::DEFAULT_AI_PROVIDER.to_string(),
+                ai_base_url: settings::DEFAULT_AI_BASE_URL.to_string(),
+                ai_model: String::new(),
             },
         )
         .unwrap();

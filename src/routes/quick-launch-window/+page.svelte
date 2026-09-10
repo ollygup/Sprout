@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import type {
@@ -32,6 +32,7 @@
     setCompanionHeightRatio,
     setCompanionHeightRatioForDisplay,
     getCompanionHeightRatio,
+    setCompanionUrl,
     setCompanionUrlList,
     listDisplays,
     COMPANION_DESKTOP_UA,
@@ -59,8 +60,18 @@
     stepCompanionUserZoom,
     formatCompanionZoomPct,
   } from "$lib/companionPane";
-  import { normalizeCompanionSiteZoom } from "$lib/companion";
+  import {
+    companionDisplayName,
+    companionPickerLabel,
+    companionUrlKey,
+    createCompanionSiteSwitchQueue,
+    normalizeCompanionSiteZoom,
+  } from "$lib/companion";
   import Button from "$lib/components/Button.svelte";
+  import ContextMenu, {
+    type ContextMenuItem,
+    type ContextMenuState,
+  } from "$lib/components/ContextMenu.svelte";
   import GroupAccordion from "$lib/components/GroupAccordion.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import IconButton from "$lib/components/IconButton.svelte";
@@ -239,10 +250,281 @@
   let companionPlaying = $state(false);
   let companionMuteBusy = $state(false);
   let companionAudioTimer: ReturnType<typeof setInterval> | undefined;
+  let companionSiteMenuOpen = $state(false);
+  let companionSiteMenuFocusFirst = $state(false);
+  let companionSiteTrigger: HTMLButtonElement | undefined = $state();
+  let companionSwitchingTo: CompanionSite | null = $state(null);
+  let companionSwitchAnnouncement = $state("");
   function hasCompanionUrl(url: string | null): url is string {
     return typeof url === "string" && url.trim().length > 0;
   }
   const companionVisible = $derived(dock.docked && hasCompanionUrl(companionUrl));
+  const activeCompanionSite = $derived.by(() => {
+    const url = companionUrl;
+    return url
+      ? companionUrlList.find(
+          (site) => companionUrlKey(site.url) === companionUrlKey(url),
+        )
+      : undefined;
+  });
+  const activeCompanionLabel = $derived(
+    activeCompanionSite
+      ? companionDisplayName(activeCompanionSite)
+      : companionUrl ?? "",
+  );
+  const companionHasSitePicker = $derived(companionUrlList.length > 1);
+
+  function applyCompanionSite(site: CompanionSite) {
+    const latest =
+      companionUrlList.find(
+        (candidate) => companionUrlKey(candidate.url) === companionUrlKey(site.url),
+      ) ?? site;
+    companionUrl = latest.url;
+    companionUserZoom = normalizeCompanionSiteZoom(latest.zoom ?? null);
+    companionHistory = [latest.url];
+    companionHistoryIndex = 0;
+    companionCanGoBack = false;
+    companionCanGoForward = false;
+    companionWebviewFailed = false;
+    companionFailedUrl = null;
+    companionFailureDetail = "";
+    companionSwitchAnnouncement = `Switched Companion to ${companionDisplayName(latest)}.`;
+    void syncCompanionWebview();
+  }
+
+  const queueCompanionSiteSwitch = createCompanionSiteSwitchQueue({
+    persist: setCompanionUrl,
+    onPending: (site) => {
+      companionSwitchingTo = site;
+      if (site) {
+        companionSwitchAnnouncement = `Switching Companion to ${companionDisplayName(site)}…`;
+      }
+    },
+    onApplied: applyCompanionSite,
+    onFailure: (site, switchError) => {
+      console.error("companion site switch failed", switchError);
+      error = `Couldn't switch Companion to ${companionDisplayName(site)} — ${String(switchError)}`;
+    },
+    onIdle: () => void refreshCompanion(),
+  });
+
+  function chooseCompanionSite(site: CompanionSite) {
+    if (
+      companionSwitchingTo === null &&
+      companionUrl &&
+      companionUrlKey(site.url) === companionUrlKey(companionUrl)
+    ) {
+      return;
+    }
+    if (error.startsWith("Couldn't switch Companion to ")) error = "";
+    queueCompanionSiteSwitch(site);
+  }
+
+  const companionSiteMenu: ContextMenuState | null = $derived.by(() => {
+    if (!companionSiteMenuOpen || !companionHasSitePicker) return null;
+    const items: ContextMenuItem[] = companionUrlList.map((site) => ({
+      // Rows show the user-configured name only (unique at authoring;
+      // blank names fall back to the address) — the trigger tooltip keeps
+      // the full name + address for long/similar entries.
+      label: companionDisplayName(site),
+      checked:
+        companionUrl !== null &&
+        companionUrlKey(site.url) === companionUrlKey(companionUrl),
+      onselect: () => chooseCompanionSite(site),
+    }));
+    return {
+      open: true,
+      items,
+      label: "Saved Companion sites",
+      anchor: companionSiteTrigger ?? null,
+      focusFirst: companionSiteMenuFocusFirst,
+      returnTo: companionSiteTrigger ?? null,
+      // The native Companion child paints above all web content, so a menu
+      // dropping over it would slide behind the page. Open upward over the
+      // Quick Launch list instead (browser-search-suggestion behavior) — the
+      // site stays visible underneath. Left-aligned to the full trigger width
+      // (select-popup reading) rather than the ⋯-menu right-edge default.
+      placement: "above",
+      align: "start",
+      matchAnchorWidth: true,
+    };
+  });
+
+  function toggleCompanionSiteMenu(viaKeyboard: boolean) {
+    if (!companionHasSitePicker) return;
+    // One menu at a time: opening the picker dismisses the ⋯ menu.
+    if (!companionSiteMenuOpen) companionMoreMenuOpen = false;
+    companionSiteMenuFocusFirst = viaKeyboard;
+    companionSiteMenuOpen = !companionSiteMenuOpen;
+  }
+
+  function closeCompanionSiteMenu() {
+    companionSiteMenuOpen = false;
+    queueMicrotask(() => {
+      const focused = document.activeElement;
+      if (!focused || focused === document.body || !focused.isConnected) {
+        companionSiteTrigger?.focus();
+      }
+    });
+  }
+
+  function onCompanionSiteTriggerKeydown(event: KeyboardEvent) {
+    if (
+      !companionSiteMenuOpen &&
+      (event.key === "ArrowDown" || event.key === "ArrowUp")
+    ) {
+      event.preventDefault();
+      toggleCompanionSiteMenu(true);
+    }
+  }
+
+  // Ticket 170 follow-on: narrow-dock overflow (0004:1 Priority+ as a last
+  // resort — justified: 8+ controls in ~340px at the 10% floor, and the exact
+  // squeeze point moves with monitor pixels and DPI). The bar stays one row
+  // with its accepted order (reload/zoom left, trigger middle, audio/external
+  // right); only while content overflows do the infrequent controls move
+  // behind the app's own ⋯ menu idiom (shared ContextMenu, same handlers —
+  // no second behavior). Zoom and mixer go first (set-once / rare shortcut),
+  // mute follows only if still overflowing; trigger, Reload and Open
+  // externally never hide (frequent selection, dead-end recovery, escape).
+  let companionBarEl: HTMLDivElement | null = $state(null);
+  let companionOverflowStage = $state(0);
+  let companionMoreMenuOpen = $state(false);
+  let companionMoreMenuFocusFirst = $state(false);
+  let companionMoreAnchor: HTMLElement | null = $state(null);
+
+  async function fitCompanionBar() {
+    // All state reads are untracked: this runs inside a reactive effect, and
+    // subscribing to the stage it writes would re-trigger the effect forever.
+    const bar = untrack(() => companionBarEl);
+    if (!bar) return;
+    // Dismiss first so focus can return to the still-mounted trigger before
+    // any stage change unmounts it.
+    if (untrack(() => companionMoreMenuOpen)) closeCompanionMoreMenu();
+    for (let stage = 0; stage <= 2; stage += 1) {
+      if (untrack(() => companionOverflowStage) !== stage) companionOverflowStage = stage;
+      await tick();
+      if (bar.scrollWidth <= bar.clientWidth + 1) break;
+    }
+  }
+
+  const companionMoreMenu: ContextMenuState | null = $derived.by(() => {
+    if (!companionMoreMenuOpen || companionOverflowStage < 1) return null;
+    const items: ContextMenuItem[] = [
+      {
+        label: "Zoom out",
+        icon: "minus",
+        disabled: companionZoomSaving || companionShownZoom <= 0.5,
+        onselect: () => void companionZoomStep(-1),
+      },
+      {
+        label: "Reset zoom",
+        icon: "refresh",
+        disabled: companionZoomSaving || companionZoomAuto,
+        onselect: () => void companionZoomReset(),
+      },
+      {
+        label: "Zoom in",
+        icon: "plus",
+        disabled: companionZoomSaving || companionShownZoom >= 2,
+        onselect: () => void companionZoomStep(1),
+      },
+      {
+        label: companionMixerOpening ? "Opening volume mixer" : "Volume mixer",
+        icon: "sliders",
+        disabled: companionMixerOpening,
+        onselect: () => void openMixer(),
+      },
+    ];
+    if (companionOverflowStage >= 2) {
+      items.push({
+        label: companionMuted ? "Unmute" : "Mute",
+        icon: companionMuted ? "volume-muted" : "volume",
+        checked: companionMuted,
+        disabled: companionMuteBusy,
+        onselect: () => void toggleCompanionMute(),
+      });
+    }
+    return {
+      open: true,
+      items,
+      label: "More Companion actions",
+      anchor: companionMoreAnchor,
+      focusFirst: companionMoreMenuFocusFirst,
+      returnTo: companionMoreAnchor,
+      // Same native-child rule as the site picker: open upward so the menu
+      // never slides behind the WebView. ⋯-menu end alignment is kept.
+      placement: "above",
+    };
+  });
+
+  // The ⋯ trigger is the shared IconButton (0005:5 — no plain-button copy),
+  // so the anchor comes from the click's currentTarget instead of bind:this.
+  function toggleCompanionMoreMenu(event: MouseEvent) {
+    if (companionOverflowStage < 1) return;
+    companionMoreAnchor = event.currentTarget as HTMLElement | null;
+    companionMoreMenuFocusFirst = event.detail === 0;
+    // One menu at a time: opening ⋯ dismisses the site picker.
+    if (!companionMoreMenuOpen) companionSiteMenuOpen = false;
+    companionMoreMenuOpen = !companionMoreMenuOpen;
+  }
+
+  function closeCompanionMoreMenu() {
+    companionMoreMenuOpen = false;
+    queueMicrotask(() => {
+      const focused = document.activeElement;
+      if (focused && focused !== document.body && focused.isConnected) return;
+      if (companionMoreAnchor instanceof HTMLButtonElement) {
+        companionMoreAnchor.focus();
+        return;
+      }
+      const more = companionBarEl?.querySelector("[data-ctx-more]");
+      if (more instanceof HTMLButtonElement) more.focus();
+    });
+  }
+
+  function onCompanionMoreTriggerKeydown(event: KeyboardEvent) {
+    if (
+      !companionMoreMenuOpen &&
+      (event.key === "ArrowDown" || event.key === "ArrowUp")
+    ) {
+      event.preventDefault();
+      companionMoreAnchor = event.currentTarget as HTMLElement | null;
+      companionMoreMenuFocusFirst = true;
+      companionSiteMenuOpen = false;
+      companionMoreMenuOpen = true;
+    }
+  }
+
+  $effect(() => {
+    if (!companionVisible) {
+      companionSiteMenuOpen = false;
+      closeCompanionMoreMenu();
+    }
+  });
+
+  // Refit when the bar's content changes (playing indicator, zoom readout,
+  // site label, picker and Back/Forward presence); dock resizes arrive
+  // through the ResizeObserver below. Stages converge within one pass.
+  $effect(() => {
+    void companionVisible;
+    void companionPlaying;
+    void companionShownZoom;
+    void activeCompanionLabel;
+    void companionHasSitePicker;
+    void companionCanGoBack;
+    void companionCanGoForward;
+    void companionBarEl;
+    void fitCompanionBar();
+  });
+
+  $effect(() => {
+    const bar = companionBarEl;
+    if (!bar || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => void fitCompanionBar());
+    observer.observe(bar);
+    return () => observer.disconnect();
+  });
   // Browser preview uses an iframe; the Windows runtime uses WebView2 or the stable failure surface.
   // Detect Tauri reliably — __TAURI_IPC__ is always present in Tauri webviews, __TAURI__ may be delayed
   const isTauri = typeof window !== "undefined" && !!((window as any).__TAURI__ || (window as any).__TAURI_IPC__ || (window as any).__TAURI_INTERNALS__);
@@ -305,11 +587,12 @@
     // child is created only after the resolved ratio lands.
     await refreshDock();
     let url: string | null = null;
+    let sites: CompanionSite[] = [];
     let globalRatio = 0.40;
     try {
       const s = await getSettings();
       url = s.companion_url ?? null;
-      companionUrlList = s.companion_url_list ?? [];
+      sites = s.companion_url_list ?? [];
       globalRatio = s.companion_height_ratio ?? 0.40;
     } catch (e) {
       console.error(e);
@@ -353,9 +636,15 @@
     // Applying these stale ones here would resurrect a pre-save URL after an
     // off-save (or clobber a rapid off→on), so drop them silently.
     if (gen !== companionRefreshGen) return;
-    companionUrl = url;
+    companionUrlList = sites;
+    if (sites.length <= 1 && companionSiteMenuOpen) closeCompanionSiteMenu();
     companionRatio = clampCompanionRatio(perMonitor ?? globalRatio);
     companionRatioReady = true;
+    // Events emitted by an intermediate persisted choice may refresh while a
+    // newer choice is queued. The switch queue owns the active marker until
+    // it settles; the final idle refresh reconciles saved edits or removal.
+    if (companionSwitchingTo !== null) return;
+    companionUrl = url;
     // The active site's explicit zoom rides the refreshed list — unset sites
     // stay on the auto zoom. A newer persist landing after this read wins on
     // the next quick-launch-changed pass.
@@ -711,11 +1000,9 @@
           void wv.setZoom(companionAppliedZoom(bounds.width)).catch((e) => {
             console.error("syncCompanionWebview zoom failed", e);
           });
-          // A child born while the details dialog sits above starts yielded —
-          // the synchronous hide after construction can lose to backend
-          // creation, and a native child paints above all web content, so the
-          // created callback re-asserts the yield (ADR-0022 Companion is a
-          // native WebView2 child).
+          // A child born under a web-content overlay starts yielded because a
+          // native WebView2 child paints above CSS stacking contexts
+          // (ADR-0022 Companion is a native WebView2 child).
           if (detailsAction !== null) {
             // Registration may still be landing — the created callback above
             // retries with the error line attached, so a race here stays quiet.
@@ -902,21 +1189,22 @@
     }
   }
 
-  // The details dialog always sits above the Companion pane. The pane is a
-  // native child window, which paints above all web content — no CSS z-index
-  // can cover it — so the child yields while the dialog is open and is
-  // restored after (ADR-0022 Companion is a native WebView2 child).
+  // The details dialog always sits above the Companion pane. The saved-site
+  // menu opens upward over the Quick Launch list (web content), so the native
+  // child — which paints above CSS stacking contexts — stays visible while it
+  // is open; only the dialog yields the child and restores it afterward
+  // (ADR-0022 Companion is a native WebView2 child).
   $effect(() => {
     if (!isTauri) return;
     const webview = companionWebview;
-    const dialogOpen = detailsAction !== null;
+    const overlayOpen = detailsAction !== null;
     if (!webview) return;
     // A child still registering has nothing to hide or show yet — its created
-    // callback re-asserts the yield when the dialog sits above, so attempting
+    // callback re-asserts the yield when an overlay sits above, so attempting
     // here only throws WebviewNotFound noise (ADR-0022 Companion is a native
     // WebView2 child).
     if (!companionWebviewBorn) return;
-    if (dialogOpen) {
+    if (overlayOpen) {
       // A refused hide must reach the error line, not just the console — a
       // native child paints above all web content, so a silent denial reads
       // as the dialog sliding behind the pane (ADR-0022 Companion is a
@@ -1720,7 +2008,7 @@
         onkeydown={onCompanionSplitterKeyDown}
       ></div>
       <div class="qlw__companion" style:flex={companionRatio + " 1 0%"}>
-        <div class="qlw__companion-bar">
+        <div class="qlw__companion-bar" bind:this={companionBarEl}>
           {#if companionCanGoBack}
             <IconButton icon="chevron-left" label="Back" quiet onclick={companionGoBack} />
           {/if}
@@ -1740,16 +2028,19 @@
           <!-- User zoom (ticket 162): explicit per-site page zoom 50–200%,
                remembered per site, falling back to the automatic width zoom.
                Independent of the height splitter — zoom never moves it. -->
-          <IconButton
-            icon="minus"
-            label="Zoom out companion"
-            quiet
-            disabled={companionZoomSaving || companionShownZoom <= 0.5}
-            onclick={() => void companionZoomStep(-1)}
-          />
-          <button
-            type="button"
-            class="qlw__companion-zoom-pct"
+          <!-- Overflow stage 1+: zoom trio lives behind the ⋯ menu (same
+               handlers) so the single row survives the 340px floor. -->
+          {#if companionOverflowStage < 1}
+            <IconButton
+              icon="minus"
+              label="Zoom out companion"
+              quiet
+              disabled={companionZoomSaving || companionShownZoom <= 0.5}
+              onclick={() => void companionZoomStep(-1)}
+            />
+            <button
+              type="button"
+              class="qlw__companion-zoom-pct"
             title={companionZoomAuto
               ? `Companion zoom ${formatCompanionZoomPct(companionShownZoom)} (automatic)`
               : `Companion zoom ${formatCompanionZoomPct(companionShownZoom)} (explicit) — activate to reset to automatic`}
@@ -1769,7 +2060,38 @@
             disabled={companionZoomSaving || companionShownZoom >= 2}
             onclick={() => void companionZoomStep(1)}
           />
-          <span class="qlw__companion-url" title={companionUrl ?? ""}>{companionUrl}</span>
+          {/if}
+          {#if companionHasSitePicker}
+            <button
+              type="button"
+              bind:this={companionSiteTrigger}
+              class="qlw__companion-site-trigger"
+              aria-haspopup="menu"
+              aria-expanded={companionSiteMenuOpen}
+              aria-busy={companionSwitchingTo !== null}
+              aria-label={companionSwitchingTo
+                ? `Switching Companion to ${companionDisplayName(companionSwitchingTo)}`
+                : `Companion site: ${activeCompanionLabel}. Choose a saved site.`}
+              title={activeCompanionSite
+                ? companionPickerLabel(activeCompanionSite)
+                : activeCompanionLabel}
+              data-ctx-trigger
+              onclick={(event) => toggleCompanionSiteMenu(event.detail === 0)}
+              onkeydown={onCompanionSiteTriggerKeydown}
+            >
+              <span class="qlw__companion-site-text">
+                {companionSwitchingTo ? "Switching…" : activeCompanionLabel}
+              </span>
+              <span class="qlw__companion-site-chevron" aria-hidden="true">
+                <Icon name="chevron" size={13} />
+              </span>
+            </button>
+          {:else}
+            <span class="qlw__companion-url" title={companionUrl ?? ""}>
+              {activeCompanionLabel}
+            </span>
+          {/if}
+          <span class="sr-only" aria-live="polite">{companionSwitchAnnouncement}</span>
           {#if companionPlaying}
             <!-- The playing indicator: status only, never a control — the
                  mute toggle beside it owns the action. Tooltip-grade per the
@@ -1783,22 +2105,25 @@
               <Icon name={companionMuted ? "volume-muted" : "volume"} size={13} />
             </span>
           {/if}
-          <span class="qlw__companion-spacer" aria-hidden="true"></span>
-          <IconButton
-            icon={companionMuted ? "volume-muted" : "volume"}
-            label={companionMuted ? "Unmute companion audio" : "Mute companion audio"}
-            quiet
-            disabled={companionMuteBusy}
-            aria-pressed={companionMuted}
-            onclick={toggleCompanionMute}
-          />
-          <IconButton
-            icon="sliders"
-            label={companionMixerOpening ? "Opening volume mixer" : "Open volume mixer"}
-            quiet
-            disabled={companionMixerOpening}
-            onclick={openMixer}
-          />
+          {#if companionOverflowStage < 2}
+            <IconButton
+              icon={companionMuted ? "volume-muted" : "volume"}
+              label={companionMuted ? "Unmute companion audio" : "Mute companion audio"}
+              quiet
+              disabled={companionMuteBusy}
+              aria-pressed={companionMuted}
+              onclick={toggleCompanionMute}
+            />
+          {/if}
+          {#if companionOverflowStage < 1}
+            <IconButton
+              icon="sliders"
+              label={companionMixerOpening ? "Opening volume mixer" : "Open volume mixer"}
+              quiet
+              disabled={companionMixerOpening}
+              onclick={openMixer}
+            />
+          {/if}
           <IconButton
             icon="external"
             label={companionOpeningExternal ? "Opening externally" : "Open externally"}
@@ -1806,7 +2131,25 @@
             disabled={companionOpeningExternal}
             onclick={companionOpenExternal}
           />
+          {#if companionOverflowStage > 0}
+            <!-- Narrow-dock overflow: the app's ⋯ idiom (shared IconButton +
+                 shared ContextMenu). Anchor via currentTarget — see
+                 toggleCompanionMoreMenu. -->
+            <IconButton
+              icon="dots"
+              label="More companion actions"
+              quiet
+              data-ctx-trigger
+              data-ctx-more
+              aria-haspopup="menu"
+              aria-expanded={companionMoreMenuOpen}
+              onclick={toggleCompanionMoreMenu}
+              onkeydown={onCompanionMoreTriggerKeydown}
+            />
+          {/if}
         </div>
+        <ContextMenu ctx={companionSiteMenu} onclose={closeCompanionSiteMenu} />
+        <ContextMenu ctx={companionMoreMenu} onclose={closeCompanionMoreMenu} />
         <div class="qlw__companion-frame-wrap" bind:this={companionFrameWrapEl}>
           {#if companionWebviewFailed}
             <div class="qlw__companion-failure" role="status">
@@ -2355,6 +2698,15 @@
     flex-shrink: 0;
     border-bottom: 1px solid var(--border);
     background: var(--bg-card);
+    min-width: 0;
+  }
+
+  /* Narrow-dock fix: fixed controls keep their 30px hit area at the 340px
+     floor instead of crushing — only the site trigger squeezes, through its
+     ellipsis (0004:4 shortened-label degradation; full name rides the title
+     tooltip + aria-label). Bar-scoped so no other IconButton surface changes. */
+  .qlw__companion-bar :global(.icon-btn) {
+    flex: none;
   }
 
   .qlw__companion-url {
@@ -2366,6 +2718,84 @@
     font-family: var(--font-mono);
     font-size: var(--text-xs);
     color: var(--text-muted);
+  }
+
+  .qlw__companion-site-trigger {
+    flex: 1;
+    min-width: 0;
+    height: 30px;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: 0 var(--space-1) 0 var(--space-2);
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--text-muted);
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    font-weight: 500;
+    cursor: pointer;
+    touch-action: manipulation;
+    transition: background var(--dur-fast) var(--ease-out),
+      border-color var(--dur-fast) var(--ease-out),
+      color var(--dur-fast) var(--ease-out);
+  }
+
+  .qlw__companion-site-trigger:hover,
+  .qlw__companion-site-trigger[aria-expanded="true"] {
+    border-color: var(--border-strong);
+    background: var(--bg-hover);
+    color: var(--text);
+  }
+
+  .qlw__companion-site-trigger[aria-busy="true"] {
+    border-color: var(--accent-tint-border);
+    color: var(--accent);
+  }
+
+  .qlw__companion-site-trigger:focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+
+  .qlw__companion-site-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .qlw__companion-site-chevron {
+    display: inline-flex;
+    flex-shrink: 0;
+  }
+
+  .qlw__companion-site-chevron :global(svg) {
+    transition: transform var(--dur-fast) var(--ease-out);
+  }
+
+  .qlw__companion-site-trigger[aria-expanded="true"]
+    .qlw__companion-site-chevron
+    :global(svg) {
+    transform: rotate(180deg);
+  }
+
+  .qlw__companion :global(.ctx-menu) {
+    max-width: calc(100vw - var(--space-4));
+    max-height: calc(100vh - var(--space-4));
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  .qlw__companion :global(.ctx-item) {
+    min-width: 0;
+    white-space: normal;
+  }
+
+  .qlw__companion :global(.ctx-item > span:not(.ctx-item__icon):not(.ctx-item__more)) {
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
 
   /* The zoom readout doubles as the reset-to-automatic control: token type
@@ -2405,11 +2835,6 @@
     display: inline-flex;
     flex-shrink: 0;
     color: var(--text-muted);
-  }
-
-  .qlw__companion-spacer {
-    flex: 1;
-    min-width: 0;
   }
 
   .qlw__companion-frame-wrap {

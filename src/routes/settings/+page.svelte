@@ -1,9 +1,15 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import { beforeNavigate, goto } from "$app/navigation";
-  import type { BackupCounts, CompanionSite, DisplayInfo, Settings } from "$lib/types";
+  import type { BackupCounts, CompanionSite, DisplayInfo, ManagedCatalogStatus, Settings } from "$lib/types";
+  import { aiProviderLabel } from "$lib/types";
+  import type { AiProvider } from "$lib/types";
   import { companionDisplayName, normalizeCompanionSites } from "$lib/companion";
   import {
+    aiCheckExistingLocal,
+    aiCancelManagedInstall,
+    aiInstallManaged,
+    aiManagedStatus,
     exportBackup,
     getDisplayDockEdge,
     getDisplayDockMode,
@@ -80,6 +86,15 @@
     { value: "off", label: "Off" },
   ];
 
+  const aiProviderOptions: { value: AiProvider; label: string }[] = [
+    { value: "off", label: aiProviderLabel.off },
+    { value: "existing-local", label: aiProviderLabel["existing-local"] },
+    { value: "managed", label: aiProviderLabel.managed },
+    { value: "cloud", label: aiProviderLabel.cloud },
+  ];
+
+  const AI_BASE_URL_DEFAULT = "http://127.0.0.1:11434";
+
   const SEAM_REASON = "Borders another display — cursor can't stop there";
 
   let settings: Settings | null = $state(null);
@@ -114,7 +129,7 @@
   // choice survives across visits.
   const GROUP_STORAGE_KEY = "sprout.settings.groups.v1";
   function loadGroupOpen(): Record<SettingsGroupKey, boolean> {
-    const allOpen = { general: true, dock: true, companion: true, backup: true };
+    const allOpen = { general: true, dock: true, companion: true, backup: true, ai: true };
     try {
       const raw = localStorage.getItem(GROUP_STORAGE_KEY);
       if (!raw) return allOpen;
@@ -124,6 +139,7 @@
         dock: parsed.dock ?? true,
         companion: parsed.companion ?? true,
         backup: parsed.backup ?? true,
+        ai: parsed.ai ?? true,
       };
     } catch {
       return allOpen;
@@ -154,6 +170,18 @@
   let companionUrl: string | null = $state(null);
   let companionHeightRatio = $state(0.40);
   let companionUrlList = $state<CompanionSite[]>([]);
+  // AI assistance (ADR-0031): off until configured. The route is Save-deferred
+  // like every other knob; Test connection below is the explicit command.
+  let aiProvider = $state<AiProvider>("off");
+  let aiBaseUrl = $state(AI_BASE_URL_DEFAULT);
+  let aiModel = $state("");
+  let aiTestBusy = $state(false);
+  let aiTestStatus = $state("");
+  let aiTestError = $state("");
+  let managedCatalog = $state<ManagedCatalogStatus | null>(null);
+  let managedBusy = $state(false);
+  let managedError = $state("");
+  let managedNotice = $state("");
   // Whether the companion knobs were authored on this page since mount —
   // the page loads once while the dock divider and the companion manager
   // write out-of-band, so save must tell "left alone" from "edited here".
@@ -192,6 +220,9 @@
     companionUrl: string | null;
     companionHeightRatio: number;
     companionUrlList: CompanionSite[];
+    aiProvider: AiProvider;
+    aiBaseUrl: string;
+    aiModel: string;
   } | null>(null);
   let baselineDisplayEdges = $state<Record<string, string>>({});
   let baselineDisplayModes = $state<Record<string, string>>({});
@@ -260,6 +291,72 @@
     return normalizeCompanionSites(list);
   }
 
+  /** A stored route the menu does not offer reads back as off — the same
+   *  fallback the backend applies, so a broken value never wakes inference. */
+  function validAiProvider(value: unknown): AiProvider {
+    return value === "existing-local" || value === "managed" || value === "cloud"
+      ? (value as AiProvider)
+      : "off";
+  }
+
+  /** Tests the existing-local service without saving anything: classifies the
+   *  endpoint and checks the named model against what the service exposes.
+   *  An explicit command, distinct from the Save-deferred fields above. */
+  async function testAiConnection() {
+    aiTestBusy = true;
+    aiTestStatus = "";
+    aiTestError = "";
+    try {
+      const exposed = await aiCheckExistingLocal(aiBaseUrl.trim(), aiModel.trim());
+      aiTestStatus =
+        exposed.length === 1
+          ? `Connected — the service exposes 1 model: ${exposed[0]}.`
+          : `Connected — the service exposes ${exposed.length} models: ${exposed.join(", ")}.`;
+    } catch (e) {
+      aiTestError = String(e);
+    } finally {
+      aiTestBusy = false;
+    }
+  }
+
+  async function loadManagedCatalog() {
+    managedError = "";
+    try {
+      managedCatalog = await aiManagedStatus();
+    } catch (cause) {
+      managedCatalog = null;
+      managedError = String(cause);
+    }
+  }
+
+  async function installManaged(modelId: string) {
+    if (managedBusy) return;
+    managedBusy = true;
+    managedError = "";
+    managedNotice = "";
+    try {
+      const result = await aiInstallManaged(modelId);
+      aiModel = result.model_id;
+      managedNotice = result.message;
+      await loadManagedCatalog();
+    } catch (cause) {
+      managedError = String(cause);
+    } finally {
+      managedBusy = false;
+    }
+  }
+
+  function cancelManagedInstall() {
+    void aiCancelManagedInstall().catch(() => {});
+    managedNotice = "Cancelling installation; staged files will not be activated.";
+  }
+
+  function managedSize(bytes: number | null): string {
+    if (bytes === null) return "Not qualified";
+    const gib = bytes / 1024 / 1024 / 1024;
+    return `${new Intl.NumberFormat().format(bytes)} bytes (${gib.toFixed(2)} GB download)`;
+  }
+
   const isDirty = $derived.by(() => {
     if (!settings || !baseline) return false;
     if (clampTimeout(timeout) !== baseline.timeout) return true;
@@ -276,6 +373,9 @@
     if ((companionUrl ?? null) !== (baseline.companionUrl ?? null)) return true;
     if (clampCompanionRatio(companionHeightRatio) !== baseline.companionHeightRatio) return true;
     if (JSON.stringify(normalizeCompanionList(companionUrlList)) !== JSON.stringify(baseline.companionUrlList)) return true;
+    if (aiProvider !== baseline.aiProvider) return true;
+    if (aiBaseUrl.trim() !== baseline.aiBaseUrl) return true;
+    if (aiModel.trim() !== baseline.aiModel) return true;
     if (displays.length > 1) {
       for (const d of displays) {
         const cur = displayEdges[d.device_name];
@@ -330,6 +430,9 @@
       companionSiteNames: companionUrlList.map((s) => companionDisplayName(s)),
       companionMuted: settings?.companion_muted ?? false,
       updateSummary: backupSummary,
+      aiProvider,
+      aiProviderLabel: aiProviderOptions.find((o) => o.value === aiProvider)?.label ?? "Off",
+      aiModel: aiModel.trim(),
     }),
   );
   const resolution = $derived(resolveSettingsFilter(searchIndex, filter));
@@ -361,7 +464,8 @@
       !groupVisible("general") &&
       !groupVisible("dock") &&
       !groupVisible("companion") &&
-      !groupVisible("backup"),
+      !groupVisible("backup") &&
+      !groupVisible("ai"),
   );
   // Ticket 115: polite live region that announces appearance and disappearance
   // without moving focus or scrolling — text + color, never color alone.
@@ -437,6 +541,7 @@
   onMount(() => {
     void (async () => {
       await load();
+      await loadManagedCatalog();
       await loadDisplays();
     })();
     const off = listen("displays-changed", () => {
@@ -496,6 +601,11 @@
       companionUrl = loaded.companion_url ?? null;
       companionHeightRatio = clampCompanionRatio(loaded.companion_height_ratio ?? 0.40);
       companionUrlList = normalizeCompanionList(loaded.companion_url_list ?? []);
+      aiProvider = validAiProvider(loaded.ai_provider);
+      aiBaseUrl = (loaded.ai_base_url ?? "").trim() || AI_BASE_URL_DEFAULT;
+      aiModel = (loaded.ai_model ?? "").trim();
+      aiTestStatus = "";
+      aiTestError = "";
       const persisted = loaded.theme as ThemeMode;
       if (persisted === "system" || persisted === "light" || persisted === "dark") {
         if (persisted !== theme.mode) restoreTheme(persisted);
@@ -518,6 +628,9 @@
         companionUrl: loaded.companion_url ?? null,
         companionHeightRatio: clampCompanionRatio(loaded.companion_height_ratio ?? 0.40),
         companionUrlList: normalizeCompanionList(loaded.companion_url_list ?? []),
+        aiProvider: validAiProvider(loaded.ai_provider),
+        aiBaseUrl: (loaded.ai_base_url ?? "").trim() || AI_BASE_URL_DEFAULT,
+        aiModel: (loaded.ai_model ?? "").trim(),
       };
       loadFailed = false;
     } catch {
@@ -726,6 +839,11 @@
       companionUrlList = [...baseline.companionUrlList];
       companionUrlTouched = false;
       companionRatioTouched = false;
+    aiProvider = baseline.aiProvider;
+    aiBaseUrl = baseline.aiBaseUrl || AI_BASE_URL_DEFAULT;
+    aiModel = baseline.aiModel;
+    aiTestStatus = "";
+    aiTestError = "";
     if (displays.length > 1) {
       displayEdges = { ...baselineDisplayEdges };
       displayModes = { ...baselineDisplayModes };
@@ -743,6 +861,17 @@
     error = "";
     // Clear per-monitor row errors before batch save.
     displayErrors = {};
+    // The AI route guards its own save like the per-monitor rows do: a
+    // missing model under existing-local refuses with focus on the field
+    // instead of a backend round-trip.
+    if (aiProvider === "existing-local" && !aiModel.trim()) {
+      error = "Name the model your local service exposes — Sprout never substitutes another one.";
+      expandGroups(["ai"]);
+      await tick();
+      document.getElementById("ai-model")?.focus();
+      saving = false;
+      return;
+    }
     try {
       // Companion knobs are written out-of-band (dock divider, companion
       // manager) while this page loads once on mount — saving the stale
@@ -826,6 +955,9 @@
         // The dock toolbar owns the mute toggle — Settings only carries the
         // stored value through so a save never resets it.
         companion_muted: settings.companion_muted ?? false,
+        ai_provider: aiProvider,
+        ai_base_url: aiBaseUrl.trim() || AI_BASE_URL_DEFAULT,
+        ai_model: aiModel.trim(),
       });
       // Per-monitor follows Save (only Theme is immediate per 0009). Batch
       // the deferred writes so global + per-monitor share one success notice.
@@ -939,6 +1071,9 @@
         companionUrl,
         companionHeightRatio,
         companionUrlList: [...companionUrlList],
+        aiProvider,
+        aiBaseUrl: aiBaseUrl.trim() || AI_BASE_URL_DEFAULT,
+        aiModel: aiModel.trim(),
       };
       if (!perMonitorError) {
         baselineDisplayEdges = { ...displayEdges };
@@ -968,6 +1103,9 @@
         companion_height_ratio: companionHeightRatio,
         companion_url_list: [...companionUrlList],
         companion_muted: settings.companion_muted ?? false,
+        ai_provider: aiProvider,
+        ai_base_url: aiBaseUrl.trim() || AI_BASE_URL_DEFAULT,
+        ai_model: aiModel.trim(),
       };
     } catch (cause) {
       console.error("settings save failed", cause);
@@ -977,7 +1115,7 @@
         : "Couldn't save the settings — try again. If it keeps failing, close Sprout and relaunch.";
       // A backend refusal names no field, so every group opens and focus
       // lands on the error itself — the same expand-and-focus promise.
-      expandGroups(["general", "dock", "companion", "backup"]);
+      expandGroups(["general", "dock", "companion", "backup", "ai"]);
       await tick();
       document.getElementById("settings-error")?.focus();
     } finally {
@@ -1238,8 +1376,7 @@
         <div class="knob__body">
           <span class="knob__label">Theme</span>
           <p class="knob__hint">
-            Follows the Windows appearance setting, or pins the app to one look. Applies
-            immediately and is remembered next launch; no save needed.
+            Follows Windows, or pins one look. Applies immediately; no save needed.
           </p>
         </div>
         <div class="theme-picker" role="radiogroup" aria-label="Theme">
@@ -1262,8 +1399,8 @@
         <div class="knob__body">
           <label class="knob__label" for="install-dir">Install directory</label>
           <p class="knob__hint">
-            Where installs and upgrades land. Empty means the installer's own default location;
-            pick or type an absolute path like D:\Apps. Software that ignores it is reported on
+            Where installs and upgrades land. Empty = the installer's default; use an
+            absolute path like D:\Apps. Installers that ignore it are reported on
             the Plan. Never shared with exported presets.
           </p>
         </div>
@@ -1290,10 +1427,9 @@
         <div class="knob__body">
           <span class="knob__label">Start with Windows</span>
           <p class="knob__hint">
-            Registers Sprout to start at login, resident in the tray — the main
-            window stays closed and a docked Quick Launch bar reappears on its
-            own. Turning it off removes the registration immediately; no restart
-            needed.
+            Starts Sprout at login, tray-only: the main window stays closed and a
+            docked bar reappears on its own. Turning it off removes the
+            registration immediately; no restart needed.
           </p>
         </div>
         <div class="knob__input">
@@ -1314,8 +1450,8 @@
         <div class="knob__body">
           <label class="knob__label" for="default-timeout">Default timeout</label>
           <p class="knob__hint">
-            Minutes a requirement may take before its installer is killed. New requirements
-            in the preset composer start with this value; you can still override each one.
+            Minutes a requirement may take before its installer is killed. New
+            requirements start with this value; each one can override it.
             1–1440 min, default 10 min.
           </p>
         </div>
@@ -1339,8 +1475,8 @@
         <div class="knob__body">
           <label class="knob__label" for="log-retention">Log retention</label>
           <p class="knob__hint">
-            How long a finished run's raw log folder is kept before it is pruned. Pruning
-            happens after every run and at app start. The runs list itself is never deleted.
+            How long a finished run's raw logs are kept. Pruning runs after every
+            run and at app start; the runs list itself is never deleted.
             1–3650 days, default 30 days.
           </p>
         </div>
@@ -1364,9 +1500,8 @@
         <div class="knob__body">
           <label class="knob__label" for="launch-concurrency">Launch concurrency</label>
           <p class="knob__hint">
-            How many Quick Launch apps may start at once before the rest queue. Lower is more
-            sequential and gentle on the system; higher is more parallel and snappier but
-            heavier. 1–50 apps, default 8.
+            How many Quick Launch apps may start at once; the rest queue.
+            1–50 apps, default 8.
           </p>
         </div>
         <div class="knob__input">
@@ -1400,9 +1535,9 @@
         <div class="knob__body">
           <label class="knob__label" for="dock-state">Quick Launch window</label>
           <p class="knob__hint">
-            Whether the Quick Launch window floats as a palette or docks to a screen edge as a
-            bar. Applied to an open window on save and remembered next time it opens; the dock
-            toggle inside the window writes back here.
+            The Quick Launch window floats as a palette or docks as a bar. Applies
+            to an open window on save and is remembered; the window's dock toggle
+            writes back here.
           </p>
         </div>
         <div class="knob__input">
@@ -1423,9 +1558,9 @@
         <div class="knob__body">
           <label class="knob__label" for="dock-mode">Dock mode</label>
           <p class="knob__hint">
-            How the Quick Launch dock behaves when docked to a screen edge. Auto-hide slides it to a
-            sliver when not hovered and reclaims the space; fixed keeps the strip permanently
-            reserved, like a pinned taskbar.
+            Fixed keeps a visible strip and squeezes other windows. Auto-hide hides
+            completely — push into that screen's edge and hold to call it back;
+            otherwise windows keep their full size.
           </p>
         </div>
         <div class="knob__input">
@@ -1441,8 +1576,8 @@
         <div class="knob__body">
           <label class="knob__label" for="dock-edge">Default dock edge</label>
           <p class="knob__hint">
-            Which screen edge the dock attaches to when first docked. The dock's own left/right
-            switch overrides it per monitor.
+            The edge a dock uses until its display remembers its own. The dock's
+            left/right switch overrides per monitor.
           </p>
         </div>
         <div class="knob__input">
@@ -1458,8 +1593,7 @@
         <div class="knob__body">
           <label class="knob__label" for="dock-width">Dock width</label>
           <p class="knob__hint">
-            How wide the dock is. Wider fits longer names; narrower leaves more
-            room for other windows. Fixed caps at 30% — it reserves workspace;
+            Wider fits longer names. Fixed caps at 30% — it reserves workspace;
             auto-hide may run to 60% — it overlays instead.
           </p>
         </div>
@@ -1492,8 +1626,8 @@
         <div class="knob__body">
           <label class="knob__label" for="dock-density">List density</label>
           <p class="knob__hint">
-            List text size in the Quick Launch window and dock, across all
-            three tabs. Compact fits more rows; Large reads easier.
+            Text size across the Quick Launch window's three tabs. Compact fits
+            more rows; Large reads easier.
           </p>
         </div>
         <div class="knob__input">
@@ -1511,8 +1645,9 @@
           <div class="per-monitor__header">
             <span class="knob__label" id="per-monitor-title">Per-monitor dock</span>
             <p class="knob__hint">
-              Each display remembers its own edge, mode, and width. The defaults above are the fallback for
-              a display without a saved choice. Choices save with the button below and take effect the next time that display docks.
+              Each display remembers its own edge, mode, and width; the defaults
+              above cover the rest. Choices save with the button below and apply
+              next time that display docks.
             </p>
           </div>
           {#each displays as d (d.device_name)}
@@ -1539,6 +1674,7 @@
                   variant="small"
                   value={displayEdges[d.device_name] ?? dockEdge}
                   onchange={(v) => changeDisplayEdge(d.device_name, v)}
+                  aria-label={`Dock edge on ${d.label}`}
                   aria-describedby={hasSeam ? reasonId : undefined}
                 >
                   <option value="left" disabled={!d.left_eligible}>Left</option>
@@ -1549,6 +1685,7 @@
                   variant="small"
                   value={displayModes[d.device_name] ?? dockMode}
                   onchange={(v) => changeDisplayMode(d.device_name, v)}
+                  aria-label={`Dock mode on ${d.label}`}
                 >
                   <option value="auto-hide">Auto-hide</option>
                   <option value="fixed">Fixed</option>
@@ -1584,9 +1721,8 @@
           <div class="knob__body">
             <label class="knob__label" for="reveal-dwell">Reveal delay</label>
             <p class="knob__hint">
-              Hold time at the screen edge after pushing into it before the hidden dock
-              slides out. Shorter feels snappier but may fire on grazes along the seam;
-              longer needs a deliberate hold and resists accidental reveals. 0–1000 ms,
+              Hold time at the edge before the hidden dock slides out. Shorter
+              may fire on grazes; longer needs a deliberate hold. 0–1000 ms,
               default 200 ms.
             </p>
           </div>
@@ -1610,9 +1746,9 @@
           <div class="knob__body">
             <label class="knob__label" for="reveal-sensitivity">Reveal sensitivity</label>
             <p class="knob__hint">
-              Distance the cursor must push into the edge before the hold timer starts.
-              Lower needs only a nudge and feels immediate; higher demands a purposeful push
-              and ignores brushes along the edge. 0–50 px, default 12 px.
+              How far the cursor must push into the edge before the hold timer
+              starts. Lower is immediate; higher ignores brushes. 0–50 px,
+              default 12 px.
             </p>
           </div>
           <div class="knob__input">
@@ -1648,7 +1784,7 @@
             <div class="knob__body">
               <label class="knob__label" for="companion-url">Active site</label>
               <p class="knob__hint">
-                Choose what appears while Quick Launch is docked. Off removes the pane completely.
+                The site shown while Quick Launch is docked. Off removes the pane completely.
               </p>
             </div>
             <div class="knob__input">
@@ -1673,7 +1809,7 @@
             <div class="knob__body">
               <label class="knob__label" for="companion-ratio">Pane height</label>
               <p class="knob__hint">
-                Sets the starting height. You can also drag the divider in the dock.
+                Starting height; drag the divider in the dock to resize.
               </p>
             </div>
             <div class="knob__input">
@@ -1746,8 +1882,7 @@
         <div class="knob__body">
           <span class="knob__label">Sprout updates</span>
           <p class="knob__hint">
-            Checks GitHub releases for a newer build. An update also appears
-            beside the version in the navigation rail; installing downloads it
+            Checks GitHub releases for a newer build; installing downloads it
             and restarts Sprout.
           </p>
           {#if updateState.installing}
@@ -1786,6 +1921,170 @@
           {/if}
         </div>
       </article>
+        </GroupAccordion>
+      {/if}
+
+      {#if groupVisible("ai")}
+        <!-- AI assistance: optional drafting help, off until configured. The
+             route is Save-deferred like every other knob; Test connection is
+             the explicit command and saves nothing. -->
+        <GroupAccordion
+          open={groupEffectiveOpen("ai")}
+          controls="group-ai-body"
+          name="AI assistance"
+          count={groupKnobCount("ai")}
+          onToggle={() => toggleGroup("ai")}
+        >
+      <article class="knob" hidden={!knobVisible("ai-provider")}>
+        <div class="knob__body">
+          <label class="knob__label" for="ai-provider">AI provider</label>
+          <p class="knob__hint">
+            Optional help drafting Quick Action commands. Off installs nothing;
+            existing-local uses your own on-device service as-is. Drafts never
+            run — you review and save each one.
+          </p>
+          {#if aiProvider === "managed"}
+            <p class="knob__hint">
+              Enabling this provider downloads nothing. A separate Install action appears only for a fully qualified bundled recommendation.
+            </p>
+          {/if}
+          {#if aiProvider === "cloud"}
+            <p class="knob__hint">
+              Cloud providers aren't in this build yet — nothing here sends
+              anything anywhere.
+            </p>
+          {/if}
+        </div>
+        <div class="knob__input">
+          <Select
+            id="ai-provider"
+            variant="small"
+            value={aiProvider}
+            onchange={(v) => (aiProvider = v as AiProvider)}
+          >
+            {#each aiProviderOptions as option (option.value)}
+              <option value={option.value}>{option.label}</option>
+            {/each}
+          </Select>
+        </div>
+      </article>
+
+      {#if aiProvider === "managed"}
+        <article class="knob" hidden={!knobVisible("ai-model")}>
+          <div class="knob__body">
+            <p class="knob__label">Managed recommendation</p>
+            {#if managedCatalog}
+              <p class="knob__hint">
+                Runtime: {managedCatalog.runtime.name} {managedCatalog.runtime.version} · {managedCatalog.runtime.license} · {managedSize(managedCatalog.runtime.download_size_bytes)}
+              </p>
+              <p class="knob__hint">Source: {managedCatalog.runtime.source}</p>
+              {#if !managedCatalog.runtime.qualified}
+                <Notice tone="warn">{managedCatalog.runtime.blocker}</Notice>
+              {/if}
+              {#each managedCatalog.models as model (model.id)}
+                <p class="knob__label">{model.artifact}</p>
+                <p class="knob__hint">
+                  Status: {model.status}. Revision: {model.revision ?? "Not qualified"}. Download: {managedSize(model.download_size_bytes)}.
+                </p>
+                <p class="knob__hint">
+                  Working memory: {model.memory_needs_mb === null ? "Not qualified" : `${new Intl.NumberFormat().format(model.memory_needs_mb)} MB RAM/VRAM`}. Context: {model.context_limit_tokens ?? "Not qualified"}. Runtime minimum: {model.minimum_runtime_version ?? "Not qualified"}.
+                </p>
+                <p class="knob__hint">License: {model.license} · Source: {model.license_source}</p>
+                {#if model.blocker}
+                  <Notice tone="warn">{model.blocker}</Notice>
+                {/if}
+                {#if model.installed}
+                  <Notice tone="ok">Installed for this user. It stays stopped until Generate and unloads after 5 idle minutes.</Notice>
+                {/if}
+              {/each}
+              {#if managedNotice}
+                <p class="knob__status" role="status">{managedNotice}</p>
+              {/if}
+              {#if managedError}
+                <Notice tone="error">{managedError}</Notice>
+              {/if}
+            {:else if managedError}
+              <Notice tone="error">{managedError}</Notice>
+            {:else}
+              <p class="knob__status" role="status">Reading bundled recommendation…</p>
+            {/if}
+          </div>
+          <div class="knob__input">
+            {#if managedBusy}
+              <Button type="button" variant="secondary" onclick={cancelManagedInstall}>Cancel Install</Button>
+            {:else if managedCatalog}
+              {#each managedCatalog.models.filter((model) => model.installable && !model.installed) as model (model.id)}
+                <Button type="button" onclick={() => void installManaged(model.id)}>Install {model.artifact}</Button>
+              {/each}
+            {/if}
+          </div>
+        </article>
+      {/if}
+
+      {#if aiProvider === "existing-local"}
+      <article class="knob" hidden={!knobVisible("ai-endpoint")}>
+        <div class="knob__body">
+          <label class="knob__label" for="ai-base-url">Local service address</label>
+          <p class="knob__hint">
+            Your service's loopback address, e.g. http://127.0.0.1:11434.
+            Sprout connects to this machine only and never follows redirects
+            elsewhere; it never starts, stops, or reconfigures your service.
+          </p>
+        </div>
+        <div class="knob__input knob__input--wide">
+          <input
+            id="ai-base-url"
+            name="ai-base-url"
+            class="field__input field__input--dir"
+            type="text"
+            inputmode="url"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="http://127.0.0.1:11434"
+            value={aiBaseUrl}
+            oninput={(e) => (aiBaseUrl = (e.target as HTMLInputElement).value)}
+          />
+        </div>
+      </article>
+
+      <article class="knob" hidden={!knobVisible("ai-model")}>
+        <div class="knob__body">
+          <label class="knob__label" for="ai-model">Local model</label>
+          <p class="knob__hint">
+            The exact model name your service exposes. Sprout never substitutes
+            another one — an unknown name fails instead. Test connection checks
+            it without saving anything.
+          </p>
+          {#if aiTestStatus}
+            <Notice tone="ok">{aiTestStatus}</Notice>
+          {/if}
+          {#if aiTestError}
+            <Notice tone="error">{aiTestError}</Notice>
+          {/if}
+        </div>
+        <div class="knob__input knob__input--wide">
+          <input
+            id="ai-model"
+            name="ai-model"
+            class="field__input"
+            type="text"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="e.g. qwen2.5-coder:7b"
+            value={aiModel}
+            oninput={(e) => (aiModel = (e.target as HTMLInputElement).value)}
+          />
+          <Button
+            type="button"
+            variant="secondary"
+            onclick={testAiConnection}
+            disabled={aiTestBusy}
+          >
+            {aiTestBusy ? "Testing…" : "Test connection"}
+          </Button>
+        </div>
+      </article>
+      {/if}
         </GroupAccordion>
       {/if}
     </form>

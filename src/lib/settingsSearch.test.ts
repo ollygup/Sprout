@@ -33,6 +33,9 @@ const SNAPSHOT: SettingsSearchSnapshot = {
   companionSiteNames: ["Music", "https://open.spotify.com"],
   companionMuted: false,
   updateSummary: "Up to date",
+  aiProvider: "existing-local",
+  aiProviderLabel: "Existing local service",
+  aiModel: "test-model",
 };
 
 function matchedIds(query: string): string[] {
@@ -128,11 +131,25 @@ describe("settings filter resolution", () => {
     expect(visibleKnobIds.size).toBe(0);
     expect(wholeGroups.size).toBe(0);
   });
+
+  it("lands AI setup on the AI assistance knobs", () => {
+    expect(matchedIds("ai")).toContain("ai-provider");
+    expect(matchedIds("model")).toContain("ai-model");
+    expect(matchedIds("test-model")).toContain("ai-model");
+    expect(matchedIds("localhost")).toContain("ai-endpoint");
+  });
+
+  it("opens the whole AI group for a bare group name", () => {
+    const index = buildSettingsSearchIndex({ ...SNAPSHOT, aiProvider: "off", aiProviderLabel: "Off", aiModel: "" });
+    const { visibleKnobIds, wholeGroups } = resolveSettingsFilter(index, "AI assistance");
+    expect(wholeGroups).toEqual(new Set(["ai"]));
+    expect([...visibleKnobIds].sort()).toEqual(["ai-endpoint", "ai-model", "ai-provider"]);
+  });
 });
 
 describe("settings groups + filter contract", () => {
-  it("renders the four groups through the shared accordion, headers bare", () => {
-    for (const label of ["General", "Dock", "Companion", "Backup & housekeeping"]) {
+  it("renders the five groups through the shared accordion, headers bare", () => {
+    for (const label of ["General", "Dock", "Companion", "Backup & housekeeping", "AI assistance"]) {
       expect(SETTINGS_SOURCE).toContain(`name="${label}"`);
     }
     expect(SETTINGS_SOURCE).toContain("GroupAccordion");

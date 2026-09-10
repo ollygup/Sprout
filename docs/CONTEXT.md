@@ -99,7 +99,7 @@ The Quick Launch window's docked form — a little window that can be pinned [Wi
 _Avoid_: Sidebar, tray bar, launcher bar
 
 **Dock visibility**:
-Whether one Launch entry, Quick Action, or Clip appears in the Quick Launch dock. Any item can be hidden from the dock from its own row menu or edit dialog ("Hide from dock" / "Show in dock", per-item, research 0006 pattern 4) while staying fully listed, editable, and individually runnable in the main app. Each Start-all starts exactly what its own surface shows: the dock's Start-all skips hidden entries, the main app's runs everything it lists. A group whose members are all hidden drops its section in the dock and keeps it in the main app. The flag travels in whole-app backup; backups without it read as visible. Not to be confused with `show_window` (console visibility) or `auto_run` (startup runs).
+Whether one Launch entry, Quick Action, or Clip appears in the Quick Launch dock. Any item can be hidden from the dock from its own row menu or edit dialog ("Hide from dock" / "Show in dock", per-item, research 0006 pattern 4) while staying fully listed, editable, and individually runnable in the main app. Dock visibility does not disable an item; planned main-app matching batch scope is specified in [166](../.scratch/sprout-app/issues/166-field-cleanup-dock-filter-companion-navigation-spec.md). A group whose members are all hidden drops its section in the dock and keeps it in the main app. The flag travels in whole-app backup; backups without it read as visible. Not to be confused with `show_window` (console visibility) or `auto_run` (startup runs).
 _Avoid_: Dock settings, hidden item (without saying where)
 
 **Dock visibility filter**:

@@ -74,3 +74,7 @@ it is not a user study validating every proposed Sprout removal.
 ## Decision update — 2026-09-08
 
 The user accepted selective helper cleanup and removal of repeated Ctrl+Enter hints while preserving submission behavior. This supersedes the original permanent-hint placement requirement. Implementation remains pending in spec 166; evidence above and the field-by-field inventory in 0017 are retained for review.
+
+## Coverage update — 2026-09-09
+
+AI request/context fields now own Ctrl/Cmd+Enter-to-generate and prevent the outer dialog submit handler. Ticket 167 removes the new repeated generate hint as part of the accepted selective cleanup, while preserving that ownership, the visible Generate action and ordinary form-submit behavior elsewhere. Research 0017's latest addendum lists these fields. Do not unify distinct keyboard actions merely because their helper lines are removed.

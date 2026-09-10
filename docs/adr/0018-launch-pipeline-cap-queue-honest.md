@@ -1,5 +1,7 @@
 # Quick Launch runs through a capped queue with honest outcomes
 
+> Latest status: amended 2026-09-09 for matching batch scope; implementation pending in 169 under spec 166. Original text and previous qualifications are preserved.
+
 > Status: amended 2026-09-05 — original decision text preserved; see the executable-source audit amendment for current behavior and implementation gaps.
 
 Starting the whole Quick Launch list runs it through a capped queue, not a fan-out: at most `launch_concurrency` entries are in flight (default 8, range 1–50), the rest wait for a slot. Only an entry with a live desktop assignment holds its slot past spawn — it waits for its main window (`wait_for_new_window`, 15 s timeout, 250 ms poll) so the move-to-desktop can land; windowless and command entries free their slot at spawn. A run is single-flight per process (`AtomicBool`): a second Start while one is in flight is refused with an "already in progress" error, and every Start affordance (tray, window, page) converges on the same runner. A failed launch never aborts the rest; a no-window timeout counts as started and never stalls the queue. Already-running apps (full exe-path match) are skipped and reported, never duplicated; a missing target fails fast. Dead-desktop assignments and refused moves degrade to notes on an otherwise successful start. Single-tap starts behave differently from batch starts by design: a single tap foregrounds the on-target window instead of reporting "already open".
@@ -17,3 +19,10 @@ The Start triggers are the Quick Launch window and page; the tray opens the wind
 Single-tap execution requests foregrounding, but `run_launch_queue_inner` in `src-tauri/src/launch.rs` discards the result of `foreground_window` and reports “foregrounded” even when Windows refuses the request. Native Store-app existing-window detection is also incomplete: `window_aumid` in the Windows adapter returns `None`, so `app_windows` cannot identify an existing Store window by AUMID. Honest foreground outcomes and the general already-open guarantee remain obligations, not reasons to endorse those gaps.
 
 The capped queue, single-flight guard, live-assignment slot lifetime, no-window timeout, failure continuation, and desktop-move notes remain implemented. Internal refactoring must preserve those behaviors while treating the identified gaps as separate behavioral work.
+
+## Amendment — 2026-09-09 (matching batch scope, spec 166)
+
+Accepted design, implementation pending in 169: when main Quick Launch is filtered by text search or Dock visibility, Start matching (N) submits exactly those matching saved entries through the existing capped batch queue. Zero matches cannot launch; collapsed groups and scrolling do not change the matching set. Without a filter the existing full-list batch applies. Dock, individual-launch and startup behavior are unchanged.
+
+This extends batch input selection, not execution ownership. An explicit empty or stale selection must not fall back to all entries. Selected records are resolved against saved entries and keep saved order; filtered batches retain batch skip behavior rather than using repeated individual foregrounding calls. Earlier source audits describe the prior full-list main Start implementation, not delivery of this accepted selection behavior.
+

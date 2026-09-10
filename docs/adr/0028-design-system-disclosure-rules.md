@@ -1,6 +1,6 @@
 # One design system and disclosure rules govern every screen
 
-> Latest status: amended 2026-09-08 for selective field guidance and dock visibility discovery; implementation pending in spec 166. See the final amendment; earlier text is preserved.
+> Latest status: amended 2026-09-09 for selective field guidance, dock visibility discovery and filter/action scope; implementation pending in 167-169 under spec 166. See the final amendments; earlier text is preserved.
 
 > Status: amended 2026-09-05 — original decision text preserved; see the executable-source audit amendment for current behavior and implementation gaps.
 
@@ -24,3 +24,9 @@ The application-version rule is implemented: `src-tauri/Cargo.toml` owns the app
 Accepted design, implementation pending in spec 166. Apply helper text selectively across all Sprout-authored fields: remove repeated keyboard tutorials and label restatements; retain concise constraints, defaults, validation, and consequential behavior. Improve unclear labels before adding explanations. Preserve the existing dialog submission grammar. Research 0010's per-textarea permanent-hint requirement is superseded; source inventory and proposed field dispositions live in research 0017.
 
 Dock-hidden Launch entries, Quick Actions and Clips gain an informational eye-off annotation meaning Hidden from dock. The main-app toolbar gains a progressively disclosed Dock visibility filter with All / Shown in dock / Hidden from dock choices. Options wait behind an explicit trigger beside search; active filtering remains visible and resettable. This is a list filter, not a feature-enable switch or a hidden-state mutation. Filter lifetime and Start-all/reorder consequences remain open in spec 166. Existing shared components and design tokens remain required.
+
+## Amendment — 2026-09-09 (accepted filter lifetime and action scope)
+
+The second design round is accepted in 166, implemented by 168/169. Dock visibility choices are page-local, reset to All on page exit, and appear behind a clear trigger only if the full collection has hidden items or a non-All choice is active. An active filter and reset remain available with zero results; text search does not erase their discoverability. Search and visibility intersect. Reordering is unavailable while either filter is active; clear filters to reorder. Main Quick Launch uses Start matching (N) for the matching set, including collapsed groups, and disables it for zero matches. These settle the questions left open in the previous amendment; implementation remains pending.
+
+Field cleanup in 167 also covers AI authoring fields added since the first audit: preserve the AI request/context Ctrl+Enter-to-generate ownership while removing its repeated keyboard teaching. The ordinary dialog submit grammar remains unchanged. The latest coverage addendum is research 0017.

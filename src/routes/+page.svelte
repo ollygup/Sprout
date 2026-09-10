@@ -25,6 +25,15 @@
     createCollectionGroups,
     groupView,
   } from "$lib/collectionGroups.svelte";
+  import {
+    isDockVisible,
+    isFilterActive,
+    isReorderBlocked,
+    matchesDockVisibility,
+    normalizeQuery,
+    shouldShowDockFilter,
+    type DockVisibility,
+  } from "$lib/dockVisibility";
   import { launchReportSummary } from "$lib/format";
   import { appIcons, lazyIcon } from "$lib/lazyIcon.svelte";
   import { listen } from "@tauri-apps/api/event";
@@ -42,6 +51,7 @@
     type ContextMenuItem,
     type ContextMenuState,
   } from "$lib/components/ContextMenu.svelte";
+  import DockVisibilityFilter from "$lib/components/DockVisibilityFilter.svelte";
   import EmptyState from "$lib/components/EmptyState.svelte";
   import Notice from "$lib/components/Notice.svelte";
   import PageFeaturesButton from "$lib/components/PageFeaturesButton.svelte";
@@ -65,6 +75,12 @@
   // narrows the rack client-side; the installed-app search lives in the Add
   // panel below.
   let filter = $state("");
+
+  // The dock visibility choice (ADR-0028): page-local, default All. Plain
+  // component state, so leaving the page resets it and nothing persists it
+  // to Settings, backup, or browser storage. Typing, refreshes, and edits
+  // leave it alone.
+  let dockVisibility = $state<DockVisibility>("all");
 
   // Add panel (ticket 46): one "Add" button reveals the inline panel with the
   // installed-app search plus pick-a-file and add-command. The candidate
@@ -222,7 +238,14 @@
     launching = true;
     error = "";
     try {
-      await startQuickLaunch();
+      // Start matching reads the one matching collection at activation time:
+      // a filtered view starts exactly its matches in saved order, while the
+      // unfiltered view keeps the full-list call with no selection.
+      if (isFiltering) {
+        await startQuickLaunch(matchingEntries.map((entry) => entry.id));
+      } else {
+        await startQuickLaunch();
+      }
     } catch (e) {
       console.error(e);
       error = String(e);
@@ -375,15 +398,41 @@
   }
 
   // ------------------- added-entries filter (ticket 46) ------------------
+  // Text search AND dock visibility intersect (ADR-0028): the one matching
+  // collection below drives display, the Start-matching count, and the
+  // Start-matching ids — no second predicate anywhere.
 
-  function matchesEntry(e: LaunchEntry): boolean {
-    const q = filter.trim().toLowerCase();
+  function matchesText(e: LaunchEntry): boolean {
+    const q = normalizeQuery(filter);
+    if (q === "") return true;
     return (
       e.name.toLowerCase().includes(q) || e.target.toLowerCase().includes(q)
     );
   }
 
-  const matchedCount = $derived(entries.filter(matchesEntry).length);
+  function matchesBoth(e: LaunchEntry): boolean {
+    return matchesText(e) && matchesDockVisibility(e, dockVisibility);
+  }
+
+  /** Either filter narrows the list — the Start-matching label, the forced
+   *  section opening, and the reorder gate all read this one flag. */
+  const isFiltering = $derived(isFilterActive(filter, dockVisibility));
+
+  const matchingEntries = $derived(entries.filter(matchesBoth));
+  const matchedCount = $derived(matchingEntries.length);
+
+  /** Content gate from the full collection: a query never hides the trigger. */
+  const showDockFilter = $derived(
+    shouldShowDockFilter(entries, dockVisibility)
+  );
+
+  const reorderBlocked = $derived(isReorderBlocked(filter, dockVisibility));
+
+  /** Restores ordinary ordering controls after the reorder pause. */
+  function clearFilters() {
+    filter = "";
+    dockVisibility = "all";
+  }
 
   // ------------------- desktop assignments (tickets 44 & 88) -------------
 
@@ -417,7 +466,7 @@
   function sectionOpen(groupId: number): boolean {
     // While filtering, every section opens so no match hides behind a
     // chevron.
-    return filter.trim() !== "" || groups.collapse.isOpen(groupId);
+    return isFiltering || groups.collapse.isOpen(groupId);
   }
 
   /** Move up/down reorders within what the user can see: the whole list when
@@ -503,13 +552,15 @@
       {
         label: "Move up",
         icon: "chevron-up",
-        disabled: index <= 0,
+        // Filtered neighbors are not saved neighbors: refuse to reorder
+        // through them rather than write a surprising order.
+        disabled: index <= 0 || reorderBlocked,
         onselect: () => move(entry.id, entries.indexOf(slice[index - 1])),
       },
       {
         label: "Move down",
         icon: "chevron-down",
-        disabled: index >= slice.length - 1,
+        disabled: index >= slice.length - 1 || reorderBlocked,
         onselect: () => move(entry.id, entries.indexOf(slice[index + 1])),
       },
       { label: "", separator: true, onselect: () => {} },
@@ -543,11 +594,22 @@
       menu = null;
       return;
     }
-    menu = groups.groupMenu(group, anchor, viaKeyboard);
+    const groupMenu = groups.groupMenu(group, anchor, viaKeyboard);
+    // Group order is order too: refuse it under filters like item moves.
+    menu = reorderBlocked
+      ? {
+          ...groupMenu,
+          items: groupMenu.items.map((item) =>
+            item.label === "Move up" || item.label === "Move down"
+              ? { ...item, disabled: true }
+              : item
+          ),
+        }
+      : groupMenu;
   }
 
   const listView = $derived(
-    groupView(groups.groups, entries, matchesEntry, filter.trim() !== "")
+    groupView(groups.groups, entries, matchesBoth, isFiltering)
   );
 
   async function assignDesktop(entry: LaunchEntry, id: string | null) {
@@ -654,6 +716,14 @@
         {desktopName(entry.desktop_id)}
       </span>
     {/if}
+    {#if !isDockVisible(entry)}
+      <!-- The dock-hidden annotation (ADR-0028): informational only — the
+           entry stays fully runnable here; only the dock filters it out. -->
+      <span class="rack__dock" title="Hidden from dock">
+        <Icon name="eye-off" size={12} />
+        <span>Hidden from dock</span>
+      </span>
+    {/if}
     <span class="rack__target" title={entry.target}>{entry.target}</span>
     {#if startingEntries.has(entry.id)}
       <!-- Ticket 94: the run is in flight until the backend's
@@ -691,10 +761,17 @@
     {#snippet actions()}
       <Button
         onclick={start}
-        disabled={busy || startInFlight || entries.length === 0}
+        disabled={busy ||
+          startInFlight ||
+          entries.length === 0 ||
+          (isFiltering && matchedCount === 0)}
       >
         <Icon name="play" size={15} />
-        {launching ? "Starting…" : "Start"}
+        {launching
+          ? "Starting…"
+          : isFiltering
+            ? `Start matching (${matchedCount})`
+            : "Start"}
       </Button>
       <Button
         variant="secondary"
@@ -708,7 +785,7 @@
     {/snippet}
     {#snippet subtitle()}
       {matchedCount} {matchedCount === 1 ? "entry" : "entries"}
-      {filter.trim()
+      {isFiltering
         ? matchedCount === 1
           ? " matches your filter."
           : " match your filter."
@@ -716,12 +793,20 @@
       The tray's left-click opens Quick Launch — one click starts them together.
     {/snippet}
     {#snippet toolbar()}
-      <SearchInput
-        value={filter}
-        placeholder="Filter Quick Launch…"
-        ariaLabel="Filter Quick Launch"
-        onchange={(v) => (filter = v)}
-      />
+      <div class="toolbar">
+        <SearchInput
+          value={filter}
+          placeholder="Filter Quick Launch…"
+          ariaLabel="Filter Quick Launch"
+          onchange={(v) => (filter = v)}
+        />
+        {#if showDockFilter}
+          <DockVisibilityFilter
+            value={dockVisibility}
+            onchange={(v) => (dockVisibility = v)}
+          />
+        {/if}
+      </div>
     {/snippet}
     {#snippet features()}
       <PageFeaturesButton label="Quick Launch features" items={featureItems} />
@@ -733,6 +818,20 @@
   {/if}
   {#if notice}
     <Notice tone="ok">{notice}</Notice>
+  {/if}
+
+  {#if reorderBlocked && entries.length > 0}
+    <p class="reorder-note">
+      Reordering is paused while filters are active.
+      <button
+        type="button"
+        class="reorder-note__clear"
+        onclick={clearFilters}
+      >
+        Clear filters
+      </button>
+      to reorder.
+    </p>
   {/if}
 
   {#if addOpen}
@@ -786,8 +885,7 @@
             </p>
           {:else}
             <p class="hits__hint">
-              {matches.length} {matches.length === 1 ? "match" : "matches"} — pick one
-              to add.
+              {matches.length} {matches.length === 1 ? "match" : "matches"}.
             </p>
             <ul class="hits__list">
               {#each matches as candidate (candidate.target)}
@@ -849,12 +947,30 @@
         Quick Launch — one click starts them together.
       </p>
     </EmptyState>
-  {:else if matchedCount === 0}
+  {:else if matchedCount === 0 && filter.trim() !== ""}
     <EmptyState title={`Nothing matches “${filter.trim()}”`}>
       <p>Try a different name, or clear the filter to see every entry.</p>
       <div class="empty-cta">
         <Button variant="secondary" onclick={() => (filter = "")}>
           Clear filter
+        </Button>
+        {#if dockVisibility !== "all"}
+          <Button variant="secondary" onclick={() => (dockVisibility = "all")}>
+            Show all
+          </Button>
+        {/if}
+      </div>
+    </EmptyState>
+  {:else if matchedCount === 0}
+    <EmptyState title="No entries match this filter.">
+      {#if dockVisibility === "hidden"}
+        <p>No entries are hidden from the dock right now.</p>
+      {:else}
+        <p>Every entry is hidden from the dock.</p>
+      {/if}
+      <div class="empty-cta">
+        <Button variant="secondary" onclick={() => (dockVisibility = "all")}>
+          Show all
         </Button>
       </div>
     </EmptyState>
@@ -902,7 +1018,7 @@
     {/each}
   {:else}
     <ul class="rack">
-      {#each entries.filter(matchesEntry) as entry (entry.id)}
+      {#each matchingEntries as entry (entry.id)}
         {@render entryRow(entry)}
       {/each}
     </ul>
@@ -967,6 +1083,43 @@
     margin: 0 auto;
   }
 
+  /* The toolbar lane: search plus the dock filter, wrapping on narrow
+     main-window widths instead of squeezing. */
+  .toolbar {
+    display: flex;
+    flex: 1;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  /* Why filtering pauses reordering, with the way back inline. */
+  .reorder-note {
+    margin: 0 0 var(--space-4);
+    font-size: var(--text-sm);
+    color: var(--text-muted);
+  }
+
+  .reorder-note__clear {
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: var(--accent);
+    font: inherit;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    cursor: pointer;
+  }
+
+  .reorder-note__clear:hover {
+    color: var(--accent-hover);
+  }
+
+  .reorder-note__clear:focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+
   .sifting {
     font-family: var(--font-mono);
     font-size: var(--text-sm);
@@ -975,6 +1128,9 @@
   }
 
   .empty-cta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
     margin-top: var(--space-4);
   }
 
@@ -1231,6 +1387,27 @@
     white-space: nowrap;
     font-family: var(--font-mono);
     font-size: var(--text-xs);
+    color: var(--text-muted);
+  }
+
+  /* The dock-hidden annotation: a quiet muted pill in the same language as
+     the desktop badge — informational only, never dimmed or disabled. */
+  .rack__dock {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+    max-width: 220px;
+    overflow: hidden;
+    white-space: nowrap;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    letter-spacing: var(--tracking-mono);
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
     color: var(--text-muted);
   }
 

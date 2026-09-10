@@ -27,6 +27,12 @@ describe("Companion site manager contract", () => {
     expect(MANAGER_SOURCE).not.toContain("Pane height");
   });
 
+  it("preserves per-site preferences while editing identity fields", () => {
+    expect(MANAGER_SOURCE).toMatch(
+      /next\[editIndex!\] = \{\s*\.\.\.sites\[editIndex!\]!,\s*url: trimmed,\s*name: nameDraft\.trim\(\),\s*ua: uaDraft,/,
+    );
+  });
+
   describe("add-site Enable-now hint (ticket 163)", () => {
     it("offers Enable-now on the add notice through one Notice action slot", () => {
       expect(NOTICE_SOURCE).toContain("action");

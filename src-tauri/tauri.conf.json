@@ -18,6 +18,7 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "resources": ["resources/ai-skills/*", "resources/ai-model-recommendations.json"],
     "category": "DeveloperTool",
     "icon": [
       "icons/32x32.png",

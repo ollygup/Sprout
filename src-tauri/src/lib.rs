@@ -1,5 +1,8 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 
+  mod ai_assist;
+  mod ai_managed;
+  mod ai_discovery;
  mod appbar;
  mod autostart;
  mod backup;
@@ -86,6 +89,7 @@ pub struct AppState {
     /// WebView2 can load without showing its blank startup surface. The main
     /// layout clears this only after its first render is mounted.
     pub main_window_loading: AtomicBool,
+    pub managed_ai: Arc<ai_managed::ManagedAi>,
 }
 
 fn lock<'a>(state: &'a State<'a, AppState>) -> Result<std::sync::MutexGuard<'a, Connection>, String> {
@@ -740,21 +744,37 @@ fn test_launch_command(
     Ok(launch::test_launch_command(shell, &target))
 }
 
-/// Starts the whole Quick Launch list through the capped, queued pipeline
+/// Starts the Quick Launch list through the capped, queued pipeline
 /// (ticket 42) — the launch trigger for both the Quick Launch window's Start
 /// button and the Quick Launch page's Start button (ticket 54). The cap is
 /// read from Settings at click time; the orchestrator runs on a background
 /// thread so the UI never blocks; a second click while one run is in flight
 /// is rejected — never stacked. When the run finishes, the summary lands as
 /// a system notification and a `launch-run-done` event the page listens for.
+///
+/// The optional selection is the main page's Start matching: omitted means
+/// every saved entry (existing full-list behavior, unchanged for the window
+/// and other callers); an explicit subset starts exactly those saved entries
+/// in saved order through the same single batch; an explicit empty set or a
+/// stale id is rejected before anything starts — never widened to all.
 #[tauri::command]
-fn start_quick_launch(state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
+fn start_quick_launch(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    ids: Option<Vec<i64>>,
+) -> Result<(), String> {
     let conn = lock(&state)?;
-    let entries = launch::list_launch_entries(&conn).map_err(|e| e.to_string())?;
+    let saved = launch::list_launch_entries(&conn).map_err(|e| e.to_string())?;
     drop(conn);
-    if entries.is_empty() {
-        return Err("Quick Launch list is empty — add entries first.".into());
-    }
+    let entries = match ids {
+        None => {
+            if saved.is_empty() {
+                return Err("Quick Launch list is empty — add entries first.".into());
+            }
+            saved
+        }
+        Some(ids) => launch::resolve_launch_selection(&saved, &ids)?,
+    };
     launch_entries(&app, &state, entries)
 }
 
@@ -1574,12 +1594,12 @@ fn run_quick_action(app: AppHandle, state: State<'_, AppState>, id: i64) -> Resu
     start_tracked_run(&app, &state, &action)
 }
 
-/// Starts one stored action's tracked run: hidden PowerShell, working
-/// directory honored, current user, no elevation — the one path behind both
-/// the Run command and the once-per-start auto-run, so a flagged action at
-/// boot behaves exactly as if Run were clicked (same logs, same registry,
-/// same run-state events). A stoppable action that is already running is
-/// rejected — stop it first.
+/// Starts one stored action's tracked run: hidden under its selected shell
+/// (ADR-0017), working directory honored, current user, no elevation — the
+/// one path behind both the Run command and the once-per-start auto-run, so
+/// a flagged action at boot behaves exactly as if Run were clicked (same
+/// logs, same registry, same run-state events). A stoppable action that is
+/// already running is rejected — stop it first.
 fn start_tracked_run(
     app: &AppHandle,
     state: &AppState,
@@ -1664,16 +1684,16 @@ fn start_tracked_run(
     Ok(())
 }
 
-/// Stops a running Quick Action (ticket 62): runs the action's own stop
-/// command when it has one (same hidden PowerShell spawn path, the action's
+/// Stops a running Quick Action: runs the action's own stop command when it
+/// has one (same hidden shell spawn path as the run, ADR-0029, the action's
 /// working directory honored), otherwise kills the tracked process tree
 /// (`taskkill /T /F`). The registry entry is removed here; the reaper notices
 /// the death and emits the not-running event. A configured stop command is
-/// watched (ticket 92): when it has not finished the process inside
+/// watched: when it has not finished the process inside
 /// `quick_actions::STOP_WATCHDOG`, the tree is force-killed so a hung stop
 /// can never wedge the control. Both the stop line and — when a stop command
-/// ran — its output land in the run's `output.log` (ticket 64). Stopping an
-/// action that is not running is a clear error, never a silent success.
+/// ran — its output land in the run's `output.log`. Stopping an action that
+/// is not running is a clear error, never a silent success.
 #[tauri::command]
 fn stop_quick_action(state: State<'_, AppState>, id: i64) -> Result<(), String> {
     let tracked = state
@@ -1702,6 +1722,7 @@ fn stop_quick_action(state: State<'_, AppState>, id: i64) -> Result<(), String> 
                 .as_ref()
                 .and_then(|p| quick_actions::open_run_log(p));
             quick_actions::spawn_stop_command(
+                action.action.shell,
                 &stop_command,
                 action.action.cwd.as_deref(),
                 log_file.as_ref(),
@@ -1736,18 +1757,238 @@ fn list_running_quick_actions(state: State<'_, AppState>) -> Result<Vec<i64>, St
     Ok(registry.keys().copied().collect())
 }
 
-/// One Test click in the Quick Actions editor (ticket 50, prior art: the
-/// Launch entry Test button, ticket 41): runs the command under PowerShell,
-/// timeboxed, and reports exit code + captured output. A command that
-/// outlives the box comes back timed out — honestly not headless-verifiable,
-/// never passed.
+/// One Test click in the Quick Actions editor: runs the command under its
+/// selected shell, timeboxed, and reports exit code + captured output. A
+/// command that outlives the box comes back timed out — honestly not
+/// headless-verifiable, never passed.
 #[tauri::command]
-fn test_quick_action(command: String, cwd: Option<String>) -> Result<launch::TestResult, String> {
+fn test_quick_action(
+    shell: quick_actions::QuickActionShell,
+    command: String,
+    cwd: Option<String>,
+) -> Result<launch::TestResult, String> {
     if command.trim().is_empty() {
         return Err("The command is empty — nothing to test.".into());
     }
     quick_actions::validate_cwd(cwd.as_deref())?;
-    Ok(quick_actions::test_quick_action(&command, cwd.as_deref()))
+    Ok(quick_actions::test_quick_action(shell, &command, cwd.as_deref()))
+}
+
+/// The verdict of rechecking a candidate accepted through AI assistance:
+/// the same output checks, no provider, no persistence, no execution.
+#[derive(serde::Serialize)]
+pub struct AiCheckVerdict {
+    pub verdict: String,
+    pub message: Option<String>,
+}
+
+/// Requests one AI Script draft through the single configured route
+/// (ADR-0031). Refusals, clarifications, and provider failures arrive as
+/// data — the dialog renders each — so only a broken
+/// setup or missing bundle is a command error.
+#[tauri::command]
+async fn ai_generate_draft(
+    state: State<'_, AppState>,
+    request: String,
+    shell: quick_actions::QuickActionShell,
+    context: Option<String>,
+    request_id: Option<String>,
+) -> Result<ai_assist::DraftOutcome, String> {
+    let (provider, base_url, model) = {
+        let conn = lock(&state)?;
+        let settings = settings::load(&conn);
+        (settings.ai_provider, settings.ai_base_url, settings.ai_model)
+    };
+    let route = ai_assist::resolve_route(&provider, &base_url, &model)?;
+    let skills = ai_assist::load_skills()?;
+    let managed_ai = Arc::clone(&state.managed_ai);
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(match route.provider {
+            ai_assist::AiProvider::Off => ai_assist::DraftOutcome::Failed {
+                message: "AI assistance is off — set it up in Settings → AI assistance. The manual editor works regardless.".into(),
+            },
+            ai_assist::AiProvider::Managed => {
+                let request_id = request_id
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| "Managed generation needs a request id for cancellation.".to_string())?;
+                let provider = managed_ai.begin_request(request_id, &route.model)?;
+                ai_assist::request_draft(
+                    &provider,
+                    &skills,
+                    &ai_assist::DraftInput {
+                        shell,
+                        request,
+                        context,
+                        model: route.model,
+                        grants: ai_assist::RequestGrants::none(),
+                    },
+                )
+            }
+            ai_assist::AiProvider::Cloud => ai_assist::DraftOutcome::Failed {
+                message: "Cloud providers are not in this build yet — switch to your existing local service or turn AI off. Nothing was sent anywhere.".into(),
+            },
+            ai_assist::AiProvider::ExistingLocal => {
+                let client = ai_assist::ExistingLocalClient {
+                    root: route.root,
+                    timeout: ai_assist::GENERATION_TIMEOUT,
+                };
+                ai_assist::request_draft(
+                    &client,
+                    &skills,
+                    &ai_assist::DraftInput {
+                        shell,
+                        request,
+                        context,
+                        model: route.model,
+                        grants: ai_assist::RequestGrants::none(),
+                    },
+                )
+            }
+        })
+    })
+    .await
+    .map_err(|error| format!("AI generation worker failed: {error}"))?
+}
+
+/// The explicit Test-connection command behind Settings: classifies the
+/// endpoint and checks the named model against what the service exposes.
+/// Configuration-only — it saves nothing.
+#[tauri::command]
+fn ai_check_existing_local(base_url: String, model: String) -> Result<Vec<String>, String> {
+    ai_assist::check_existing_local(&base_url, &model).map_err(|e| e.message())
+}
+
+#[tauri::command]
+fn ai_managed_status(state: State<'_, AppState>) -> Result<ai_managed::ManagedCatalogView, String> {
+    state.managed_ai.catalog_status()
+}
+
+#[tauri::command]
+async fn ai_install_managed(
+    state: State<'_, AppState>,
+    model_id: String,
+) -> Result<ai_managed::ManagedInstallResult, String> {
+    let managed_ai = Arc::clone(&state.managed_ai);
+    tauri::async_runtime::spawn_blocking(move || managed_ai.install(&model_id))
+        .await
+        .map_err(|error| format!("Managed installation worker failed: {error}"))?
+}
+
+#[tauri::command]
+fn ai_cancel_managed_install(state: State<'_, AppState>) -> bool {
+    state.managed_ai.cancel_install()
+}
+
+#[tauri::command]
+fn ai_cancel_draft(state: State<'_, AppState>, request_id: String) -> bool {
+    state.managed_ai.cancel_request(&request_id)
+}
+
+/// Rechecks a candidate accepted through AI assistance: the same output
+/// checks, no provider, no persistence, no execution.
+#[tauri::command]
+fn ai_check_candidate(
+    shell: quick_actions::QuickActionShell,
+    command: String,
+) -> Result<AiCheckVerdict, String> {
+    Ok(match ai_assist::recheck_candidate(shell, &command) {
+        ai_assist::OutputVerdict::Allow => AiCheckVerdict {
+            verdict: "allow".into(),
+            message: None,
+        },
+        ai_assist::OutputVerdict::Refuse { reason } => AiCheckVerdict {
+            verdict: "refuse".into(),
+            message: Some(reason),
+        },
+        ai_assist::OutputVerdict::Clarify { message } => AiCheckVerdict {
+            verdict: "clarify".into(),
+            message: Some(message),
+        },
+    })
+}
+
+/// Lists the folders the user approved for local target discovery
+/// (ADR-0031): names/paths only — never contents, never disclosure.
+#[tauri::command]
+fn ai_list_approved_roots(state: State<'_, AppState>) -> Result<Vec<ai_discovery::ApprovedRoot>, String> {
+    let conn = lock(&state)?;
+    ai_discovery::list_roots(&conn)
+}
+
+/// Approves one folder for local target discovery (ADR-0031). The folder
+/// must exist; it is stored canonicalized. Approving names/paths never
+/// approves reading contents or disclosing results.
+#[tauri::command]
+fn ai_approve_root(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<ai_discovery::ApprovedRoot, String> {
+    let conn = lock(&state)?;
+    ai_discovery::approve_root(&conn, &path)
+}
+
+/// Forgets one approved discovery folder. Later binds of its targets fail
+/// honestly instead of resolving into unapproved scope.
+#[tauri::command]
+fn ai_revoke_root(state: State<'_, AppState>, path: String) -> Result<bool, String> {
+    let conn = lock(&state)?;
+    ai_discovery::revoke_root(&conn, &path)
+}
+
+/// Runs one explicit find request over installed-app metadata and approved
+/// folders (ADR-0031): bounded, read-only, no execution. The roots snapshot
+/// under the lock; the registry and filesystem walk runs on the blocking
+/// pool so it never touches the UI thread.
+#[tauri::command]
+async fn ai_find_targets(
+    state: State<'_, AppState>,
+    query: String,
+    scope: String,
+) -> Result<ai_discovery::FindOutcome, String> {
+    let roots: Vec<String> = {
+        let conn = lock(&state)?;
+        ai_discovery::list_roots(&conn)?.into_iter().map(|root| root.path).collect()
+    };
+    tauri::async_runtime::spawn_blocking(move || ai_discovery::find_with_roots(&roots, &query, &scope))
+        .await
+        .map_err(|e| format!("local search failed: {e}"))?
+}
+
+/// Reads one file match's bounded preview (ADR-0031): a separate explicit
+/// request, never part of finding. The preview stays untrusted input.
+#[tauri::command]
+fn ai_read_target_file(state: State<'_, AppState>, ref_id: String) -> Result<ai_discovery::FileContent, String> {
+    let conn = lock(&state)?;
+    ai_discovery::read_target_file(&conn, &ref_id)
+}
+
+/// Binds one validated reference to a shell-quoted command (ADR-0031).
+/// Trusted local code revalidates the reference and quotes the path; the
+/// result is reviewable text, never an execution.
+#[tauri::command]
+fn ai_bind_target(
+    state: State<'_, AppState>,
+    ref_id: String,
+    shell: quick_actions::QuickActionShell,
+) -> Result<ai_discovery::BoundCommand, String> {
+    let conn = lock(&state)?;
+    ai_discovery::bind_target(&conn, &ref_id, shell)
+}
+
+/// Records that the user approved disclosing raw fields of one reference to
+/// a provider (ADR-0031). Discovery never implies this; the grant dies with
+/// its find request.
+#[tauri::command]
+fn ai_approve_disclosure(ref_id: String, fields: Vec<String>) -> Result<ai_discovery::DisclosureGrant, String> {
+    ai_discovery::approve_disclosure(&ref_id, &fields)
+}
+
+/// The raw-field approvals recorded against one find request: what a later
+/// cloud path may upload, and nothing more.
+#[tauri::command]
+fn ai_disclosure_grants(session_id: u64) -> Result<Vec<ai_discovery::DisclosureGrant>, String> {
+    ai_discovery::disclosure_grants(session_id)
 }
 
 /// The Quick Launch window's × button (tickets 52, 53 & 56): destroys the
@@ -2394,6 +2635,8 @@ pub fn run() {
     // Lazy init: %LOCALAPPDATA%\Sprout\sprout.db + logs\ are created here on
     // first launch (ADR-0006) — nothing exists on disk before this point.
     let conn = db::init().expect("failed to initialize Sprout data directory");
+    let managed_ai = Arc::new(ai_managed::ManagedAi::new(db::data_dir().join("ai-managed")));
+    ai_managed::ManagedAi::start_idle_guard(&managed_ai);
     // Retention is honored at app start, not only after a run completes
     // (ticket 09): expired run log folders are pruned on every launch.
     let _ = logs::prune_run_logs(&conn);
@@ -2600,6 +2843,7 @@ pub fn run() {
             main_close_time: Mutex::new(None),
             main_window_opening: AtomicBool::new(false),
             main_window_loading: AtomicBool::new(false),
+            managed_ai,
         })
         .invoke_handler(tauri::generate_handler![
             list_products,
@@ -2660,6 +2904,21 @@ pub fn run() {
             stop_quick_action,
             list_running_quick_actions,
             test_quick_action,
+            ai_generate_draft,
+            ai_check_existing_local,
+            ai_managed_status,
+            ai_install_managed,
+            ai_cancel_managed_install,
+            ai_cancel_draft,
+            ai_check_candidate,
+            ai_list_approved_roots,
+            ai_approve_root,
+            ai_revoke_root,
+            ai_find_targets,
+            ai_read_target_file,
+            ai_bind_target,
+            ai_approve_disclosure,
+            ai_disclosure_grants,
             list_clips,
             create_clip,
             update_clip,
@@ -2726,6 +2985,9 @@ pub fn run() {
                 // Ticket 53: the docked AppBar is unregistered on quit so the
                 // screen edge is never left occupied after the process dies.
                 tauri::RunEvent::Exit => {
+                    if let Some(state) = app.try_state::<AppState>() {
+                        state.managed_ai.shutdown();
+                    }
                     let _ = quick_window::release_dock(app);
                 }
                 _ => {}

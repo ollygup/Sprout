@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import type { Group, QuickAction } from "$lib/types";
   import {
+    aiManagedStatus,
     deleteQuickAction,
     exportQuickAction,
     getSettings,
@@ -15,6 +16,15 @@
     createCollectionGroups,
     groupView,
   } from "$lib/collectionGroups.svelte";
+  import {
+    isDockVisible,
+    isFilterActive,
+    isReorderBlocked,
+    matchesDockVisibility,
+    normalizeQuery,
+    shouldShowDockFilter,
+    type DockVisibility,
+  } from "$lib/dockVisibility";
   import {
     quickActionRuns,
     stopActionRun,
@@ -33,6 +43,7 @@
     type ContextMenuItem,
     type ContextMenuState,
   } from "$lib/components/ContextMenu.svelte";
+  import DockVisibilityFilter from "$lib/components/DockVisibilityFilter.svelte";
   import { save as saveDialog } from "@tauri-apps/plugin-dialog";
   import EmptyState from "$lib/components/EmptyState.svelte";
   import Notice from "$lib/components/Notice.svelte";
@@ -53,6 +64,12 @@
   // It filters across every section, so grouping never hides a match.
   let filter = $state("");
 
+  // The dock visibility choice (ADR-0028): page-local, default All. Plain
+  // component state, so leaving the page resets it and nothing persists it
+  // to Settings, backup, or browser storage. Typing, refreshes, and edits
+  // leave it alone.
+  let dockVisibility = $state<DockVisibility>("all");
+
   // The compose dialog (ticket 51): `formAction` null = adding a new action,
   // set = editing that action.
   let formOpen = $state(false);
@@ -60,6 +77,12 @@
   let deleting: QuickAction | null = $state(null);
   // Detail peek — centered dialog matching Product-details grammar (research 0006 pattern 13)
   let details: QuickAction | null = $state(null);
+
+  // Whether the authoring dialog may offer AI drafting: true only while an
+  // existing-local route is configured with a named model (ADR-0031 keeps
+  // assistance off until deliberately configured). Fail-closed — loading or
+  // failed settings read as not ready, so the dialog renders zero AI chrome.
+  let aiReady = $state(false);
 
   // Groups (tickets 89/90): the page-features gear menu is the feature's
   // only switch (research 0008 — ticket 88's bare toolbar checkbox was
@@ -123,6 +146,13 @@
     try {
       const s = await getSettings();
       groups.setEnabledFromSettings(s.action_groups === "on");
+      aiReady = s.ai_provider === "existing-local" && s.ai_model.trim() !== "";
+      if (s.ai_provider === "managed" && s.ai_model.trim() !== "") {
+        const catalog = await aiManagedStatus();
+        aiReady = catalog.models.some(
+          (model) => model.id === s.ai_model.trim() && model.installed,
+        );
+      }
     } catch (e) {
       console.error(e);
     }
@@ -235,8 +265,8 @@
   /** One row's export through the moment-of-use save picker (research 0007):
    *  the file is the unchanged backup envelope with a one-element array, so
    *  it restores through Settings → Backup with honest counts. The notice
-   *  states the payload rule up front: the same command and working directory
-   *  restores as skipped under any name, never duplicated. */
+   *  states the payload rule up front: the same shell, command and working
+   *  directory restores as skipped under any name, never duplicated. */
   async function exportViaDialog(action: QuickAction) {
     const path = await saveDialog({
       title: `Export ${action.name} as backup`,
@@ -247,7 +277,7 @@
     try {
       await exportQuickAction(path, action.id);
       flash(
-        `Exported ${action.name} to ${path}. Restore it through Settings → Backup — it adds the action unless the same command and working directory already exists under any name, in which case it is skipped, not duplicated.`
+        `Exported ${action.name} to ${path}. Restore it through Settings → Backup — it adds the action unless the same shell, command and working directory already exists under any name, in which case it is skipped, not duplicated.`
       );
     } catch (e) {
       console.error(e);
@@ -271,9 +301,9 @@
   const grouped = $derived(groups.grouped);
 
   function sectionOpen(groupId: number): boolean {
-    // While searching, every section opens so no match hides behind a
+    // While filtering, every section opens so no match hides behind a
     // chevron.
-    return filter.trim() !== "" || groups.collapse.isOpen(groupId);
+    return isFiltering || groups.collapse.isOpen(groupId);
   }
 
   /** Move up/down reorders within what the user can see: the whole list when
@@ -330,13 +360,15 @@
       {
         label: "Move up",
         icon: "chevron-up",
-        disabled: index <= 0,
+        // Filtered neighbors are not saved neighbors: refuse to reorder
+        // through them rather than write a surprising order.
+        disabled: index <= 0 || reorderBlocked,
         onselect: () => move(action.id, quickActions.indexOf(slice[index - 1])),
       },
       {
         label: "Move down",
         icon: "chevron-down",
-        disabled: index >= slice.length - 1,
+        disabled: index >= slice.length - 1 || reorderBlocked,
         onselect: () => move(action.id, quickActions.indexOf(slice[index + 1])),
       },
       { label: "", separator: true, onselect: () => {} },
@@ -370,19 +402,55 @@
       menu = null;
       return;
     }
-    menu = groups.groupMenu(group, anchor, viaKeyboard);
+    const groupMenu = groups.groupMenu(group, anchor, viaKeyboard);
+    // Group order is order too: refuse it under filters like action moves.
+    menu = reorderBlocked
+      ? {
+          ...groupMenu,
+          items: groupMenu.items.map((item) =>
+            item.label === "Move up" || item.label === "Move down"
+              ? { ...item, disabled: true }
+              : item
+          ),
+        }
+      : groupMenu;
   }
 
-  function matchesAction(a: QuickAction): boolean {
-    const q = filter.trim().toLowerCase();
+  function matchesText(a: QuickAction): boolean {
+    const q = normalizeQuery(filter);
+    if (q === "") return true;
     return (
       a.name.toLowerCase().includes(q) || a.command.toLowerCase().includes(q)
     );
   }
 
-  const matchedCount = $derived(quickActions.filter(matchesAction).length);
+  // Text search AND dock visibility intersect (ADR-0028): the one matching
+  // collection below drives display — no second predicate anywhere.
+  function matchesBoth(a: QuickAction): boolean {
+    return matchesText(a) && matchesDockVisibility(a, dockVisibility);
+  }
+
+  /** Either filter narrows the list — section opening and the reorder gate
+   *  read this one flag. */
+  const isFiltering = $derived(isFilterActive(filter, dockVisibility));
+
+  const matchingActions = $derived(quickActions.filter(matchesBoth));
+  const matchedCount = $derived(matchingActions.length);
+
+  /** Content gate from the full collection: a query never hides the trigger. */
+  const showDockFilter = $derived(
+    shouldShowDockFilter(quickActions, dockVisibility)
+  );
+
+  const reorderBlocked = $derived(isReorderBlocked(filter, dockVisibility));
+
+  /** Restores ordinary ordering controls after the reorder pause. */
+  function clearFilters() {
+    filter = "";
+    dockVisibility = "all";
+  }
   const listView = $derived(
-    groupView(groups.groups, quickActions, matchesAction, filter.trim() !== "")
+    groupView(groups.groups, quickActions, matchesBoth, isFiltering)
   );
 </script>
 
@@ -416,6 +484,15 @@
     {#if hasNote(action.note)}
       <span class="rack__note" aria-label="Has note" title="Has note">
         <Icon name="note" size={12} />
+      </span>
+    {/if}
+    <span class="rack__shell" title={`Runs under ${action.shell === "cmd" ? "cmd" : "PowerShell"}`}>{action.shell === "cmd" ? "cmd" : "PowerShell"}</span>
+    {#if !isDockVisible(action)}
+      <!-- The dock-hidden annotation (ADR-0028): informational only — the
+           action stays fully runnable here; only the dock filters it out. -->
+      <span class="rack__dock" title="Hidden from dock">
+        <Icon name="eye-off" size={12} />
+        <span>Hidden from dock</span>
       </span>
     {/if}
     <span class="rack__command" title={action.command}>
@@ -467,12 +544,20 @@
       the current user.
     {/snippet}
     {#snippet toolbar()}
-      <SearchInput
-        value={filter}
-        placeholder="Search name or command…"
-        ariaLabel="Search quick actions"
-        onchange={(v) => (filter = v)}
-      />
+      <div class="toolbar">
+        <SearchInput
+          value={filter}
+          placeholder="Search name or command…"
+          ariaLabel="Search quick actions"
+          onchange={(v) => (filter = v)}
+        />
+        {#if showDockFilter}
+          <DockVisibilityFilter
+            value={dockVisibility}
+            onchange={(v) => (dockVisibility = v)}
+          />
+        {/if}
+      </div>
     {/snippet}
     {#snippet features()}
       <PageFeaturesButton label="Quick Actions features" items={featureItems} />
@@ -486,6 +571,20 @@
     <Notice tone="ok">{notice}</Notice>
   {/if}
 
+  {#if reorderBlocked && quickActions.length > 0}
+    <p class="reorder-note">
+      Reordering is paused while filters are active.
+      <button
+        type="button"
+        class="reorder-note__clear"
+        onclick={clearFilters}
+      >
+        Clear filters
+      </button>
+      to reorder.
+    </p>
+  {/if}
+
   {#if loading && quickActions.length === 0}
     <p class="sifting" aria-live="polite">Loading…</p>
   {:else if loadFailed}
@@ -493,14 +592,34 @@
   {:else if quickActions.length === 0}
     <EmptyState icon="terminal" title="No quick actions yet">
       <p>
-        Press <strong>Add</strong> to write a named PowerShell command with an
-        optional working directory. Run each action right here or from the
-        Quick Launch window — hidden, as the current user, with no status UI.
+        Press <strong>Add</strong> to write a named PowerShell or cmd command
+        with an optional working directory. Run each action right here or from
+        the Quick Launch window — hidden, as the current user, with no status UI.
       </p>
     </EmptyState>
-  {:else if matchedCount === 0}
+  {:else if matchedCount === 0 && filter.trim() !== ""}
     <EmptyState icon="search" title={`Nothing matches “${filter.trim()}”`}>
       <p>Search looks at action names and their commands.</p>
+      {#if dockVisibility !== "all"}
+        <div class="empty-cta">
+          <Button variant="secondary" onclick={() => (dockVisibility = "all")}>
+            Show all
+          </Button>
+        </div>
+      {/if}
+    </EmptyState>
+  {:else if matchedCount === 0}
+    <EmptyState icon="search" title="No actions match this filter.">
+      {#if dockVisibility === "hidden"}
+        <p>No actions are hidden from the dock right now.</p>
+      {:else}
+        <p>Every action is hidden from the dock.</p>
+      {/if}
+      <div class="empty-cta">
+        <Button variant="secondary" onclick={() => (dockVisibility = "all")}>
+          Show all
+        </Button>
+      </div>
     </EmptyState>
   {:else if grouped}
     {#if listView.ungrouped.length > 0}
@@ -546,7 +665,7 @@
     {/each}
   {:else}
     <ul class="rack">
-      {#each quickActions.filter(matchesAction) as action (action.id)}
+      {#each matchingActions as action (action.id)}
         {@render actionRow(action)}
       {/each}
     </ul>
@@ -598,6 +717,7 @@
   action={formAction}
   groups={groups.groups}
   groupsEnabled={groups.enabled}
+  aiReady={aiReady}
   onsave={async (message) => {
     formOpen = false;
     flash(message);
@@ -623,6 +743,50 @@
   .qa {
     max-width: 1080px;
     margin: 0 auto;
+  }
+
+  /* The toolbar lane: search plus the dock filter, wrapping on narrow
+     main-window widths instead of squeezing. */
+  .toolbar {
+    display: flex;
+    flex: 1;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  /* Why filtering pauses reordering, with the way back inline. */
+  .reorder-note {
+    margin: 0 0 var(--space-4);
+    font-size: var(--text-sm);
+    color: var(--text-muted);
+  }
+
+  .reorder-note__clear {
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: var(--accent);
+    font: inherit;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    cursor: pointer;
+  }
+
+  .reorder-note__clear:hover {
+    color: var(--accent-hover);
+  }
+
+  .reorder-note__clear:focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+
+  .empty-cta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    margin-top: var(--space-4);
   }
 
   .sifting {
@@ -704,6 +868,40 @@
     white-space: nowrap;
     font-family: var(--font-mono);
     font-size: var(--text-xs);
+    color: var(--text-muted);
+  }
+
+  /* The dock-hidden annotation: a quiet muted pill in the same language as
+     the shell badge — informational only, never dimmed or disabled. */
+  .rack__dock {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+    max-width: 220px;
+    overflow: hidden;
+    white-space: nowrap;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    letter-spacing: var(--tracking-mono);
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+  }
+
+  .rack__shell {
+    flex-shrink: 0;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    letter-spacing: var(--tracking-mono);
+    text-transform: uppercase;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
     color: var(--text-muted);
   }
 

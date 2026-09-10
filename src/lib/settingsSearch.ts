@@ -5,13 +5,14 @@
 /// adding navigation depth. Entries are data — a future knob joins by adding
 /// one entry here, never by special-casing the matcher.
 
-export type SettingsGroupKey = "general" | "dock" | "companion" | "backup";
+export type SettingsGroupKey = "general" | "dock" | "companion" | "backup" | "ai";
 
 export const SETTINGS_GROUPS: { key: SettingsGroupKey; label: string }[] = [
   { key: "general", label: "General" },
   { key: "dock", label: "Dock" },
   { key: "companion", label: "Companion" },
   { key: "backup", label: "Backup & housekeeping" },
+  { key: "ai", label: "AI assistance" },
 ];
 
 /// Knob ids per group, backing the section count badges and the resolver.
@@ -20,6 +21,7 @@ export const SETTINGS_GROUP_KNOBS: Record<SettingsGroupKey, string[]> = {
   dock: ["dock-state", "dock-mode", "dock-edge", "dock-width", "dock-density", "per-monitor", "reveal-dwell", "reveal-sensitivity"],
   companion: ["companion-active", "companion-height", "companion-sites"],
   backup: ["backup", "updates"],
+  ai: ["ai-provider", "ai-endpoint", "ai-model"],
 };
 
 export interface SettingsSearchEntry {
@@ -57,6 +59,9 @@ export interface SettingsSearchSnapshot {
   companionSiteNames: string[];
   companionMuted: boolean;
   updateSummary: string;
+  aiProvider: string;
+  aiProviderLabel: string;
+  aiModel: string;
 }
 
 /// Builds the full knob + group index for one snapshot of current values.
@@ -247,6 +252,38 @@ export function buildSettingsSearchIndex(snap: SettingsSearchSnapshot): Settings
       synonyms: ["update", "upgrade", "version", "release", "github", "new build", "install"],
       values: [snap.updateSummary],
       description: "Checks GitHub releases for a newer build.",
+    },
+    {
+      group: "ai",
+      id: "group:ai",
+      label: "AI assistance",
+      synonyms: ["ai", "model", "draft", "generate", "assistant", "llm", "ollama"],
+      values: [],
+      description: "Optional help drafting Quick Action commands. Off until configured.",
+    },
+    {
+      group: "ai",
+      id: "ai-provider",
+      label: "AI provider",
+      synonyms: ["off", "existing local", "managed", "cloud", "service", "setup", "enable"],
+      values: [snap.aiProvider, snap.aiProviderLabel],
+      description: "Off until configured. Existing-local connects to your own loopback service.",
+    },
+    {
+      group: "ai",
+      id: "ai-endpoint",
+      label: "Local service address",
+      synonyms: ["endpoint", "url", "address", "localhost", "port", "connection", "connect"],
+      values: [],
+      description: "Your service's loopback address, for example http://127.0.0.1:11434.",
+    },
+    {
+      group: "ai",
+      id: "ai-model",
+      label: "Local model",
+      synonyms: ["model name", "exposes", "pick"],
+      values: snap.aiModel ? [snap.aiModel] : [],
+      description: "The exact model name your local service exposes. Never substituted.",
     },
   ];
 }

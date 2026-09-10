@@ -54,3 +54,16 @@ Before changing the presentation, reconcile these records so the accepted decisi
 ## Validation still needed
 
 Render the affected dialogs and Settings at supported sizes, inspect keyboard and assistive-technology naming, and confirm that retained constraints are available before submission. Evaluate keyboard-shortcut discoverability separately from whether the shortcut itself should exist. No live UX validation was performed for this note.
+
+## Coverage refresh — 2026-09-09
+
+The shared working tree was rechecked after additional AI-authoring changes. The original table is a dated baseline; add the fields below to ticket 167's required coverage. Source evidence is not a live usability test.
+
+| Surface | Additional fields / controls | Accepted cleanup application |
+| --- | --- | --- |
+| QuickActionFormDialog | Shell; What should it do; Extra context (optional); AI disclosure and draft-review controls | Keep selected-shell semantics and explicit draft review. Remove the newly added permanent Ctrl+Enter-to-generate teaching line. Request and context fields own Ctrl/Cmd+Enter-to-generate and prevent outer dialog submission; preserve that behavior and the visible Generate action. |
+| Settings AI assistance | Provider; conditional Local service address; conditional Local model; Test connection feedback | Preserve loopback-only endpoint constraints, exact model identity, test-does-not-save semantics, connection/error feedback and honest unavailable managed/cloud choices. Shorten duplicate mechanics, not necessary setup or consent information. |
+
+There are now five permanent submit shortcut hints plus one generate shortcut hint. The original five-instance statement remains accurate only for submit hints; it is no longer the complete keyboard-help inventory. Ticket 167 covers all six, preserving different keyboard owners. The user accepted selective cleanup across every Sprout field; recheck the current tree at implementation for further additions.
+
+The policy is accepted in spec 166; concrete copy and rendered accessibility still require implementation verification. ADR-0030/0031/0032's authoring-only, disclosure, provider and distribution boundaries remain unchanged. Fields present in source must be audited even when an earlier ADR/spec header still calls implementation pending.

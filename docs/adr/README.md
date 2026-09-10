@@ -41,16 +41,16 @@ Historical events and operational claims were not inferred from source.
 - 0015 Virtual-desktop assignments activate by use — `accurate`
 - 0016 Groups: isolated namespaces, dissolve, dormant-off — `amended 2026-09-05` (create/assign is not atomic; off hides grouping but lifecycle maintenance continues)
 - 0017 Quick Action execution model — `amended 2026-09-06` (accepted PowerShell/CMD authoring extension; implementation pending; privileges/tracking unchanged)
-- 0018 Launch pipeline: cap+queue, honest outcomes — `amended 2026-09-05` (basename matching; foreground outcome and Store already-open detection gaps)
+- 0018 Launch pipeline: cap+queue, honest outcomes — `amended 2026-09-09` (matching main-app batch scope accepted in 169; earlier execution qualifications retained)
 - 0019 Dock autohide: driver owns motion — `amended 2026-09-05` (driver owns animation, not every geometry write; workspace release is fallible)
 - 0020 Monitor identity + seam eligibility — `amended 2026-09-05` (duplicate native identity probes; opposite-edge migration is not revalidated)
 - 0021 Single size source + dock-width math — `amended 2026-09-05` (Settings duplicates width formula/constants; floor priority and logical/physical units)
-- 0022 Companion: one isolated site, docked only — `amended 2026-09-08` (saved-site selector accepted; implementation pending in spec 166; earlier navigation qualifications retained)
+- 0022 Companion: one isolated site, docked only — `amended 2026-09-09` (saved-site selector and saved-address lifecycle accepted; implementation pending in 170)
 - 0027 App discovery snapshot; winget authoring-only — `amended 2026-09-05` (backend freshness vs retained picker snapshot; dedup, registry fallback, and icon behavior)
 
 ## Frontend system
 
-- 0028 Design system + disclosure rules — `amended 2026-09-08` (selective field guidance and dock-visibility discovery accepted; implementation pending in spec 166)
+- 0028 Design system + disclosure rules — `amended 2026-09-09` (selective field guidance, visibility filter lifetime and action scope accepted; implementation pending in 167–169)
 
 ## AI-assisted Quick Action authoring
 

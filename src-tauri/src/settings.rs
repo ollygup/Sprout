@@ -99,6 +99,11 @@ pub const COMPANION_HEIGHT_RATIO_MAX: f64 = 0.60;
 /// so silence survives restarts and WebView recreations. Default unmuted —
 /// a fresh install never starts silent.
 pub const DEFAULT_COMPANION_MUTED: bool = false;
+/// AI assistance is off until deliberately configured: enabling it alone
+/// never downloads weights or a runtime (ADR-0031).
+pub const DEFAULT_AI_PROVIDER: &str = "off";
+/// The loopback address most local inference services print on startup.
+pub const DEFAULT_AI_BASE_URL: &str = "http://127.0.0.1:11434";
 
 const KEY_TIMEOUT: &str = "settings.timeout_minutes";
 const KEY_RETENTION: &str = "settings.log_retention_days";
@@ -120,6 +125,9 @@ const KEY_COMPANION_URL: &str = "settings.companion_url";
 const KEY_COMPANION_HEIGHT_RATIO: &str = "settings.companion_height_ratio";
 const KEY_COMPANION_URL_LIST: &str = "settings.companion_url_list";
 const KEY_COMPANION_MUTED: &str = "settings.companion_muted";
+const KEY_AI_PROVIDER: &str = "ai.provider";
+const KEY_AI_BASE_URL: &str = "ai.base_url";
+const KEY_AI_MODEL: &str = "ai.model";
 
 /// One Companion saved site: its https URL plus the user's display name for
 /// it. A blank name renders as the URL everywhere — nothing ever renders
@@ -285,6 +293,31 @@ pub struct Settings {
     /// silenced. Applied to the live WebView on every read and on every
     /// WebView creation, so a recreated pane never comes back loud.
     pub companion_muted: bool,
+    /// AI assistance route (ADR-0031): "off" (default), "existing-local"
+    /// (the user's own loopback service), "managed", or "cloud". Managed
+    /// and cloud save as discoverable selections; generation through them
+    /// fails closed until their own slices land.
+    #[serde(default = "default_ai_provider")]
+    pub ai_provider: String,
+    /// The existing-local service root, e.g. http://127.0.0.1:11434.
+    /// Loopback HTTP only in v1; never leaves the machine (ADR-0031).
+    #[serde(default = "default_ai_base_url")]
+    pub ai_base_url: String,
+    /// The exact model name the local service exposes. Sprout never
+    /// substitutes another one.
+    #[serde(default)]
+    pub ai_model: String,
+}
+
+/// Missing AI route reads as off — older saves predate the knobs and must
+/// never wake inference.
+fn default_ai_provider() -> String {
+    DEFAULT_AI_PROVIDER.to_string()
+}
+
+/// Missing service root reads as the loopback default.
+fn default_ai_base_url() -> String {
+    DEFAULT_AI_BASE_URL.to_string()
 }
 
 impl Default for Settings {
@@ -310,6 +343,9 @@ impl Default for Settings {
             companion_height_ratio: DEFAULT_COMPANION_HEIGHT_RATIO,
             companion_url_list: Vec::new(),
             companion_muted: DEFAULT_COMPANION_MUTED,
+            ai_provider: DEFAULT_AI_PROVIDER.to_string(),
+            ai_base_url: DEFAULT_AI_BASE_URL.to_string(),
+            ai_model: String::new(),
         }
     }
 }
@@ -605,6 +641,7 @@ impl Settings {
         validate_companion_url(self.companion_url.as_deref())?;
         validate_companion_height_ratio(self.companion_height_ratio)?;
         validate_companion_url_list(&self.companion_url_list)?;
+        crate::ai_assist::validate_ai_settings(&self.ai_provider, &self.ai_base_url, &self.ai_model)?;
         Ok(())
     }
 }
@@ -657,6 +694,18 @@ pub fn load(conn: &Connection) -> Settings {
     let companion_muted = raw(conn, KEY_COMPANION_MUTED)
         .map(|v| matches!(v.trim(), "1" | "true" | "on"))
         .unwrap_or(DEFAULT_COMPANION_MUTED);
+    // AI assistance (ADR-0031): a broken route reads back as off — an older
+    // or hand-edited save must never wake inference.
+    let ai_provider = raw(conn, KEY_AI_PROVIDER)
+        .filter(|v| crate::ai_assist::AiProvider::parse(v).is_some())
+        .unwrap_or_else(|| DEFAULT_AI_PROVIDER.to_string());
+    let ai_base_url = raw(conn, KEY_AI_BASE_URL)
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| DEFAULT_AI_BASE_URL.to_string());
+    let ai_model = raw(conn, KEY_AI_MODEL)
+        .map(|v| v.trim().to_string())
+        .unwrap_or_default();
 
     Settings {
         default_timeout_minutes: number(conn, KEY_TIMEOUT).unwrap_or(DEFAULT_TIMEOUT_MINUTES),
@@ -699,6 +748,9 @@ pub fn load(conn: &Connection) -> Settings {
         companion_height_ratio,
         companion_url_list,
         companion_muted,
+        ai_provider,
+        ai_base_url,
+        ai_model,
     }
 }
 
@@ -742,6 +794,9 @@ pub fn save(conn: &Connection, settings: &Settings) -> std::result::Result<(), S
     upsert_meta(&tx, KEY_COMPANION_URL_LIST, &list_json).map_err(|e| e.to_string())?;
     upsert_meta(&tx, KEY_COMPANION_MUTED, if settings.companion_muted { "1" } else { "0" })
         .map_err(|e| e.to_string())?;
+    upsert_meta(&tx, KEY_AI_PROVIDER, &settings.ai_provider).map_err(|e| e.to_string())?;
+    upsert_meta(&tx, KEY_AI_BASE_URL, &settings.ai_base_url).map_err(|e| e.to_string())?;
+    upsert_meta(&tx, KEY_AI_MODEL, &settings.ai_model).map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())
 }
 
@@ -906,6 +961,9 @@ mod tests {
                 CompanionSite { url: "https://open.spotify.com".to_string(), name: String::new(), ua: "mobile".to_string(), zoom: None },
             ],
             companion_muted: true,
+            ai_provider: "existing-local".to_string(),
+            ai_base_url: "http://127.0.0.1:11434".to_string(),
+            ai_model: "test-model".to_string(),
         };
         {
             let conn = crate::db::init_at(&dir).unwrap();
@@ -1021,6 +1079,46 @@ mod tests {
         assert_eq!(loaded.launch_groups, DEFAULT_GROUPS_FEATURE);
         assert_eq!(loaded.action_groups, DEFAULT_GROUPS_FEATURE);
         assert_eq!(loaded.clip_groups, DEFAULT_GROUPS_FEATURE);
+    }
+
+    #[test]
+    fn ai_knobs_default_to_off_and_roundtrip() {
+        let conn = conn();
+        let loaded = load(&conn);
+        assert_eq!(loaded.ai_provider, DEFAULT_AI_PROVIDER);
+        assert_eq!(loaded.ai_base_url, DEFAULT_AI_BASE_URL);
+        assert_eq!(loaded.ai_model, "");
+        let mut s = Settings::default();
+        s.ai_provider = "existing-local".to_string();
+        s.ai_model = "qwen".to_string();
+        save(&conn, &s).unwrap();
+        let loaded = load(&conn);
+        assert_eq!(loaded.ai_provider, "existing-local");
+        assert_eq!(loaded.ai_model, "qwen");
+    }
+
+    #[test]
+    fn ai_validation_holds_the_route_contract() {
+        let mut s = Settings::default();
+        s.ai_provider = "nonsense".to_string();
+        assert!(s.validate().is_err());
+        s.ai_provider = "managed".to_string();
+        assert!(s.validate().is_ok());
+        s.ai_provider = "existing-local".to_string();
+        assert!(s.validate().is_err(), "existing-local needs a model");
+        s.ai_model = "qwen".to_string();
+        assert!(s.validate().is_ok());
+        s.ai_base_url = "http://192.168.0.2:11434".to_string();
+        assert!(s.validate().is_err(), "existing-local stays loopback");
+    }
+
+    #[test]
+    fn broken_ai_provider_reads_back_as_off() {
+        let conn = conn();
+        upsert_meta(&conn, KEY_AI_PROVIDER, "nonsense").unwrap();
+        assert_eq!(load(&conn).ai_provider, DEFAULT_AI_PROVIDER);
+        upsert_meta(&conn, KEY_AI_PROVIDER, "").unwrap();
+        assert_eq!(load(&conn).ai_provider, DEFAULT_AI_PROVIDER);
     }
 
     #[test]
@@ -1272,6 +1370,9 @@ mod tests {
             companion_height_ratio: DEFAULT_COMPANION_HEIGHT_RATIO,
             companion_url_list: Vec::new(),
             companion_muted: false,
+            ai_provider: DEFAULT_AI_PROVIDER.to_string(),
+            ai_base_url: DEFAULT_AI_BASE_URL.to_string(),
+            ai_model: String::new(),
         };
         assert!(save(&conn, &bad).is_err());
         // Nothing was persisted.

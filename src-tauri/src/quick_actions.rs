@@ -20,15 +20,53 @@ use std::time::{Duration, Instant};
 use rusqlite::{params, Connection, OptionalExtension, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::windows_execution::powershell_argv;
 use crate::launch::{TestResult, TEST_TIMEOUT, timed_test_result};
+
+/// The shell a Quick Action runs under (ADR-0017 shell extension): explicit
+/// PowerShell or CMD. There is deliberately no direct-executable variant —
+/// every action runs through one of the two shells owned by the Windows
+/// execution module (ADR-0029).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum QuickActionShell {
+    Powershell,
+    Cmd,
+}
+
+impl QuickActionShell {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            QuickActionShell::Powershell => "powershell",
+            QuickActionShell::Cmd => "cmd",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "powershell" => Some(QuickActionShell::Powershell),
+            "cmd" => Some(QuickActionShell::Cmd),
+            _ => None,
+        }
+    }
+}
+
+impl Default for QuickActionShell {
+    fn default() -> Self {
+        QuickActionShell::Powershell
+    }
+}
 
 /// The editable shape of a Quick Action, as the frontend sends it. The stored
 /// record ([`QuickAction`]) adds the id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuickActionInput {
     pub name: String,
-    /// The PowerShell script to run, multi-line allowed.
+    /// The shell the command runs under — explicit since the PowerShell/CMD
+    /// extension (ADR-0017). Legacy database rows without a stored value read
+    /// back as PowerShell; unknown stored or transmitted values fail instead
+    /// of falling back.
+    pub shell: QuickActionShell,
+    /// The shell script to run, multi-line allowed.
     pub command: String,
     /// Working directory the command starts in; `None` = the app's own.
     pub cwd: Option<String>,
@@ -185,12 +223,14 @@ pub fn validate_quick_action(action: &QuickActionInput) -> std::result::Result<(
     validate_cwd(action.cwd.as_deref())
 }
 
-/// The name of an existing action with the same payload — command and
-/// working directory, both trimmed and compared case-insensitively (Windows
-/// paths); the display name plays no part. `except_id` excludes the action
-/// being edited. Kept out of [`validate_quick_action`] because the backup
-/// import validates every record and must keep its skip semantics; only the
-/// create/update commands consult this. Ticket 103.
+/// The name of an existing action with the same payload — shell plus command
+/// and working directory, the latter two trimmed and compared
+/// case-insensitively (Windows paths); the display name plays no part.
+/// The same text under different shells is a different operation
+/// (ADR-0026 shell-aware identity). `except_id` excludes the action being
+/// edited. Kept out of [`validate_quick_action`] because the backup import
+/// validates every record and must keep its skip semantics; only the
+/// create/update commands consult this.
 pub fn colliding_action(
     conn: &Connection,
     action: &QuickActionInput,
@@ -198,12 +238,18 @@ pub fn colliding_action(
 ) -> Result<Option<String>> {
     conn.query_row(
         "SELECT name FROM quick_actions
-         WHERE command COLLATE NOCASE = ?1
-           AND ((cwd IS NULL AND ?2 IS NULL)
-                OR (cwd IS NOT NULL AND ?2 IS NOT NULL AND cwd COLLATE NOCASE = ?2))
-           AND id != ?3
+         WHERE shell = ?1
+           AND command COLLATE NOCASE = ?2
+           AND ((cwd IS NULL AND ?3 IS NULL)
+                OR (cwd IS NOT NULL AND ?3 IS NOT NULL AND cwd COLLATE NOCASE = ?3))
+           AND id != ?4
          ORDER BY position, id LIMIT 1",
-        params![action.command.trim(), normalized_cwd(action), except_id.unwrap_or(-1)],
+        params![
+            action.shell.as_str(),
+            action.command.trim(),
+            normalized_cwd(action),
+            except_id.unwrap_or(-1)
+        ],
         |row| row.get(0),
     )
     .optional()
@@ -251,43 +297,56 @@ fn action_from_row(row: &rusqlite::Row) -> Result<QuickAction> {
     // Reads `note` via COALESCE(`note`, `notes`) so a DB that was migrated
     // with either column name returns the stored note. `notes` is the alias
     // kept for compatibility with the spec's "notes column" wording.
-    let note: Option<String> = row.get::<_, Option<String>>(6)?;
-    let notes_alias: Option<String> = row.get::<_, Option<String>>(7).unwrap_or(None);
+    let note: Option<String> = row.get::<_, Option<String>>(7)?;
+    let notes_alias: Option<String> = row.get::<_, Option<String>>(8).unwrap_or(None);
     let note = note.or(notes_alias);
+    let shell: QuickActionShell = match row.get::<_, Option<String>>(2)? {
+        None => QuickActionShell::Powershell,
+        Some(value) => QuickActionShell::from_str(value.trim()).ok_or_else(|| {
+            rusqlite::Error::FromSqlConversionFailure(
+                2,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::other(format!(
+                    "unknown Quick Action shell '{value}'"
+                ))),
+            )
+        })?,
+    };
     Ok(QuickAction {
         id: row.get(0)?,
         action: QuickActionInput {
             name: row.get(1)?,
-            command: row.get(2)?,
-            cwd: row.get(3)?,
-            stoppable: row.get::<_, i64>(4)? != 0,
-            stop_command: row.get(5)?,
+            shell,
+            command: row.get(3)?,
+            cwd: row.get(4)?,
+            stoppable: row.get::<_, i64>(5)? != 0,
+            stop_command: row.get(6)?,
             note,
             // Why read defensively: databases migrated from builds predating
             // the flag have no such column value yet the same reader serves
             // them — a missing value means manual, never auto-run.
-            auto_run: row.get::<_, i64>(8).unwrap_or(0) != 0,
+            auto_run: row.get::<_, i64>(9).unwrap_or(0) != 0,
             // Missing dock visibility means visible — legacy rows predate it.
-            show_in_dock: row.get::<_, Option<i64>>(10).ok().flatten().unwrap_or(1) != 0,
+            show_in_dock: row.get::<_, Option<i64>>(11).ok().flatten().unwrap_or(1) != 0,
         },
-        group_id: row.get(9)?,
+        group_id: row.get(10)?,
     })
 }
 
 /// Every Quick Action in list order (position, then insertion order).
 pub fn list_quick_actions(conn: &Connection) -> Result<Vec<QuickAction>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, command, cwd, stoppable, stop_command, note, notes, auto_run, group_id, show_in_dock
+        "SELECT id, name, shell, command, cwd, stoppable, stop_command, note, notes, auto_run, group_id, show_in_dock
          FROM quick_actions ORDER BY position, id",
     )?;
     let rows = stmt.query_map([], action_from_row)?;
     rows.collect()
 }
 
-/// Fetches one action by id — the runner's lookup (ticket 50).
+/// Fetches one action by id — the runner's lookup.
 pub fn get_quick_action(conn: &Connection, id: i64) -> Result<Option<QuickAction>> {
     conn.query_row(
-        "SELECT id, name, command, cwd, stoppable, stop_command, note, notes, auto_run, group_id, show_in_dock
+        "SELECT id, name, shell, command, cwd, stoppable, stop_command, note, notes, auto_run, group_id, show_in_dock
          FROM quick_actions WHERE id = ?1",
         params![id],
         action_from_row,
@@ -308,8 +367,8 @@ pub fn list_auto_run_actions(conn: &Connection) -> Result<Vec<QuickAction>> {
 /// The one INSERT shape for a Quick Action, position as the trailing
 /// placeholder — shared by `create_quick_action` and `append_action`.
 const INSERT_ACTION_SQL: &str =
-    "INSERT INTO quick_actions (name, command, cwd, stoppable, stop_command, note, notes, auto_run, show_in_dock, position)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)";
+    "INSERT INTO quick_actions (name, shell, command, cwd, stoppable, stop_command, note, notes, auto_run, show_in_dock, position)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)";
 
 /// Appends an action at the end of the list (the next free position).
 pub fn create_quick_action(conn: &Connection, action: &QuickActionInput) -> Result<QuickAction> {
@@ -319,6 +378,7 @@ pub fn create_quick_action(conn: &Connection, action: &QuickActionInput) -> Resu
         INSERT_ACTION_SQL,
         &[
             &action.name.trim(),
+            &action.shell.as_str(),
             &action.command.trim(),
             &normalized_cwd(action),
             &action.stoppable,
@@ -342,6 +402,7 @@ pub(crate) fn append_action(conn: &Connection, action: &QuickActionInput) -> Res
             INSERT_ACTION_SQL,
             &[
                 &action.name.trim(),
+                &action.shell.as_str(),
                 &action.command.trim(),
                 &normalized_cwd(action),
                 &action.stoppable,
@@ -357,16 +418,17 @@ pub(crate) fn append_action(conn: &Connection, action: &QuickActionInput) -> Res
 
 /// Replaces an action's script and metadata in place (same id). Position and
 /// the Group reference are untouched — reorders go through `move_quick_action`,
-/// group changes through `assign_to_group`/`unassign_from_group` (ticket 89).
+/// group changes through the groups commands.
 pub fn update_quick_action(conn: &Connection, action: &QuickAction) -> Result<()> {
     let note = normalized_note(&action.action);
     conn.execute(
         "UPDATE quick_actions
-         SET name = ?1, command = ?2, cwd = ?3, stoppable = ?4, stop_command = ?5, note = ?6, notes = ?6,
-             auto_run = ?7, show_in_dock = ?8
-         WHERE id = ?9",
+         SET name = ?1, shell = ?2, command = ?3, cwd = ?4, stoppable = ?5, stop_command = ?6, note = ?7, notes = ?7,
+             auto_run = ?8, show_in_dock = ?9
+         WHERE id = ?10",
         params![
             action.action.name.trim(),
+            action.action.shell.as_str(),
             action.action.command.trim(),
             normalized_cwd(&action.action),
             action.action.stoppable,
@@ -392,34 +454,40 @@ pub fn move_quick_action(conn: &Connection, id: i64, to_position: i64) -> Result
     crate::ordered_list::OrderedList::QUICK_ACTIONS.move_to(conn, id, to_position)
 }
 
-/// Spawns the action's command hidden (`CREATE_NO_WINDOW`), the working
-/// directory honored when set, and returns the `Child` so the caller can
-/// track it (ticket 62). When `output` is given, the command's stdout/stderr
-/// are inherited from that open file — its live output lands in the run's
-/// `output.log` (ticket 64). Windows does not kill children when a handle
-/// closes, so dropping the `Child` would leave the process running
-/// untracked; the caller decides — wait via a reaper thread, or drop for
-/// fire-and-forget. Current user, no elevation, no status UI, no notification.
+/// Spawns the action's command hidden (`CREATE_NO_WINDOW`) under its selected
+/// shell, the working directory honored when set, and returns the `Child` so
+/// the caller can track it. When `output` is given, the command's
+/// stdout/stderr are inherited from that open file — its live output lands in
+/// the run's `output.log`. Windows does not kill children when a handle
+/// closes, so dropping the `Child` would leave the process running untracked;
+/// the caller decides — wait via a reaper thread, or drop for fire-and-forget.
+/// Current user, no elevation, no status UI, no notification. The shell routes
+/// through the single Windows execution owner (ADR-0029).
 pub fn spawn_quick_action(
     action: &QuickActionInput,
     output: Option<&File>,
 ) -> std::result::Result<Child, String> {
-    crate::windows_execution::spawn_action(&action.command, normalized_cwd(action).as_deref(), output)
+    crate::windows_execution::spawn_action(
+        action.shell.as_str(),
+        &action.command,
+        normalized_cwd(action).as_deref(),
+        output,
+    )
 }
 
-/// Spawns the action's stop command (ticket 62) through the same hidden
-/// PowerShell path as the run itself, the action's working directory honored
-/// so relative stop commands (e.g. `docker compose stop`) land in the same
-/// place the run did. When `output` is given, the stop command's output
-/// appends to the run's `output.log` too (ticket 64). Fire-and-forget: a
-/// graceful stop can take a while, and the reaper watching the tracked
-/// process reports the actual exit.
+/// Spawns the action's stop command through the same hidden shell path as the
+/// run itself, the action's working directory honored so relative stop
+/// commands (e.g. `docker compose stop`) land in the same place the run did.
+/// When `output` is given, the stop command's output appends to the run's
+/// `output.log` too. Fire-and-forget: a graceful stop can take a while, and
+/// the reaper watching the tracked process reports the actual exit.
 pub fn spawn_stop_command(
+    shell: QuickActionShell,
     stop_command: &str,
     cwd: Option<&str>,
     output: Option<&File>,
 ) -> std::result::Result<(), String> {
-    crate::windows_execution::spawn_action_stop(stop_command, cwd, output)
+    crate::windows_execution::spawn_action_stop(shell.as_str(), stop_command, cwd, output)
 }
 
 /// The stop-command watchdog (ticket 92): waits out [`STOP_WATCHDOG`] for the
@@ -646,22 +714,33 @@ pub fn write_run_log_exit(log_path: &Path, code: Option<i32>) {
     }
 }
 
-/// The timeboxed Test (ticket 50, prior art: the Launch entry Test button,
-/// ticket 41): runs the command under PowerShell and reports the exit code
-/// plus captured output. A command that outlives the box comes back timed out
-/// — honestly not headless-verifiable, never passed.
-pub fn test_quick_action(command: &str, cwd: Option<&str>) -> TestResult {
-    test_quick_action_with_timeout(command, cwd, TEST_TIMEOUT)
+/// The timeboxed Test: runs the command under its selected shell and reports
+/// the exit code plus captured output. A command that outlives the box comes
+/// back timed out — honestly not headless-verifiable, never passed. The shell
+/// routes through the single Windows execution owner (ADR-0029); an unknown
+/// shell fails honestly instead of running under the wrong shell.
+pub fn test_quick_action(shell: QuickActionShell, command: &str, cwd: Option<&str>) -> TestResult {
+    test_quick_action_with_timeout(shell, command, cwd, TEST_TIMEOUT)
 }
 
 /// The timeboxed core behind `test_quick_action`, parameterized so tests can
 /// use a short box.
 pub(crate) fn test_quick_action_with_timeout(
+    shell: QuickActionShell,
     command: &str,
     cwd: Option<&str>,
     timeout: Duration,
 ) -> TestResult {
-    let (exe, args) = powershell_argv(command);
+    let (exe, args) = match crate::windows_execution::action_argv(shell.as_str(), command) {
+        Ok(argv) => argv,
+        Err(message) => {
+            return TestResult {
+                timed_out: false,
+                exit_code: None,
+                output: message,
+            };
+        }
+    };
     timed_test_result(cwd, &exe, &args, timeout)
 }
 
@@ -676,6 +755,7 @@ mod tests {
     fn input(name: &str) -> QuickActionInput {
         QuickActionInput {
             name: name.into(),
+            shell: QuickActionShell::Powershell,
             command: format!("Write-Output {name}"),
             cwd: None,
             stoppable: false,
@@ -860,7 +940,7 @@ mod tests {
     #[test]
     fn powershell_argv_is_the_engine_convention() {
         assert_eq!(
-            powershell_argv("docker compose up -d"),
+            crate::windows_execution::powershell_argv("docker compose up -d"),
             (
                 "powershell".into(),
                 vec![
@@ -951,6 +1031,7 @@ mod tests {
         // process running untracked — the same fire-and-forget as before.
         let action = QuickActionInput {
             name: "spawn-test".into(),
+            shell: QuickActionShell::Powershell,
             command: "exit 0".into(),
             cwd: None,
             stoppable: false,
@@ -964,10 +1045,11 @@ mod tests {
     }
 
     #[test]
-    fn stop_command_spawns_through_the_hidden_powershell_path() {
-        // The stop path (ticket 62): same hidden PowerShell convention, the
-        // process outlives the dropped handle.
-        assert!(spawn_stop_command("exit 0", None, None).is_ok());
+    fn stop_command_spawns_through_the_hidden_shell_path() {
+        // The stop path uses the same hidden shell convention as the run
+        // itself; the process outlives the dropped handle.
+        assert!(spawn_stop_command(QuickActionShell::Powershell, "exit 0", None, None).is_ok());
+        assert!(spawn_stop_command(QuickActionShell::Cmd, "exit 0", None, None).is_ok());
     }
 
     #[test]
@@ -1082,6 +1164,7 @@ mod tests {
         let output = open_run_log(&log_path).expect("log opened");
         let action = QuickActionInput {
             name: "capture-test".into(),
+            shell: QuickActionShell::Powershell,
             command: "Write-Output sprout-capture-test".into(),
             cwd: None,
             stoppable: false,
@@ -1100,6 +1183,7 @@ mod tests {
     #[test]
     fn completed_test_reports_exit_code_and_output() {
         let run = test_quick_action_with_timeout(
+            QuickActionShell::Powershell,
             "Write-Output sprout-quick-action-test",
             None,
             Duration::from_secs(30),
@@ -1111,7 +1195,12 @@ mod tests {
 
     #[test]
     fn failed_test_reports_the_nonzero_exit_code() {
-        let run = test_quick_action_with_timeout("exit 3", None, Duration::from_secs(30));
+        let run = test_quick_action_with_timeout(
+            QuickActionShell::Powershell,
+            "exit 3",
+            None,
+            Duration::from_secs(30),
+        );
         assert!(!run.timed_out);
         assert_eq!(run.exit_code, Some(3));
     }
@@ -1120,6 +1209,7 @@ mod tests {
     fn the_working_directory_is_honored() {
         let cwd = tempfile::tempdir().unwrap().into_path();
         let run = test_quick_action_with_timeout(
+            QuickActionShell::Powershell,
             "Get-Location | Select-Object -ExpandProperty Path",
             Some(cwd.to_str().unwrap()),
             Duration::from_secs(30),
@@ -1132,6 +1222,7 @@ mod tests {
     #[test]
     fn interactive_command_is_reported_as_timed_out_not_passed() {
         let run = test_quick_action_with_timeout(
+            QuickActionShell::Powershell,
             "Start-Sleep -Seconds 30",
             None,
             Duration::from_secs(2),
@@ -1511,9 +1602,146 @@ mod tests {
         // Backup files from before the flag carry no such key — they must
         // still restore, as manual actions.
         let input: QuickActionInput = serde_json::from_str(
-            r#"{"name":"legacy","command":"echo hi","cwd":null,"stoppable":false,"stop_command":null,"note":null}"#,
+            r#"{"name":"legacy","shell":"powershell","command":"echo hi","cwd":null,"stoppable":false,"stop_command":null,"note":null}"#,
         )
         .unwrap();
         assert!(!input.auto_run);
+    }
+
+    #[test]
+    fn shell_roundtrips_and_updates_in_place() {
+        let dir = tempfile::tempdir().unwrap().into_path();
+        let conn = crate::db::init_at(&dir).unwrap();
+        let mut cmd_action = input("cmd-task");
+        cmd_action.shell = QuickActionShell::Cmd;
+        cmd_action.command = "echo cmd-hi".into();
+        let created = create_quick_action(&conn, &cmd_action).unwrap();
+        assert_eq!(created.action.shell, QuickActionShell::Cmd);
+        let listed = list_quick_actions(&conn).unwrap();
+        assert_eq!(listed[0].action.shell, QuickActionShell::Cmd);
+        let mut edited = listed[0].clone();
+        edited.action.shell = QuickActionShell::Powershell;
+        update_quick_action(&conn, &edited).unwrap();
+        let stored = get_quick_action(&conn, edited.id).unwrap().unwrap();
+        assert_eq!(stored.action.shell, QuickActionShell::Powershell);
+        assert_eq!(stored.action.command, "echo cmd-hi");
+    }
+
+    #[test]
+    fn same_text_under_different_shells_coexists() {
+        let c = conn();
+        let mut ps = input("ps-task");
+        ps.shell = QuickActionShell::Powershell;
+        ps.command = "echo same".into();
+        create_quick_action(&c, &ps).unwrap();
+        let mut cmd = input("cmd-task");
+        cmd.shell = QuickActionShell::Cmd;
+        cmd.command = "echo same".into();
+        assert!(colliding_action(&c, &cmd, None).unwrap().is_none());
+        create_quick_action(&c, &cmd).unwrap();
+        assert_eq!(list_quick_actions(&c).unwrap().len(), 2);
+        let mut twin_ps = input("ps-twin");
+        twin_ps.shell = QuickActionShell::Powershell;
+        twin_ps.command = "ECHO SAME".into();
+        assert_eq!(
+            colliding_action(&c, &twin_ps, None).unwrap().as_deref(),
+            Some("ps-task")
+        );
+    }
+
+    #[test]
+    fn shell_names_parse_and_reject_unknown_values() {
+        assert_eq!(
+            QuickActionShell::from_str("powershell"),
+            Some(QuickActionShell::Powershell)
+        );
+        assert_eq!(QuickActionShell::from_str("cmd"), Some(QuickActionShell::Cmd));
+        assert_eq!(QuickActionShell::from_str("none"), None);
+        assert_eq!(QuickActionShell::from_str("PowerShell"), None);
+        assert_eq!(QuickActionShell::from_str(""), None);
+        assert_eq!(QuickActionShell::Powershell.as_str(), "powershell");
+        assert_eq!(QuickActionShell::Cmd.as_str(), "cmd");
+        let parsed: QuickActionInput = serde_json::from_str(
+            r#"{"name":"x","shell":"cmd","command":"echo hi","cwd":null,"stoppable":false,"stop_command":null}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.shell, QuickActionShell::Cmd);
+        assert!(serde_json::from_str::<QuickActionInput>(
+            r#"{"name":"x","shell":"none","command":"echo hi","cwd":null,"stoppable":false,"stop_command":null}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<QuickActionInput>(
+            r#"{"name":"x","command":"echo hi","cwd":null,"stoppable":false,"stop_command":null}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn unknown_stored_shell_fails_honestly() {
+        let dir = tempfile::tempdir().unwrap().into_path();
+        std::fs::create_dir_all(&dir).unwrap();
+        {
+            let raw = rusqlite::Connection::open(dir.join("sprout.db")).unwrap();
+            raw.execute_batch(
+                "CREATE TABLE quick_actions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    shell TEXT NOT NULL DEFAULT 'powershell' CHECK (shell IN ('powershell', 'cmd', 'weird')),
+                    command TEXT NOT NULL,
+                    cwd TEXT,
+                    stoppable INTEGER NOT NULL DEFAULT 0,
+                    stop_command TEXT,
+                    note TEXT,
+                    notes TEXT,
+                    auto_run INTEGER NOT NULL DEFAULT 0,
+                    show_in_dock INTEGER NOT NULL DEFAULT 1,
+                    position INTEGER NOT NULL DEFAULT 0
+                );
+                INSERT INTO quick_actions (name, shell, command, position)
+                VALUES ('broken', 'weird', 'echo hi', 0);",
+            )
+            .unwrap();
+            // Bypass the CHECK by creating without it would fail; the table
+            // above allows the bad value so the reader can prove it rejects.
+        }
+        let conn = rusqlite::Connection::open(dir.join("sprout.db")).unwrap();
+        assert!(list_quick_actions(&conn).is_err());
+    }
+
+    #[test]
+    fn shell_migrates_legacy_databases_as_powershell() {
+        let dir = tempfile::tempdir().unwrap().into_path();
+        std::fs::create_dir_all(&dir).unwrap();
+        {
+            let raw = rusqlite::Connection::open(dir.join("sprout.db")).unwrap();
+            raw.execute_batch(
+                "CREATE TABLE quick_actions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    command TEXT NOT NULL,
+                    cwd TEXT,
+                    stoppable INTEGER NOT NULL DEFAULT 0,
+                    stop_command TEXT,
+                    note TEXT,
+                    notes TEXT,
+                    auto_run INTEGER NOT NULL DEFAULT 0,
+                    show_in_dock INTEGER NOT NULL DEFAULT 1,
+                    position INTEGER NOT NULL DEFAULT 0
+                );
+                INSERT INTO quick_actions (name, command, cwd, position)
+                VALUES ('legacy', 'echo hi', NULL, 0);",
+            )
+            .unwrap();
+        }
+        let conn = crate::db::init_at(&dir).unwrap();
+        let listed = list_quick_actions(&conn).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].action.shell, QuickActionShell::Powershell);
+        drop(conn);
+        let conn = crate::db::init_at(&dir).unwrap();
+        assert_eq!(
+            list_quick_actions(&conn).unwrap()[0].action.shell,
+            QuickActionShell::Powershell
+        );
     }
 }

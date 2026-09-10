@@ -7,10 +7,72 @@ export function companionDisplayName(site: CompanionSite): string {
   return name ? name : site.url;
 }
 
+/** A picker row keeps a user-authored name readable without hiding the
+ *  address that distinguishes similarly named sites. */
+export function companionPickerLabel(site: CompanionSite): string {
+  const name = site.name?.trim();
+  return name ? `${name} — ${site.url}` : site.url;
+}
+
 /** Identity key for one URL: trimmed, lowercased, trailing slashes ignored —
  *  the same key dedup and duplicate checks share. */
 export function companionUrlKey(url: string): string {
   return url.trim().toLowerCase().replace(/\/+$/, "");
+}
+
+export interface CompanionSiteSwitchCallbacks {
+  persist: (url: string) => Promise<void>;
+  onPending: (site: CompanionSite | null) => void;
+  onApplied: (site: CompanionSite) => void;
+  onFailure: (site: CompanionSite, error: unknown) => void;
+  onIdle?: () => void;
+}
+
+/** Serial persistence makes the newest request land last even when users
+ *  choose again before a save returns. Intermediate successes never replace
+ *  the live child or selected marker, and only the final failure is surfaced. */
+export function createCompanionSiteSwitchQueue(
+  callbacks: CompanionSiteSwitchCallbacks,
+): (site: CompanionSite) => void {
+  let queued: CompanionSite | null = null;
+  let inFlight: CompanionSite | null = null;
+  let running = false;
+
+  async function drain() {
+    if (running) return;
+    running = true;
+    try {
+      while (queued) {
+        const target = queued;
+        queued = null;
+        inFlight = target;
+        try {
+          await callbacks.persist(target.url);
+          if (queued === null) callbacks.onApplied(target);
+        } catch (error) {
+          if (queued === null) callbacks.onFailure(target, error);
+        } finally {
+          inFlight = null;
+        }
+      }
+    } finally {
+      running = false;
+      callbacks.onPending(null);
+      callbacks.onIdle?.();
+    }
+  }
+
+  return (site) => {
+    if (queued && companionUrlKey(queued.url) === companionUrlKey(site.url)) return;
+    if (
+      queued === null &&
+      inFlight &&
+      companionUrlKey(inFlight.url) === companionUrlKey(site.url)
+    ) return;
+    queued = site;
+    callbacks.onPending(site);
+    void drain();
+  };
 }
 
 /** Tolerant list cleanup mirroring the backend: drops empty and non-https

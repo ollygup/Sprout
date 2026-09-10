@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   ActiveRunInfo,
+  AiCheckVerdict,
+  AiDraftOutcome,
   BackupCounts,
   BackupImportSummary,
   BackupSelection,
@@ -21,6 +23,7 @@ import type {
   ProductPresetImpact,
   QuickAction,
   QuickActionInput,
+  QuickActionShell,
   QuickLaunchDockState,
   Requirement,
   RunProgressChunk,
@@ -232,13 +235,19 @@ export function testLaunchCommand(
   return invoke<LaunchCommandTest>("test_launch_command", { shell, target });
 }
 
-/** Starts the whole Quick Launch list (ticket 42): capped, queued, on a
- * background thread — the shared trigger for the Quick Launch window's and
- * the page's Start buttons (ticket 54). The page listens for the
- * `launch-run-done` event and the summary arrives as a system notification.
- * Rejected while a run is already in flight. */
-export function startQuickLaunch(): Promise<void> {
-  return invoke<void>("start_quick_launch");
+/** Starts Quick Launch entries through the capped, queued pipeline (the
+ *  shared trigger for the Quick Launch window's and the page's Start
+ *  buttons). Omitted ids keeps the full-list behavior; an explicit id
+ *  subset starts exactly those saved entries in saved order (the main
+ *  page's Start matching); an explicit empty list is rejected without
+ *  launching anything. The page listens for the `launch-run-done` event
+ *  and the summary arrives as a system notification. Rejected while a run
+ *  is already in flight. */
+export function startQuickLaunch(ids?: number[]): Promise<void> {
+  return invoke<void>(
+    "start_quick_launch",
+    ids === undefined ? {} : { ids }
+  );
 }
 
 /** Starts what the dock shows: the dock-visible subset only. The main-app
@@ -322,15 +331,60 @@ export function listRunningQuickActions(): Promise<number[]> {
   return invoke<number[]>("list_running_quick_actions");
 }
 
-/** One Test click in the Quick Actions editor (ticket 50): runs the command
- * under PowerShell, timeboxed, and returns exit code + captured output. A
+/** One Test click in the Quick Actions editor: runs the command under its
+ * selected shell, timeboxed, and returns exit code + captured output. A
  * timed-out result means the command is interactive — not
  * headless-verifiable. */
 export function testQuickAction(
+  shell: QuickActionShell,
   command: string,
   cwd: string | null
 ): Promise<LaunchCommandTest> {
-  return invoke<LaunchCommandTest>("test_quick_action", { command, cwd });
+  return invoke<LaunchCommandTest>("test_quick_action", { shell, command, cwd });
+}
+
+/** Requests one AI Script draft through the single configured route: a
+ *  candidate, a refusal, a clarification, or an actionable failure.
+ *  Generation never executes — running stays with the manual controls. */
+export function aiGenerateDraft(
+  request: string,
+  shell: QuickActionShell,
+  context: string | null,
+  requestId: string,
+): Promise<AiDraftOutcome> {
+  return invoke<AiDraftOutcome>("ai_generate_draft", { request, shell, context, requestId });
+}
+
+export function aiCancelDraft(requestId: string): Promise<boolean> {
+  return invoke<boolean>("ai_cancel_draft", { requestId });
+}
+
+export function aiManagedStatus(): Promise<import("./types").ManagedCatalogStatus> {
+  return invoke<import("./types").ManagedCatalogStatus>("ai_managed_status");
+}
+
+export function aiInstallManaged(modelId: string): Promise<import("./types").ManagedInstallResult> {
+  return invoke<import("./types").ManagedInstallResult>("ai_install_managed", { modelId });
+}
+
+export function aiCancelManagedInstall(): Promise<boolean> {
+  return invoke<boolean>("ai_cancel_managed_install");
+}
+
+/** Tests an existing-local service without saving anything: classifies the
+ *  endpoint and checks the named model against what the service exposes.
+ *  Resolves to the exposed model names. */
+export function aiCheckExistingLocal(baseUrl: string, model: string): Promise<string[]> {
+  return invoke<string[]>("ai_check_existing_local", { baseUrl, model });
+}
+
+/** Rechecks a candidate accepted through AI assistance: the same output
+ *  checks, no provider, no persistence, no execution. */
+export function aiCheckCandidate(
+  shell: QuickActionShell,
+  command: string
+): Promise<AiCheckVerdict> {
+  return invoke<AiCheckVerdict>("ai_check_candidate", { shell, command });
 }
 
 /** Lists every Clip in order (ticket 78). */
@@ -554,4 +608,56 @@ export function checkForUpdate(): Promise<UpdateCheck> {
  * replace it and relaunch. Failures here are reported — the user asked. */
 export function installUpdate(url: string): Promise<void> {
   return invoke<void>("install_update", { url });
+}
+
+/** Scoped local target discovery (ADR-0031): approved folders hold
+ *  names/paths permission only — never contents, never disclosure. */
+
+/** Lists the folders approved for local target discovery. */
+export function aiListApprovedRoots(): Promise<import("./types").AiApprovedRoot[]> {
+  return invoke<import("./types").AiApprovedRoot[]>("ai_list_approved_roots");
+}
+
+/** Approves one folder for discovery: it must exist and is stored
+ *  canonicalized. Names/paths only. */
+export function aiApproveRoot(path: string): Promise<import("./types").AiApprovedRoot> {
+  return invoke<import("./types").AiApprovedRoot>("ai_approve_root", { path });
+}
+
+/** Forgets one approved folder; later binds of its targets fail honestly. */
+export function aiRevokeRoot(path: string): Promise<boolean> {
+  return invoke<boolean>("ai_revoke_root", { path });
+}
+
+/** Runs one explicit find request over installed apps and approved folders:
+ *  bounded, read-only, no execution. Returns request-scoped references. */
+export function aiFindTargets(
+  query: string,
+  scope: import("./types").AiDiscoveryScope
+): Promise<import("./types").AiFindOutcome> {
+  return invoke<import("./types").AiFindOutcome>("ai_find_targets", { query, scope });
+}
+
+/** Reads one file match's bounded preview: a separate explicit request that
+ *  stays untrusted input. */
+export function aiReadTargetFile(refId: string): Promise<import("./types").AiFileContent> {
+  return invoke<import("./types").AiFileContent>("ai_read_target_file", { refId });
+}
+
+/** Binds one validated reference to a shell-quoted command: reviewable
+ *  text with its actual target, never an execution. */
+export function aiBindTarget(
+  refId: string,
+  shell: QuickActionShell
+): Promise<import("./types").AiBoundTarget> {
+  return invoke<import("./types").AiBoundTarget>("ai_bind_target", { refId, shell });
+}
+
+/** Records approval to disclose raw fields of one reference to a provider.
+ *  Discovery never implies this. */
+export function aiApproveDisclosure(
+  refId: string,
+  fields: string[]
+): Promise<import("./types").AiDisclosureGrant> {
+  return invoke<import("./types").AiDisclosureGrant>("ai_approve_disclosure", { refId, fields });
 }

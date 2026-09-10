@@ -93,3 +93,130 @@ per-site browser identity work in spec 156 before implementation.
 ## Decision update — 2026-09-08
 
 ADR-0022's final amendment and spec 166 now accept choosing an existing saved site directly from the dock through a name-plus-chevron selector. This supersedes Settings-only active-site selection, while main-app authoring, dock-only visibility and profile isolation remain required. Navigation failure policy and switching lifecycle remain open; no routing repair is accepted by this selection decision.
+
+## Decision update — 2026-09-09
+
+The saved-site lifecycle question is settled by ADR-0022's final amendment and ticket 170: select the saved address and replace the single live page while keeping the existing persistent profile and site preferences. No background tab or last-route restoration is promised. Ticket 171 carries the unresolved navigation report; no speculative routing repair or new-window policy follows from approval of the picker.
+
+## Evidence update — 2026-09-09: controlled navigation harness (ticket 171)
+
+### Scope and limitation
+
+The report still lacks the exact site, button, starting URL, expected target,
+browser identity, and whether the same action opens a normal-browser tab. The
+reporter symptom has therefore **not** been reproduced or resolved. The
+unattended local harness in `tools/repro-companion-navigation.mjs` instead
+locks down eight controlled stimuli so a later native run can identify which
+mechanism matches the report. Its HTTP contract check is not a native WebView2
+observation.
+
+Baseline `batch-151-170-171-20260909-01` pins Tauri 2.11.5,
+`tauri-runtime-wry` 2.11.4, Wry 0.55.1, and `webview2-com` 0.38.2 in
+`src-tauri/Cargo.lock`. The Companion is still constructed from JavaScript in
+`src/routes/quick-launch-window/+page.svelte` with only `tauri://created` and
+`tauri://error` listeners. Those events report child creation, not subsequent
+document navigation. The toolbar's external action still receives
+`companionUrl`, the saved address, rather than a live page address.
+
+### Pinned platform evidence
+
+- [Microsoft's navigation sequence](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/navigation-events)
+  says a network navigation raises `NavigationStarting` through
+  `NavigationCompleted`, redirects raise repeated starts under one navigation
+  ID, and same-document navigation does not raise `NavigationStarting` or
+  change that ID. `SourceChanged` can report a fragment change without a
+  network request.
+- [Tauri 2.11.5's Rust builder](https://docs.rs/tauri/2.11.5/x86_64-pc-windows-msvc/tauri/webview/struct.WebviewBuilder.html)
+  has `on_navigation`, `on_new_window`, and `on_page_load`. The JavaScript
+  [`Webview` surface](https://v2.tauri.app/reference/javascript/api/namespacewebview/)
+  used by Companion exposes creation/manipulation and Tauri event methods, but
+  no WebView2 `SourceChanged`, `NewWindowRequested`, or
+  `NavigationCompleted` callback. Moving observation to the Rust creation seam
+  would be an implementation decision, not a JavaScript listener addition.
+- The pinned [Wry 0.55.1 Windows backend](https://github.com/tauri-apps/wry/blob/wry-v0.55.1/src/webview2/mod.rs#L1679-L1753)
+  always registers WebView2 `NewWindowRequested`; when the builder supplies no
+  new-window handler it calls `SetHandled(true)` and supplies no destination.
+  Companion supplies no handler. This is a source-established mechanism for a
+  `_blank` or `window.open` request to appear inert. It is the leading
+  hypothesis, but it is not proof that the reporter's unknown button requests
+  a new window. A current [untriaged Tauri report](https://github.com/tauri-apps/tauri/issues/15872)
+  on Wry 0.55.1 additionally claims `target=_blank` may fail to reach even an
+  installed handler on Windows; that report is corroborating risk, not an
+  established Sprout fact.
+- [Microsoft's `NewWindowRequested` contract](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/winrt/microsoft_web_webview2_core/corewebview2newwindowrequestedeventargs?view=webview2-winrt-1.0.3856.49)
+  says `Handled=true` without `NewWindow` returns a dummy, immediately closed
+  `WindowProxy`; `Handled=false` without `NewWindow` opens an uncontrolled
+  popup. A policy that merely sends the URL to another browser cannot preserve
+  a site script's usable opener `WindowProxy` (inference).
+- [`NavigationCompleted`](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2navigationcompletedeventargs?view=webview2-1.0.3967.48)
+  exposes `IsSuccess` and `WebErrorStatus`. The existing child-creation error
+  listener cannot distinguish a cancelled/superseded navigation, external
+  handoff, and a transport failure.
+- [Microsoft's external-scheme event](https://learn.microsoft.com/en-us/dotnet/api/microsoft.web.webview2.core.corewebview2.launchingexternalurischeme?view=webview2-dotnet-1.0.3856.49)
+  occurs between `NavigationStarting` and a `NavigationCompleted` whose result
+  is `ConnectionAborted`; the default dialog can vary with browser/user
+  settings and origin trust. A generic failed completion must therefore not be
+  presented as a failed web load without classifying the scheme.
+- WebView2 stores cookies, permissions, cache, and DOM storage in its
+  [user-data folder](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/user-data-folder).
+  Sprout deliberately uses a separate persistent Companion data directory.
+  The default browser does not share that directory, so external recovery
+  cannot promise the Companion login session (inference from the separate
+  stores).
+
+### Controlled matrix
+
+| Case | Deterministic fixture signal | Native signal needed | Status |
+| --- | --- | --- | --- |
+| Fragment | `#fragment-target`; no request | `SourceChanged`, no `NavigationStarting` | Fixture verified; native pending |
+| `history.pushState` | live readout becomes `/history-state`; no request | source/history change, no new document ID | Fixture verified; native pending |
+| Full navigation | `/full` request and `full-document` marker | normal start/completion with success | Fixture verified; native pending |
+| Redirect | 302 `/start`, 307 `/middle`, final marker | repeated starts, same navigation ID, successful completion | Fixture verified; native pending |
+| `_blank` | request appears only if a target actually loads | `NewWindowRequested`, disposition, visible destination | Fixture verified; native pending; silent deny predicted |
+| `window.open` | separately named popup target | same as above plus returned opener behavior | Fixture verified; native pending; silent deny predicted |
+| Auth return | matching cookie/state succeeds; a no-cookie return reports profile mismatch | redirect IDs, cookie continuity, identity setting | Fixture verified; native pending |
+| Custom protocol | `sprout-fixture://` user-gesture link | external-scheme event/dialog/OS result and `ConnectionAborted` completion | Fixture verified; native pending |
+| Load failure | server destroys the connection | failed completion and exact `WebErrorStatus`; stable Sprout feedback | Fixture verified; native pending |
+
+The verifier was run as `node tools/repro-companion-navigation.mjs` on Node
+24.19.0 and returned `RESULT 8/8 controlled contracts passed`. It is
+red-capable for a changed/broken fixture contract, not for the unsupplied
+reporter action.
+
+### Recovery analysis and hypotheses
+
+Opening the saved address is predictable and avoids treating a transient
+redirect as a durable site selection, but it loses the current route, form,
+and auth-return parameters. Opening the live address would preserve more route
+context, yet may expose one-time codes or other sensitive query data to a
+different browser profile, still lacks Companion cookies, and cannot preserve
+an opener relationship. Automatic external opening of every popup is therefore
+not a neutral repair. If product policy later permits it, it needs an explicit
+user-initiated HTTPS rule, visible destination/feedback, and a decision about
+opener-dependent flows; custom protocols need a separate confirmation policy.
+
+Ranked, falsifiable hypotheses for the reporter case:
+
+1. The button requests `_blank`/`window.open`; the controlled popup target will
+   not hit the server under the current handler-free child, while ordinary
+   navigation will.
+2. Navigation succeeds but Sprout's saved-address toolbar remains unchanged;
+   the page marker and server request will change while Sprout chrome does not.
+3. An auth flow rejects embedded identity or requires state from another
+   profile; changing Mobile/Desktop identity or completing the return in the
+   same isolated profile will change the outcome.
+4. The button launches a custom protocol; WebView2 will show an
+   external-scheme sequence rather than an ordinary successful document load.
+5. The target really fails to load or page script throws; native completion
+   status or DevTools console/network evidence will go red while child creation
+   remains successful.
+
+### Decision boundary
+
+No repair ticket or ADR amendment is opened yet. The exact reporter action and
+one native matrix run against a trusted HTTPS copy of this fixture are the
+specific prerequisites. If popup suppression is then confirmed, the bounded
+decision is a new-window disposition only (deny with feedback, navigate the
+single Companion, or explicitly open user-initiated HTTPS externally), with an
+ADR-0022 amendment before implementation. It must not add tabs, an arbitrary
+bridge, relaxed profile isolation, or blanket redirect/navigation interception.

@@ -12,4 +12,6 @@ vite.config.ts.timestamp-*
 /src-tauri/target
 /src-tauri/gen/schemas
 *.log
+.scratch/*.png
+/.codegraph/
 .vscode/
