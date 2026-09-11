@@ -182,6 +182,10 @@
   let managedBusy = $state(false);
   let managedError = $state("");
   let managedNotice = $state("");
+  let managedDetailsOpen = $state(false);
+  let managedReviewId = $state<string | null>(null);
+  const managedChoices = $derived(managedCatalog?.models.filter((model) => model.installable || model.installed) ?? []);
+  const managedReviewModel = $derived(managedCatalog?.models.find((model) => model.id === managedReviewId));
   // Whether the companion knobs were authored on this page since mount —
   // the page loads once while the dock divider and the companion manager
   // write out-of-band, so save must tell "left alone" from "edited here".
@@ -352,9 +356,22 @@
   }
 
   function managedSize(bytes: number | null): string {
-    if (bytes === null) return "Not qualified";
+    if (bytes === null) return "Not yet verified";
     const gib = bytes / 1024 / 1024 / 1024;
-    return `${new Intl.NumberFormat().format(bytes)} bytes (${gib.toFixed(2)} GB download)`;
+    return `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(gib)} GiB`;
+  }
+
+  function reviewManaged(modelId: string | null = null) {
+    managedReviewId = modelId;
+    managedDetailsOpen = true;
+  }
+
+  function useExistingLocal() {
+    aiProvider = "existing-local";
+    aiModel = "";
+    filter = "";
+    expandGroups(["ai"]);
+    void tick().then(() => document.getElementById("ai-base-url")?.focus());
   }
 
   const isDirty = $derived.by(() => {
@@ -1939,13 +1956,11 @@
         <div class="knob__body">
           <label class="knob__label" for="ai-provider">AI provider</label>
           <p class="knob__hint">
-            Optional help drafting Quick Action commands. Off installs nothing;
-            existing-local uses your own on-device service as-is. Drafts never
-            run — you review and save each one.
+            Draft Quick Action commands for review. Nothing runs until you choose Run.
           </p>
           {#if aiProvider === "managed"}
             <p class="knob__hint">
-              Enabling this provider downloads nothing. A separate Install action appears only for a fully qualified bundled recommendation.
+              Models download only when you choose Install.
             </p>
           {/if}
           {#if aiProvider === "cloud"}
@@ -1972,50 +1987,45 @@
       {#if aiProvider === "managed"}
         <article class="knob" hidden={!knobVisible("ai-model")}>
           <div class="knob__body">
-            <p class="knob__label">Managed recommendation</p>
+            <p class="knob__label">Managed local model</p>
             {#if managedCatalog}
-              <p class="knob__hint">
-                Runtime: {managedCatalog.runtime.name} {managedCatalog.runtime.version} · {managedCatalog.runtime.license} · {managedSize(managedCatalog.runtime.download_size_bytes)}
-              </p>
-              <p class="knob__hint">Source: {managedCatalog.runtime.source}</p>
-              {#if !managedCatalog.runtime.qualified}
-                <Notice tone="warn">{managedCatalog.runtime.blocker}</Notice>
+              {#if managedChoices.length === 0}
+                <p class="knob__hint">Managed setup is unavailable in this build. Model and runtime verification is unfinished; your hardware has not been assessed.</p>
+                <div class="managed__actions">
+                  <Button type="button" variant="secondary" onclick={useExistingLocal}>Use existing local service</Button>
+                  <Button type="button" variant="ghost" onclick={() => reviewManaged()}>Why unavailable?</Button>
+                </div>
+              {:else}
+                {#each managedChoices as model (model.id)}
+                  <div class="managed__choice">
+                    <p class="knob__hint">{model.artifact} · {model.installed ? "Installed" : `${managedSize(model.download_size_bytes)} download`}</p>
+                    <div class="managed__actions">
+                      <Button type="button" variant="secondary" disabled={managedBusy} onclick={() => reviewManaged(model.id)}>
+                        {model.installed ? "Model details" : "Review & install…"}
+                      </Button>
+                    </div>
+                  </div>
+                {/each}
               {/if}
-              {#each managedCatalog.models as model (model.id)}
-                <p class="knob__label">{model.artifact}</p>
-                <p class="knob__hint">
-                  Status: {model.status}. Revision: {model.revision ?? "Not qualified"}. Download: {managedSize(model.download_size_bytes)}.
-                </p>
-                <p class="knob__hint">
-                  Working memory: {model.memory_needs_mb === null ? "Not qualified" : `${new Intl.NumberFormat().format(model.memory_needs_mb)} MB RAM/VRAM`}. Context: {model.context_limit_tokens ?? "Not qualified"}. Runtime minimum: {model.minimum_runtime_version ?? "Not qualified"}.
-                </p>
-                <p class="knob__hint">License: {model.license} · Source: {model.license_source}</p>
-                {#if model.blocker}
-                  <Notice tone="warn">{model.blocker}</Notice>
-                {/if}
-                {#if model.installed}
-                  <Notice tone="ok">Installed for this user. It stays stopped until Generate and unloads after 5 idle minutes.</Notice>
-                {/if}
-              {/each}
+              {#if managedBusy}
+                <div class="managed__actions">
+                  <p class="knob__status" role="status">Installing model and runtime…</p>
+                  <Button type="button" variant="secondary" onclick={cancelManagedInstall}>Cancel install</Button>
+                </div>
+              {/if}
               {#if managedNotice}
                 <p class="knob__status" role="status">{managedNotice}</p>
               {/if}
-              {#if managedError}
-                <Notice tone="error">{managedError}</Notice>
-              {/if}
-            {:else if managedError}
-              <Notice tone="error">{managedError}</Notice>
-            {:else}
+            {:else if !managedError}
               <p class="knob__status" role="status">Reading bundled recommendation…</p>
             {/if}
-          </div>
-          <div class="knob__input">
-            {#if managedBusy}
-              <Button type="button" variant="secondary" onclick={cancelManagedInstall}>Cancel Install</Button>
-            {:else if managedCatalog}
-              {#each managedCatalog.models.filter((model) => model.installable && !model.installed) as model (model.id)}
-                <Button type="button" onclick={() => void installManaged(model.id)}>Install {model.artifact}</Button>
-              {/each}
+            {#if managedError}
+              <Notice tone="error">{managedError}</Notice>
+              {#if !managedCatalog}
+                <div class="managed__actions">
+                  <Button type="button" variant="secondary" onclick={() => void loadManagedCatalog()}>Retry</Button>
+                </div>
+              {/if}
             {/if}
           </div>
         </article>
@@ -2137,6 +2147,67 @@
   {/if}
 </section>
 
+<Dialog
+  open={managedDetailsOpen}
+  title={managedReviewModel && !managedReviewModel.installed ? "Install local model" : "Managed model details"}
+  onclose={() => (managedDetailsOpen = false)}
+>
+  {#if managedDetailsOpen && managedCatalog}
+    <div class="guard">
+      {#if !managedReviewModel}
+        <p class="guard__body">This release has no verified model and runtime pair to download. These are candidates awaiting verification, not a hardware compatibility result.</p>
+      {/if}
+      <section class="knob__body">
+        <h3 class="knob__label">Runtime</h3>
+        <p class="guard__body">{managedCatalog.runtime.name} {managedCatalog.runtime.version} · {managedCatalog.runtime.qualified ? "Verified" : "Awaiting verification"}</p>
+        <p class="guard__body">{managedCatalog.runtime.license}</p>
+        <p class="guard__body managed__source">Source: {managedCatalog.runtime.source}</p>
+        {#if managedCatalog.runtime.download_size_bytes !== null}
+          <p class="guard__body">Runtime download: {managedSize(managedCatalog.runtime.download_size_bytes)}</p>
+        {/if}
+        {#if !managedCatalog.runtime.qualified && managedCatalog.runtime.blocker}
+          <p class="guard__body">{managedCatalog.runtime.blocker}</p>
+        {/if}
+      </section>
+      {#each managedReviewModel ? [managedReviewModel] : managedCatalog.models as model (model.id)}
+        <section class="knob__body">
+          <h3 class="knob__label managed__source">{model.artifact}</h3>
+          {#if model.installed}
+            <p class="guard__body">Installed for this user. Starts when you generate a draft and releases memory after 5 idle minutes.</p>
+          {:else if !model.installable}
+            <p class="guard__body">Awaiting verification</p>
+          {/if}
+          {#if model.blocker}<p class="guard__body">{model.blocker}</p>{/if}
+          <p class="guard__body">License: {model.license}</p>
+          <p class="guard__body managed__source">License source: {model.license_source}</p>
+          <p class="guard__body managed__source">Model source: {model.source}</p>
+          {#if model.revision}<p class="guard__body managed__source">Revision: {model.revision}</p>{/if}
+          {#if model.quantization}<p class="guard__body">Quantization: {model.quantization}</p>{/if}
+          {#if model.download_size_bytes !== null}<p class="guard__body">Model download: {managedSize(model.download_size_bytes)}</p>{/if}
+          {#if model.memory_needs_mb !== null}<p class="guard__body">Working memory: {new Intl.NumberFormat().format(model.memory_needs_mb)} MB RAM/VRAM</p>{/if}
+          {#if model.context_limit_tokens !== null}<p class="guard__body">Context limit: {new Intl.NumberFormat().format(model.context_limit_tokens)} tokens</p>{/if}
+          {#if model.minimum_runtime_version}<p class="guard__body">Minimum runtime: {model.minimum_runtime_version}</p>{/if}
+          {#if model.sha256}<p class="guard__body managed__source">SHA-256: {model.sha256}</p>{/if}
+        </section>
+      {/each}
+      {#if managedBusy}
+        <p class="guard__body" role="status">Installing model and runtime…</p>
+      {:else if managedNotice}
+        <p class="guard__body" role="status">{managedNotice}</p>
+      {/if}
+      {#if managedError}<Notice tone="error">{managedError}</Notice>{/if}
+      <div class="managed__actions">
+        <Button variant="secondary" onclick={() => (managedDetailsOpen = false)}>Close</Button>
+        {#if managedBusy}
+          <Button variant="secondary" onclick={cancelManagedInstall}>Cancel install</Button>
+        {:else if managedReviewModel?.installable && !managedReviewModel.installed}
+          <Button onclick={() => void installManaged(managedReviewModel!.id)}>Install model and runtime</Button>
+        {/if}
+      </div>
+    </div>
+  {/if}
+</Dialog>
+
 <ConfirmDialog
   open={installConfirmOpen}
   title="Update available"
@@ -2200,6 +2271,22 @@
 </ConfirmDialog>
 
 <style>
+  .managed__actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+    margin-top: var(--space-2);
+  }
+
+  .managed__choice {
+    padding-block: var(--space-2);
+  }
+
+  .managed__source {
+    overflow-wrap: anywhere;
+  }
+
   .settings {
     max-width: 680px;
     margin: 0 auto;

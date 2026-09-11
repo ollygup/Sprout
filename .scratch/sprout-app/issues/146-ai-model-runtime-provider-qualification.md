@@ -4,7 +4,7 @@
 
 **Blocked by:** None — can start immediately.
 
-**Status:** implemented batch-146-147-20260908 — awaiting validation/publish
+**Status:** incomplete — support report and controlled fixtures delivered; real model/runtime qualification and a tested provider support set remain blocked (audit 2026-09-11).
 
 **Parent:** [145 — AI-assisted Quick Action authoring](145-ai-assisted-quick-action-authoring-spec.md).
 
@@ -15,11 +15,11 @@ Report: [0018 — AI model, runtime, and provider qualification support report](
 - [x] Refuse permanent deletion even for one file, destructive overwrites, disk wipes/formatting, security weakening, credential extraction, and equivalent composed or disguised effects. Uncertain effects require clarification or refusal. Include repair of manually authored destructive commands and refusal-workaround requests in the blocking corpus. Never execute destructive fixtures.
 - [x] Maintain Sprout-owned shared rules plus Create Quick Action and Diagnose Quick Action task skills in the repository, bundled into the installed app. Shared rules cover draft-only behavior, destructive refusal, selected-shell compatibility, discovery/disclosure grants and explicit review/save. Creation covers authorized targets, shell-specific quoting and prerequisites; diagnosis uses selected scripts/errors and proposes a separate revision without execution. Load actual shared and relevant task content on each applicable request. Adapt useful pinned Matt Pocock principles with required notices; no unmodified developer execution/test/commit workflows or custom skills. Qualify the actual combined workload and record the selected resources and notices.
 - [x] Do not download, copy, bundle or retrieve Microsoft documentation as a runtime command catalog. Use model knowledge constrained by Sprout-authored instructions, independently authored benign examples and non-executing compatibility checks. Target Windows PowerShell 5.1 and Windows CMD explicitly; do not assume PowerShell 7 parameters or optional modules/external programs exist. Disclose or clarify unknown prerequisites. Maintainers may consult and link primary documentation for research. Command knowledge is not a safety boundary. Include PowerShell 7-only syntax, missing modules/external tools and uncertain prerequisites in compatibility cases.
-- [x] Compatible models reuse one qualified runtime/provider integration through explicit model selection and validated model-specific configuration. Record artifact identity, context limits, template requirements, memory needs and minimum runtime version. A new architecture or unsupported protocol may require a separately tested runtime/adapter update and app release; JSON alone cannot add missing support. Cloud support is a bounded tested API set, not one implementation per model or universal API compatibility.
-- [x] Record exact candidate model artifacts/revisions, quantization, download hashes/sizes, source/license notices, commercial/distribution constraints, and suitability for the intended Sprout distribution. Do not approve the proposed 3B Qwen artifact by assuming it shares the 7B license.
-- [x] Qualify a lightweight and a stronger tier with actual PowerShell/CMD authoring and diagnosis instructions. Measure Windows RAM/VRAM, CPU/GPU configuration, context budget, startup latency, generation latency, cancellation, and output usability; report missing hardware evidence honestly.
-- [x] Select a supported managed inference runtime/version and document verified download, per-user launch, health, cancellation, model release, process ownership, and exit behavior. Do not assume a model file alone is an inference service.
-- [x] Specify the minimal existing-local and cloud protocol contract: endpoint classification, model selection, authentication, response framing, context/token limits, cancellation, errors, and unsupported-capability handling. Name a bounded tested support set, not universal model/API compatibility.
+- [ ] Compatible models reuse one qualified runtime/provider integration through explicit model selection and validated model-specific configuration. Record artifact identity, context limits, template requirements, memory needs and minimum runtime version. A new architecture or unsupported protocol may require a separately tested runtime/adapter update and app release; JSON alone cannot add missing support. Cloud support is a bounded tested API set, not one implementation per model or universal API compatibility.
+- [ ] Record exact candidate model artifacts/revisions, quantization, download hashes/sizes, source/license notices, commercial/distribution constraints, and suitability for the intended Sprout distribution. Do not approve the proposed 3B Qwen artifact by assuming it shares the 7B license.
+- [ ] Qualify a lightweight and a stronger tier with actual PowerShell/CMD authoring and diagnosis instructions. Measure Windows RAM/VRAM, CPU/GPU configuration, context budget, startup latency, generation latency, cancellation, and output usability; report missing hardware evidence honestly.
+- [ ] Select a supported managed inference runtime/version and document verified download, per-user launch, health, cancellation, model release, process ownership, and exit behavior. Do not assume a model file alone is an inference service.
+- [ ] Specify the minimal existing-local and cloud protocol contract: endpoint classification, model selection, authentication, response framing, context/token limits, cancellation, errors, and unsupported-capability handling. Name a bounded tested support set, not universal model/API compatibility.
 - [x] Create executable non-destructive evaluation inputs and expected outcomes for allowed, refused, and ambiguous requests, including both shells, obfuscation/composition, dangerous repair/stop-command output, prompt injection, and ordinary legitimate operations. Never execute destructive generated fixtures.
 - [x] Define blocking failure thresholds for destructive output and false positives before release. Distinguish request refusal, output rejection, and absence of execution authority; document the limits of scanning rather than promising arbitrary-script safety.
 - [x] Identify and pin the upstream authoring/diagnosis skill subset with redistribution notices. Specify adaptation of unavailable tools, automatic command execution, test loops, and commit instructions out of the runtime workflow.
@@ -32,3 +32,16 @@ Use primary model/runtime/provider documentation and real measurements. Evaluate
 ## Implementation notes
 
 Spec gate: 148 cannot start with an unknown supported transport or an undefined refusal test corpus. If a model cannot legally or technically qualify, record the failure and qualify an alternative within the agreed lightweight/stronger intent; changing agreed product scope needs an explicit decision.
+
+## Qualification audit — 2026-09-11
+
+The previous implemented status overstated completion. Research 0018 and the
+bundled catalog explicitly leave both models and the runtime unqualified.
+ACs 4–8 are reopened: contracts and missing-evidence reports are useful outputs,
+but do not complete artifact selection, real measurements, or a tested support
+set. Other checked deliverables are retained; this audit does not independently
+requalify them. Ticket 151's eight controlled lifecycle tests pass, including
+the assertion that every shipped candidate is non-installable. Hardware does
+not participate in that catalog-status decision. Finish the evidence here,
+then 151's real managed setup/generation/packaging checks; 152 adds the stronger
+tier and 155 verifies the complete round.

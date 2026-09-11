@@ -43,8 +43,11 @@ export default defineConfig({
       {
         plugins: [svelte()],
         resolve: {
-          alias: { $lib: path.resolve(import.meta.dirname, "src/lib") },
           conditions: ["browser", "node"],
+          alias: {
+            $lib: path.resolve(import.meta.dirname, "src/lib"),
+            "$app/navigation": path.resolve(import.meta.dirname, "node_modules/@sveltejs/kit/src/runtime/app/navigation.js"),
+          },
         },
         test: {
           name: "dom",

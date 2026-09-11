@@ -305,3 +305,22 @@ they already can.
   documentation, Microsoft PowerShell 5.1-vs-7 documentation, OWASP Excessive
   Agency and Prompt Injection guidance, PowerShell execution-policy and
   ShouldProcess/WhatIf limitation notes (per spec 145 further notes).
+
+## Implementation evidence — 2026-09-11 availability audit
+
+Ticket 151's managed integration exists, but the catalog still contains the
+unqualified candidates described above. `ManagedAi::catalog_status` in
+`src-tauri/src/ai_managed.rs` computes `installable` from runtime verification
+and `Catalog::qualified`; this path reads no CPU/GPU or available-memory data.
+Its test `shipped_catalog_is_fail_closed_and_status_creates_nothing` explicitly
+asserts that the runtime is unqualified and every candidate is non-installable.
+All eight managed tests passed on this device during this audit. They use
+controlled adapters and do not supply the missing real-model measurements.
+
+Consequently the identical result on machines with more VRAM is a release-data
+blocker. The previous “in this session” strings came from this bundled report,
+not a fresh hardware inspection of the user's machine. Ticket 146's implemented
+status and ACs 4–8 were corrected to show unfinished qualification; 151's three
+open ACs remain open. The Settings UI now gives the build-level reason first
+and discloses candidate evidence separately. Qualifying a real pair, completing
+151's end-to-end/installed-build checks, then delivering 152/155 remains necessary.

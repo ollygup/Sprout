@@ -7,6 +7,8 @@
   import TextInput from "./TextInput.svelte";
   import Select from "./Select.svelte";
   import TestResult from "./TestResult.svelte";
+  import Disclosure from "./Disclosure.svelte";
+  import InfoTip from "./InfoTip.svelte";
 
   let {
     open,
@@ -26,6 +28,7 @@
   let saving = $state(false);
   let error = $state("");
   let testing = $state(false);
+  let detailsOpen = $state(false);
 
   // The name follows the command until the user edits it by hand.
   let nameAuto = $state(true);
@@ -40,6 +43,7 @@
       saving = false;
       error = "";
       nameAuto = true;
+      detailsOpen = false;
     }
   });
 
@@ -100,7 +104,7 @@
   }
 </script>
 
-<Dialog {open} title="Add a command" onclose={oncancel} width={560}>
+<Dialog {open} title="Add a command" onclose={oncancel} width={560} focusTarget="#command-name">
   <form
     class="form"
     onsubmit={(e) => {
@@ -108,95 +112,95 @@
       submit();
     }}
   >
+    <TextInput
+      id="command-name"
+      label="Name"
+      required
+      placeholder="e.g. dev server…"
+      value={name}
+      onchange={onNameInput}
+    />
+
     <div class="field">
-      <label class="field__label" for="command-shell">Shell</label>
+      <div class="field__label-row">
+        <label class="field__label" for="command-shell">Shell</label>
+        <InfoTip label="How the shell works">
+          <p>PowerShell runs scripts in Windows PowerShell 5.1. CMD uses the Windows command shell. Direct exe starts an executable without expanding shell variables.</p>
+        </InfoTip>
+      </div>
       <Select
         id="command-shell"
         value={shell}
         onchange={(v) => (shell = v as LaunchShell)}
       >
-        <option value="powershell">PowerShell</option>
-        <option value="cmd">cmd</option>
-        <option value="none">Direct exe</option>
+        <option value="powershell">{launchShellLabel.powershell}</option>
+        <option value="cmd">{launchShellLabel.cmd}</option>
+        <option value="none">{launchShellLabel.none}</option>
       </Select>
-      <p class="field__hint">
-        {shell === "powershell"
-          ? "PowerShell runs the command as a script, so you can chain statements and use its cmdlets."
-          : shell === "cmd"
-            ? "cmd runs the command through the classic console shell."
-            : "Direct exe launches the executable itself — no shell wraps it, so environment syntax like $VAR or %VAR% is not expanded."}
-      </p>
     </div>
 
     <div class="field">
       <label class="field__label" for="command-line">Command</label>
       <textarea
         id="command-line"
+        name="command"
         class="field__cmd"
         rows="3"
-        placeholder={shell === "none" ? 'e.g. C:\\Tools\\dev-server.exe --port 8080' : shell === "powershell" ? 'e.g. nvm use 22 && node server.js' : 'e.g. start "" http://localhost:3000'}
+        placeholder={shell === "none" ? 'e.g. C:\\Tools\\dev-server.exe --port 8080…' : shell === "powershell" ? 'e.g. Start-Process notepad.exe…' : 'e.g. start "" http://localhost:3000…'}
         autocomplete="off"
         spellcheck="false"
         value={command}
         oninput={(e) => onCommandInput((e.target as HTMLTextAreaElement).value)}
       ></textarea>
-      <p class="field__hint">
-        {shell === "powershell"
-          ? "Multi-line scripts work — each line runs as part of one PowerShell command."
-          : shell === "cmd"
-            ? "Runs as: cmd /c {command}"
-            : "Runs the command line as-is; quote paths that contain spaces."}
-      </p>
     </div>
 
-    <label class="showwin">
-      <input
-        type="checkbox"
-        class="showwin__check"
-        checked={showWindow}
-        onchange={(e) => (showWindow = (e.target as HTMLInputElement).checked)}
+    <div class="advanced">
+      <Disclosure
+        open={detailsOpen}
+        controls="command-details-body"
+        label="Details"
+        onclick={() => (detailsOpen = !detailsOpen)}
       />
-      <span class="showwin__body">
-        <span class="showwin__title">Show a window</span>
-        <span class="showwin__hint">
-          Hidden by default — the command runs with no console window. Turn this
-          on to see the window the command creates.
-        </span>
-      </span>
-    </label>
+      <div id="command-details-body" class="advanced__body" hidden={!detailsOpen}>
+        <label class="showwin">
+          <input
+            type="checkbox"
+            class="showwin__check"
+            checked={showWindow}
+            onchange={(e) => (showWindow = (e.target as HTMLInputElement).checked)}
+          />
+          <span class="showwin__body">
+            <span class="showwin__title">Show a window</span>
+            <span class="showwin__hint">
+              Commands run without a console window by default.
+            </span>
+          </span>
+        </label>
 
-    <label class="showwin">
-      <input
-        type="checkbox"
-        class="showwin__check"
-        checked={showInDock}
-        onchange={(e) => (showInDock = (e.target as HTMLInputElement).checked)}
-      />
-      <span class="showwin__body">
-        <span class="showwin__title">Show in dock</span>
-        <span class="showwin__hint">
-          Listed in the Quick Launch dock. Uncheck to keep it in the main app only.
-        </span>
-      </span>
-    </label>
+        <label class="showwin">
+          <input
+            type="checkbox"
+            class="showwin__check"
+            checked={showInDock}
+            onchange={(e) => (showInDock = (e.target as HTMLInputElement).checked)}
+          />
+          <span class="showwin__body">
+            <span class="showwin__title">Show in dock</span>
+            <span class="showwin__hint">
+              Uncheck to keep it in the main app only.
+            </span>
+          </span>
+        </label>
 
-    <TextInput
-      id="command-name"
-      label="Name"
-      required
-      placeholder="e.g. dev server"
-      value={name}
-      onchange={onNameInput}
-      hint="Suggestions come from the command."
-    />
-
-    <TestResult
-      {open}
-      {command}
-      bind:testing
-      probe={() => testLaunchCommand(shell, command.trim())}
-      onerror={(message) => (error = message)}
-    />
+        <TestResult
+          {open}
+          {command}
+          bind:testing
+          probe={() => testLaunchCommand(shell, command.trim())}
+          onerror={(message) => (error = message)}
+        />
+      </div>
+    </div>
 
     {#if error}
       <p class="form__error" role="alert">{error}</p>
@@ -237,6 +241,29 @@
     color: var(--text-muted);
   }
 
+  .field__label-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+  }
+
+  .advanced {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .advanced__body {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+    padding-top: var(--space-3);
+    border-top: 1px dashed var(--border);
+  }
+
+  .advanced__body[hidden] {
+    display: none;
+  }
+
   .field__cmd {
     width: 100%;
     resize: vertical;
@@ -262,12 +289,6 @@
   .field__cmd::placeholder {
     color: var(--text-muted);
     opacity: 0.75;
-  }
-
-  .field__hint {
-    margin: 0;
-    font-size: var(--text-xs);
-    color: var(--text-muted);
   }
 
   .showwin {
