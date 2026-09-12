@@ -463,6 +463,8 @@ mod tests {
             note: None,
             auto_run: false,
             show_in_dock: true,
+            pre_check: None,
+            pre_fix: None,
         }
     }
 
@@ -471,6 +473,7 @@ mod tests {
             name: name.into(),
             content: format!("content of {name}"),
             show_in_dock: true,
+            image: None,
         }
     }
 

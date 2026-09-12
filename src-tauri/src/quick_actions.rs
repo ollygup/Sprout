@@ -91,6 +91,19 @@ pub struct QuickActionInput {
     /// backups means visible.
     #[serde(default = "default_show_in_dock")]
     pub show_in_dock: bool,
+    /// The pre-action check: a shell command run first on every Run, under
+    /// the action's own shell and working directory inside a short timebox —
+    /// exit 0 lets the main command run, anything else blocks it before
+    /// anything spawns. Trimmed on save; empty becomes `None` so an unused
+    /// section leaves no trace, the same rule as the note.
+    #[serde(default)]
+    pub pre_check: Option<String>,
+    /// The pre-action fix: offered only when the check blocks a run, and run
+    /// only through its explicit command — never as part of Run itself.
+    /// Meaningless without a check, so saving one alone is refused. Same
+    /// trim-empty-to-`None` rule as the check.
+    #[serde(default)]
+    pub pre_fix: Option<String>,
 }
 
 /// Missing `show_in_dock` means visible — legacy rows and backup files predate
@@ -220,7 +233,16 @@ pub fn validate_quick_action(action: &QuickActionInput) -> std::result::Result<(
     if action.command.trim().is_empty() {
         return Err("Quick action command must not be empty".into());
     }
-    validate_cwd(action.cwd.as_deref())
+    validate_cwd(action.cwd.as_deref())?;
+    // A fix without a check has no trigger — it would sit in storage with no
+    // path that ever runs it, so the save is refused with a plain error
+    // instead of persisting a dead field.
+    if normalized_pre_check(action).is_none() && normalized_pre_fix(action).is_some() {
+        return Err(
+            "A pre-action fix needs a pre-action check — add a check command or clear the fix.".into(),
+        );
+    }
+    Ok(())
 }
 
 /// The name of an existing action with the same payload — shell plus command
@@ -293,6 +315,29 @@ pub(crate) fn normalized_note(action: &QuickActionInput) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The stored pre-action check: whitespace-trimmed, empty values become
+/// `None` so an unused section persists no trace. Stored raw otherwise — the
+/// script keeps its internal whitespace and line breaks, like the command.
+pub(crate) fn normalized_pre_check(action: &QuickActionInput) -> Option<String> {
+    action
+        .pre_check
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// The stored pre-action fix: the same trim-empty-to-`None` rule as the
+/// check — only meaningful alongside one, which validation enforces.
+pub(crate) fn normalized_pre_fix(action: &QuickActionInput) -> Option<String> {
+    action
+        .pre_fix
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 fn action_from_row(row: &rusqlite::Row) -> Result<QuickAction> {
     // Reads `note` via COALESCE(`note`, `notes`) so a DB that was migrated
     // with either column name returns the stored note. `notes` is the alias
@@ -328,6 +373,10 @@ fn action_from_row(row: &rusqlite::Row) -> Result<QuickAction> {
             auto_run: row.get::<_, i64>(9).unwrap_or(0) != 0,
             // Missing dock visibility means visible — legacy rows predate it.
             show_in_dock: row.get::<_, Option<i64>>(11).ok().flatten().unwrap_or(1) != 0,
+            // Missing pre-action values mean no pre-action — rows and backup
+            // files written before the section existed carry no such keys.
+            pre_check: row.get::<_, Option<String>>(12).unwrap_or(None),
+            pre_fix: row.get::<_, Option<String>>(13).unwrap_or(None),
         },
         group_id: row.get(10)?,
     })
@@ -336,7 +385,7 @@ fn action_from_row(row: &rusqlite::Row) -> Result<QuickAction> {
 /// Every Quick Action in list order (position, then insertion order).
 pub fn list_quick_actions(conn: &Connection) -> Result<Vec<QuickAction>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, shell, command, cwd, stoppable, stop_command, note, notes, auto_run, group_id, show_in_dock
+        "SELECT id, name, shell, command, cwd, stoppable, stop_command, note, notes, auto_run, group_id, show_in_dock, pre_check, pre_fix
          FROM quick_actions ORDER BY position, id",
     )?;
     let rows = stmt.query_map([], action_from_row)?;
@@ -346,7 +395,7 @@ pub fn list_quick_actions(conn: &Connection) -> Result<Vec<QuickAction>> {
 /// Fetches one action by id — the runner's lookup.
 pub fn get_quick_action(conn: &Connection, id: i64) -> Result<Option<QuickAction>> {
     conn.query_row(
-        "SELECT id, name, shell, command, cwd, stoppable, stop_command, note, notes, auto_run, group_id, show_in_dock
+        "SELECT id, name, shell, command, cwd, stoppable, stop_command, note, notes, auto_run, group_id, show_in_dock, pre_check, pre_fix
          FROM quick_actions WHERE id = ?1",
         params![id],
         action_from_row,
@@ -367,8 +416,8 @@ pub fn list_auto_run_actions(conn: &Connection) -> Result<Vec<QuickAction>> {
 /// The one INSERT shape for a Quick Action, position as the trailing
 /// placeholder — shared by `create_quick_action` and `append_action`.
 const INSERT_ACTION_SQL: &str =
-    "INSERT INTO quick_actions (name, shell, command, cwd, stoppable, stop_command, note, notes, auto_run, show_in_dock, position)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)";
+    "INSERT INTO quick_actions (name, shell, command, cwd, stoppable, stop_command, note, notes, auto_run, show_in_dock, pre_check, pre_fix, position)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)";
 
 /// Appends an action at the end of the list (the next free position).
 pub fn create_quick_action(conn: &Connection, action: &QuickActionInput) -> Result<QuickAction> {
@@ -387,6 +436,8 @@ pub fn create_quick_action(conn: &Connection, action: &QuickActionInput) -> Resu
             &note,
             &action.auto_run,
             &action.show_in_dock,
+            &normalized_pre_check(action),
+            &normalized_pre_fix(action),
         ],
     )?;
     Ok(get_quick_action(conn, id)?.expect("just inserted"))
@@ -394,7 +445,8 @@ pub fn create_quick_action(conn: &Connection, action: &QuickActionInput) -> Resu
 
 /// [`create_quick_action`]'s shape inside a caller-owned transaction — the
 /// whole-app backup's merge appends every action under ONE transaction.
-pub(crate) fn append_action(conn: &Connection, action: &QuickActionInput) -> Result<()> {
+/// Returns the new row id so the merge can hang the action's files on it.
+pub(crate) fn append_action(conn: &Connection, action: &QuickActionInput) -> Result<i64> {
     let note = normalized_note(action);
     crate::ordered_list::OrderedList::QUICK_ACTIONS
         .append_at_end(
@@ -411,9 +463,10 @@ pub(crate) fn append_action(conn: &Connection, action: &QuickActionInput) -> Res
                 &note,
                 &action.auto_run,
                 &action.show_in_dock,
+                &normalized_pre_check(action),
+                &normalized_pre_fix(action),
             ],
         )
-        .map(|_| ())
 }
 
 /// Replaces an action's script and metadata in place (same id). Position and
@@ -424,8 +477,8 @@ pub fn update_quick_action(conn: &Connection, action: &QuickAction) -> Result<()
     conn.execute(
         "UPDATE quick_actions
          SET name = ?1, shell = ?2, command = ?3, cwd = ?4, stoppable = ?5, stop_command = ?6, note = ?7, notes = ?7,
-             auto_run = ?8, show_in_dock = ?9
-         WHERE id = ?10",
+             auto_run = ?8, show_in_dock = ?9, pre_check = ?10, pre_fix = ?11
+         WHERE id = ?12",
         params![
             action.action.name.trim(),
             action.action.shell.as_str(),
@@ -436,6 +489,8 @@ pub fn update_quick_action(conn: &Connection, action: &QuickAction) -> Result<()
             note,
             action.action.auto_run,
             action.action.show_in_dock,
+            normalized_pre_check(&action.action),
+            normalized_pre_fix(&action.action),
             action.id,
         ],
     )?;
@@ -452,6 +507,217 @@ pub fn delete_quick_action(conn: &Connection, id: i64) -> Result<()> {
 /// approach as the Launch list (ticket 38) is the obviously-correct one.
 pub fn move_quick_action(conn: &Connection, id: i64, to_position: i64) -> Result<()> {
     crate::ordered_list::OrderedList::QUICK_ACTIONS.move_to(conn, id, to_position)
+}
+
+// ---------------------------------------------------------------------------
+// Action files: one stored blob per attached file, referenced from the
+// command only through the `<FilesDir>` placeholder. The execution owner
+// stages the blobs to a per-run directory and expands the placeholder;
+// this module only stores, validates, and hands out the bytes.
+// ---------------------------------------------------------------------------
+
+/// The largest single attached file (v1 cap, enforced before anything is
+/// written to the database).
+pub const MAX_ACTION_FILE_BYTES: usize = 5 * 1024 * 1024;
+/// The largest all files of one action may total (v1 cap, enforced before
+/// anything is written to the database).
+pub const MAX_ACTION_FILES_BYTES: usize = 20 * 1024 * 1024;
+/// The longest file name kept, so an extreme name can neither break the
+/// staging path nor the backup envelope.
+pub const MAX_ACTION_FILENAME_CHARS: usize = 255;
+
+/// One attached file as listed: identity plus name and size, never the bytes.
+/// The bytes travel only into the per-run staging directory and the backup.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuickActionFileMeta {
+    pub id: i64,
+    pub action_id: i64,
+    pub filename: String,
+    pub size: u64,
+}
+
+/// The plain file-name rule: basenames only, so a stored name can never
+/// escape the per-run staging directory or a backup bundle. Returns the
+/// trimmed name the callers persist.
+pub fn validate_action_filename(name: &str) -> std::result::Result<String, String> {
+    let clean = name.trim();
+    if clean.is_empty() {
+        return Err("File name must not be empty.".into());
+    }
+    if clean.contains('/') || clean.contains('\\') {
+        return Err(format!(
+            "'{clean}' is not a plain file name — folders and paths are not allowed, only the file name itself."
+        ));
+    }
+    if clean == "." || clean == ".." {
+        return Err(format!("'{clean}' is not a usable file name."));
+    }
+    if clean.chars().any(|c| (c as u32) < 0x20) {
+        return Err(format!("'{clean}' contains a control character and cannot be stored."));
+    }
+    if clean.ends_with('.') {
+        return Err(format!(
+            "'{clean}' must not end with a dot — Windows would silently rename it on staging."
+        ));
+    }
+    if clean.chars().count() > MAX_ACTION_FILENAME_CHARS {
+        return Err(format!(
+            "File name is too long — at most {MAX_ACTION_FILENAME_CHARS} characters."
+        ));
+    }
+    Ok(clean.to_string())
+}
+
+/// The one INSERT shape for an attached file. Callers own validation and cap
+/// checks (`attach_quick_action_file` for commands, the backup merge for its
+/// transaction); this only writes.
+pub(crate) fn insert_action_file(
+    conn: &Connection,
+    action_id: i64,
+    filename: &str,
+    bytes: &[u8],
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO quick_action_files (action_id, filename, bytes) VALUES (?1, ?2, ?3)",
+        params![action_id, filename, bytes],
+    )?;
+    Ok(())
+}
+
+/// Stores one attached file on an action: the action must exist, the name
+/// follows the plain file-name rule and is unique on that action
+/// case-insensitively (Windows file systems fold case), and both v1 caps
+/// hold. Every rejection is a plain message; the caps are checked before the
+/// INSERT so an oversized file never reaches the disk.
+pub fn attach_quick_action_file(
+    conn: &Connection,
+    action_id: i64,
+    filename: &str,
+    bytes: &[u8],
+) -> std::result::Result<QuickActionFileMeta, String> {
+    let exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM quick_actions WHERE id = ?1)",
+            params![action_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if !exists {
+        return Err("That quick action is gone — refresh and try again.".into());
+    }
+    let clean = validate_action_filename(filename)?;
+    if bytes.len() > MAX_ACTION_FILE_BYTES {
+        return Err(format!(
+            "'{clean}' is {} — files must stay at or under 5 MB.",
+            human_bytes(bytes.len()),
+        ));
+    }
+    let taken: Option<String> = conn
+        .query_row(
+            "SELECT filename FROM quick_action_files
+              WHERE action_id = ?1 AND filename COLLATE NOCASE = ?2",
+            params![action_id, clean],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if let Some(taken) = taken {
+        return Err(format!("'{taken}' is already attached to this action."));
+    }
+    let used: i64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(LENGTH(bytes)), 0) FROM quick_action_files WHERE action_id = ?1",
+            params![action_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if used + bytes.len() as i64 > MAX_ACTION_FILES_BYTES as i64 {
+        return Err("These files would exceed the 20 MB per-action limit — remove one first.".into());
+    }
+    conn.execute(
+        "INSERT INTO quick_action_files (action_id, filename, bytes) VALUES (?1, ?2, ?3)",
+        params![action_id, clean, bytes],
+    )
+    .map_err(|e| e.to_string())?;
+    let id = conn.last_insert_rowid();
+    Ok(QuickActionFileMeta {
+        id,
+        action_id,
+        filename: clean,
+        size: bytes.len() as u64,
+    })
+}
+
+/// Deletes one attached file row. An unknown id is a plain error, never a
+/// silent success.
+pub fn remove_quick_action_file(conn: &Connection, file_id: i64) -> std::result::Result<(), String> {
+    let changed = conn
+        .execute("DELETE FROM quick_action_files WHERE id = ?1", params![file_id])
+        .map_err(|e| e.to_string())?;
+    if changed == 0 {
+        return Err("That file is gone — refresh and try again.".into());
+    }
+    Ok(())
+}
+
+fn file_meta_from_row(row: &rusqlite::Row) -> Result<QuickActionFileMeta> {
+    Ok(QuickActionFileMeta {
+        id: row.get(0)?,
+        action_id: row.get(1)?,
+        filename: row.get(2)?,
+        size: row.get::<_, i64>(3)? as u64,
+    })
+}
+
+/// Every file on one action in name order (case-insensitive, then insertion):
+/// a deterministic listing the editor autocomplete and the export share, so
+/// both surfaces see the same sequence.
+pub fn list_quick_action_files(
+    conn: &Connection,
+    action_id: i64,
+) -> std::result::Result<Vec<QuickActionFileMeta>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, action_id, filename, LENGTH(bytes)
+              FROM quick_action_files WHERE action_id = ?1
+              ORDER BY filename COLLATE NOCASE, id",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![action_id], file_meta_from_row)
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>>>()
+        .map_err(|e| e.to_string())
+}
+
+/// Every file on one action with its bytes, in the same name order as
+/// [`list_quick_action_files`]: what the run stager and the backup read.
+pub(crate) fn list_quick_action_file_blobs(
+    conn: &Connection,
+    action_id: i64,
+) -> std::result::Result<Vec<(String, Vec<u8>)>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT filename, bytes FROM quick_action_files
+              WHERE action_id = ?1 ORDER BY filename COLLATE NOCASE, rowid",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![action_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>>>()
+        .map_err(|e| e.to_string())
+}
+
+fn human_bytes(len: usize) -> String {
+    const MB: usize = 1024 * 1024;
+    if len >= MB {
+        format!("{:.1} MB", len as f64 / MB as f64)
+    } else {
+        format!("{} KB", len.max(1024) / 1024)
+    }
 }
 
 /// Spawns the action's command hidden (`CREATE_NO_WINDOW`) under its selected
@@ -744,6 +1010,160 @@ pub(crate) fn test_quick_action_with_timeout(
     timed_test_result(cwd, &exe, &args, timeout)
 }
 
+// ---------------------------------------------------------------------------
+// The pre-action check-first chain: per-action optional check + fix, run
+// under the action's own shell and directory through the timeboxed Test core
+// above — never a second runner (ADR-0029 keeps invocation knowledge with
+// the single Windows execution owner).
+// ---------------------------------------------------------------------------
+
+/// How long one pre-action stage (check or fix) may run: a short box on the
+/// shared timeboxed Test core. A stage that outlives it is killed and
+/// reported as timed out — honestly blocked, never passed.
+pub const PRE_ACTION_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// What one pre-action check decided: a pass lets the main command run, a
+/// fail blocks it before anything spawns. The blocking outcome is the warn
+/// dialog's payload — the trimmed check output plus whether a fix exists to
+/// offer — so the dialog never re-reads the database.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PreCheckReport {
+    pub passed: bool,
+    pub output: String,
+    pub timed_out: bool,
+    pub exit_code: Option<i32>,
+    pub duration_ms: u64,
+    pub has_fix: bool,
+}
+
+/// What one explicit fix run decided. Reported back to its caller; the main
+/// command still needs a fresh Run — a fix never continues into main on its
+/// own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PreFixResult {
+    pub exit_code: Option<i32>,
+    pub timed_out: bool,
+    pub output: String,
+    pub duration_ms: u64,
+}
+
+/// Runs the action's pre-action check under its own shell and working
+/// directory through the timeboxed Test core. Pass is exit 0 inside the box
+/// only — a non-zero exit, a timeout, or a failure to start all block the
+/// run. An action with no check configured trivially passes; the run chain
+/// only calls this when one is set.
+pub fn run_pre_check(action: &QuickActionInput) -> PreCheckReport {
+    run_pre_check_with_timeout(action, PRE_ACTION_TIMEOUT)
+}
+
+/// The timeboxed core behind [`run_pre_check`], parameterized so tests can
+/// use a short box — the same shape as the Test command's own core.
+pub(crate) fn run_pre_check_with_timeout(
+    action: &QuickActionInput,
+    timeout: Duration,
+) -> PreCheckReport {
+    let started = Instant::now();
+    let (timed_out, exit_code, output) = match normalized_pre_check(action) {
+        Some(check) => {
+            let run = test_quick_action_with_timeout(
+                action.shell,
+                &check,
+                normalized_cwd(action).as_deref(),
+                timeout,
+            );
+            (run.timed_out, run.exit_code, run.output)
+        }
+        None => (false, Some(0), String::new()),
+    };
+    PreCheckReport {
+        passed: !timed_out && exit_code == Some(0),
+        // Trimmed: the capture trails newlines (and the timeout marker trails
+        // its own), and the warn payload shows this verbatim.
+        output: output.trim().to_string(),
+        timed_out,
+        exit_code,
+        duration_ms: started.elapsed().as_millis() as u64,
+        has_fix: normalized_pre_fix(action).is_some(),
+    }
+}
+
+/// Runs the action's fix once: same shell, directory, and box as the check.
+/// The caller owns the explicit-click and logging policy; this only executes
+/// and reports. A missing fix is refused by the command layer before this is
+/// reached; the empty arm below only keeps the function total.
+pub fn run_pre_fix(action: &QuickActionInput) -> PreFixResult {
+    let started = Instant::now();
+    let run = match normalized_pre_fix(action) {
+        Some(fix) => test_quick_action_with_timeout(
+            action.shell,
+            &fix,
+            normalized_cwd(action).as_deref(),
+            PRE_ACTION_TIMEOUT,
+        ),
+        None => TestResult {
+            timed_out: false,
+            exit_code: None,
+            output: String::new(),
+        },
+    };
+    PreFixResult {
+        exit_code: run.exit_code,
+        timed_out: run.timed_out,
+        output: run.output.trim().to_string(),
+        duration_ms: started.elapsed().as_millis() as u64,
+    }
+}
+
+/// Writes one pre-action stage's header (`pre-check start …` / `pre-fix
+/// start …`) with the script and directory it ran with — the staged twin of
+/// the action header, so one `output.log` reads as check, fix, and action
+/// sections each with their own exit line (ADR-0017 run logging).
+pub fn write_stage_header(
+    log_path: &Path,
+    stage: &str,
+    action_name: &str,
+    action_id: i64,
+    script: &str,
+    cwd: Option<&str>,
+) {
+    append_log_line(
+        log_path,
+        &format!(
+            "{} {stage} start \"{}\" (id={action_id})",
+            log_stamp(),
+            action_name.trim()
+        ),
+    );
+    append_log_line(log_path, &format!("  command: {}", script.trim()));
+    if let Some(cwd) = cwd.map(str::trim).filter(|c| !c.is_empty()) {
+        append_log_line(log_path, &format!("  cwd: {cwd}"));
+    }
+}
+
+/// Appends a finished stage's captured output. Skipped when empty — a silent
+/// stage leaves only its header and exit lines.
+pub fn write_stage_output(log_path: &Path, output: &str) {
+    if !output.trim().is_empty() {
+        append_log_line(log_path, output.trim());
+    }
+}
+
+/// Writes one pre-action stage's exit line (`pre-check exited code=1`) — the
+/// staged twin of the action exit line, with the same no-code wording when
+/// the stage never produced one (timeout or failure to start).
+pub fn write_stage_exit(log_path: &Path, stage: &str, code: Option<i32>) {
+    match code {
+        Some(code) => append_log_line(
+            log_path,
+            &format!("{} {stage} exited code={code}", log_stamp()),
+        ),
+        None => append_log_line(
+            log_path,
+            &format!("{} {stage} exited (code unavailable)", log_stamp()),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -763,6 +1183,8 @@ mod tests {
             note: None,
             auto_run: false,
             show_in_dock: true,
+            pre_check: None,
+            pre_fix: None,
         }
     }
 
@@ -1039,6 +1461,8 @@ mod tests {
             note: None,
             auto_run: false,
             show_in_dock: true,
+            pre_check: None,
+            pre_fix: None,
         };
         let mut child = spawn_quick_action(&action, None).expect("spawned");
         let _ = child.wait();
@@ -1172,6 +1596,8 @@ mod tests {
             note: None,
             auto_run: false,
             show_in_dock: true,
+            pre_check: None,
+            pre_fix: None,
         };
         let mut child = spawn_quick_action(&action, Some(&output)).expect("spawned");
         let _ = child.wait();
@@ -1743,5 +2169,370 @@ mod tests {
             list_quick_actions(&conn).unwrap()[0].action.shell,
             QuickActionShell::Powershell
         );
+    }
+
+    // Pre-action (check + fix): stored shape, validation, chain, logging.
+
+    #[test]
+    fn pre_action_empty_section_persists_no_trace() {
+        let conn = conn();
+        // Both absent.
+        create_quick_action(&conn, &input("plain")).unwrap();
+        // Both empty / whitespace-only.
+        let mut blank = input("blank");
+        blank.pre_check = Some("   ".into());
+        blank.pre_fix = Some(String::new());
+        create_quick_action(&conn, &blank).unwrap();
+        let listed = list_quick_actions(&conn).unwrap();
+        assert_eq!(listed[0].action.pre_check, None);
+        assert_eq!(listed[0].action.pre_fix, None);
+        assert_eq!(listed[1].action.pre_check, None);
+        assert_eq!(listed[1].action.pre_fix, None);
+    }
+
+    #[test]
+    fn pre_action_check_only_and_check_plus_fix_persist_trimmed() {
+        let conn = conn();
+        let mut check_only = input("check-only");
+        check_only.pre_check = Some("  exit 0  ".into());
+        create_quick_action(&conn, &check_only).unwrap();
+        let mut both = input("both");
+        both.pre_check = Some("  node --version  ".into());
+        both.pre_fix = Some("  npm install  ".into());
+        create_quick_action(&conn, &both).unwrap();
+        let listed = list_quick_actions(&conn).unwrap();
+        assert_eq!(listed[0].action.pre_check.as_deref(), Some("exit 0"));
+        assert_eq!(listed[0].action.pre_fix, None);
+        assert_eq!(
+            listed[1].action.pre_check.as_deref(),
+            Some("node --version")
+        );
+        assert_eq!(listed[1].action.pre_fix.as_deref(), Some("npm install"));
+        // Clearing the section removes every trace.
+        let mut cleared = listed[1].clone();
+        cleared.action.pre_check = Some("   ".into());
+        cleared.action.pre_fix = None;
+        update_quick_action(&conn, &cleared).unwrap();
+        let stored = get_quick_action(&conn, cleared.id).unwrap().unwrap();
+        assert_eq!(stored.action.pre_check, None);
+        assert_eq!(stored.action.pre_fix, None);
+    }
+
+    #[test]
+    fn pre_action_fix_without_check_is_refused() {
+        let mut orphan = input("orphan-fix");
+        orphan.pre_fix = Some("npm install".into());
+        let err = validate_quick_action(&orphan).unwrap_err();
+        assert!(err.contains("needs a pre-action check"), "{err}");
+        // A whitespace-only check is no check.
+        orphan.pre_check = Some("   ".into());
+        let err = validate_quick_action(&orphan).unwrap_err();
+        assert!(err.contains("needs a pre-action check"), "{err}");
+        // Check-only stays valid, as does no section at all.
+        let mut check_only = input("check-only");
+        check_only.pre_check = Some("exit 0".into());
+        assert!(validate_quick_action(&check_only).is_ok());
+        assert!(validate_quick_action(&input("plain")).is_ok());
+    }
+
+    #[test]
+    fn pre_action_fields_roundtrip_across_reopen() {
+        let dir = tempfile::tempdir().unwrap().into_path();
+        {
+            let conn = crate::db::init_at(&dir).unwrap();
+            let mut guarded = input("guarded");
+            guarded.pre_check = Some("node --version".into());
+            guarded.pre_fix = Some("npm install".into());
+            create_quick_action(&conn, &guarded).unwrap();
+        }
+        let conn = crate::db::init_at(&dir).unwrap();
+        let listed = list_quick_actions(&conn).unwrap();
+        assert_eq!(
+            listed[0].action.pre_check.as_deref(),
+            Some("node --version")
+        );
+        assert_eq!(listed[0].action.pre_fix.as_deref(), Some("npm install"));
+    }
+
+    #[test]
+    fn pre_action_migrates_old_databases_as_absent_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap().into_path();
+        std::fs::create_dir_all(&dir).unwrap();
+        {
+            let raw = rusqlite::Connection::open(dir.join("sprout.db")).unwrap();
+            raw.execute_batch(
+                "CREATE TABLE quick_actions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    shell TEXT NOT NULL DEFAULT 'powershell' CHECK (shell IN ('powershell', 'cmd')),
+                    command TEXT NOT NULL,
+                    cwd TEXT,
+                    stoppable INTEGER NOT NULL DEFAULT 0,
+                    stop_command TEXT,
+                    note TEXT,
+                    notes TEXT,
+                    auto_run INTEGER NOT NULL DEFAULT 0,
+                    show_in_dock INTEGER NOT NULL DEFAULT 1,
+                    position INTEGER NOT NULL DEFAULT 0
+                );
+                INSERT INTO quick_actions (name, command, position)
+                VALUES ('legacy', 'echo hi', 0);",
+            )
+            .unwrap();
+        }
+        let conn = crate::db::init_at(&dir).unwrap();
+        for col in ["pre_check", "pre_fix"] {
+            let has: i64 = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM pragma_table_info('quick_actions') WHERE name = '{col}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(has, 1, "column {col} must exist after migration");
+        }
+        let listed = list_quick_actions(&conn).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].action.pre_check, None);
+        assert_eq!(listed[0].action.pre_fix, None);
+        drop(conn);
+        let conn = crate::db::init_at(&dir).unwrap();
+        assert_eq!(list_quick_actions(&conn).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn pre_action_fields_do_not_affect_dedup_identity() {
+        let conn = conn();
+        let mut first = input("first");
+        first.command = "docker compose up -d".into();
+        first.pre_check = Some("exit 0".into());
+        create_quick_action(&conn, &first).unwrap();
+        // Same command+cwd collides regardless of pre-action content.
+        let mut twin = input("second");
+        twin.command = "docker compose up -d".into();
+        twin.pre_check = Some("different check".into());
+        twin.pre_fix = Some("different fix".into());
+        assert_eq!(
+            colliding_action(&conn, &twin, None).unwrap().as_deref(),
+            Some("first")
+        );
+    }
+
+    #[test]
+    fn pre_check_pass_reports_cleanly() {
+        let mut passing = input("passing");
+        passing.pre_check = Some("exit 0".into());
+        let report = run_pre_check_with_timeout(&passing, Duration::from_secs(30));
+        assert!(report.passed);
+        assert!(!report.timed_out);
+        assert_eq!(report.exit_code, Some(0));
+        assert!(!report.has_fix);
+        assert!(report.duration_ms < 30_000);
+    }
+
+    #[test]
+    fn pre_check_fail_carries_trimmed_output_exit_and_fix_presence() {
+        let mut failing = input("failing");
+        failing.pre_check = Some("Write-Output boom-marker; exit 3".into());
+        failing.pre_fix = Some("echo fix-it".into());
+        let report = run_pre_check_with_timeout(&failing, Duration::from_secs(30));
+        assert!(!report.passed);
+        assert!(!report.timed_out);
+        assert_eq!(report.exit_code, Some(3));
+        assert!(report.has_fix);
+        assert!(report.output.contains("boom-marker"), "{}", report.output);
+        assert_eq!(report.output, report.output.trim());
+    }
+
+    #[test]
+    fn pre_check_timeout_blocks_and_reports_honestly() {
+        let mut hanging = input("hanging");
+        hanging.pre_check = Some("Start-Sleep -Seconds 30".into());
+        let report = run_pre_check_with_timeout(&hanging, Duration::from_secs(2));
+        assert!(!report.passed);
+        assert!(report.timed_out);
+        assert_eq!(report.exit_code, None);
+        assert!(report.output.contains("TIMED OUT"), "{}", report.output);
+    }
+
+    #[test]
+    fn pre_check_absent_trivially_passes() {
+        let report = run_pre_check(&input("plain"));
+        assert!(report.passed);
+        assert_eq!(report.output, "");
+        assert!(!report.has_fix);
+    }
+
+    #[test]
+    fn pre_fix_runs_once_and_reports() {
+        let mut guarded = input("guarded");
+        guarded.pre_check = Some("exit 1".into());
+        guarded.pre_fix = Some("Write-Output fix-ran-marker".into());
+        let result = run_pre_fix(&guarded);
+        assert!(!result.timed_out);
+        assert_eq!(result.exit_code, Some(0));
+        assert!(result.output.contains("fix-ran-marker"), "{}", result.output);
+    }
+
+    #[test]
+    fn pre_action_stages_log_under_distinct_headers_with_exits() {
+        let dir = tempfile::tempdir().unwrap().into_path();
+        let log_path = dir.join("output.log");
+        write_stage_header(
+            &log_path,
+            "pre-check",
+            "dev-services",
+            7,
+            "node --version",
+            Some(r"D:\Work"),
+        );
+        write_stage_output(&log_path, "v22.1.0");
+        write_stage_exit(&log_path, "pre-check", Some(0));
+        write_stage_header(&log_path, "pre-fix", "dev-services", 7, "npm install", None);
+        write_stage_exit(&log_path, "pre-fix", Some(1));
+        let contents = std::fs::read_to_string(&log_path).unwrap();
+        assert!(
+            contents.contains("pre-check start \"dev-services\" (id=7)"),
+            "{contents}"
+        );
+        assert!(contents.contains("command: node --version"), "{contents}");
+        assert!(contents.contains(r"cwd: D:\Work"), "{contents}");
+        assert!(contents.contains("v22.1.0"), "{contents}");
+        assert!(contents.contains("pre-check exited code=0"), "{contents}");
+        assert!(
+            contents.contains("pre-fix start \"dev-services\" (id=7)"),
+            "{contents}"
+        );
+        assert!(contents.contains("pre-fix exited code=1"), "{contents}");
+        // Empty output leaves only header + exit.
+        let quiet = dir.join("quiet.log");
+        write_stage_header(&quiet, "pre-check", "x", 1, "exit 0", None);
+        write_stage_output(&quiet, "   \n  ");
+        write_stage_exit(&quiet, "pre-check", None);
+        let contents = std::fs::read_to_string(&quiet).unwrap();
+        assert!(
+            contents.contains("pre-check exited (code unavailable)"),
+            "{contents}"
+        );
+    }
+
+    fn filed_action(conn: &Connection) -> i64 {
+        create_quick_action(conn, &input("with-files")).unwrap().id
+    }
+
+    #[test]
+    fn filenames_are_basename_only_trimmed_and_unique_per_action() {
+        let c = conn();
+        let id = filed_action(&c);
+        let meta = attach_quick_action_file(&c, id, "  notes.txt  ", b"hi").unwrap();
+        assert_eq!(meta.filename, "notes.txt");
+        assert_eq!(meta.size, 2);
+
+        let err = attach_quick_action_file(&c, id, "NOTES.TXT", b"dup").unwrap_err();
+        assert!(err.contains("already attached"), "{err}");
+        for bad in ["", "   ", "sub/dir.txt", "..\\evil.txt", ".", "..", "trail."] {
+            let err = attach_quick_action_file(&c, id, bad, b"x").unwrap_err();
+            assert!(!err.is_empty(), "{bad:?} must fail");
+        }
+        let err = attach_quick_action_file(&c, 9999, "ok.txt", b"x").unwrap_err();
+        assert!(err.contains("gone"), "{err}");
+
+        // Same name on a different action is fine.
+        let other = filed_action(&c);
+        assert!(attach_quick_action_file(&c, other, "notes.txt", b"hi").is_ok());
+    }
+
+    #[test]
+    fn caps_hold_before_anything_is_written() {
+        let c = conn();
+        let id = filed_action(&c);
+        let big = vec![0u8; MAX_ACTION_FILE_BYTES + 1];
+        let before: i64 = c
+            .query_row("SELECT COUNT(*) FROM quick_action_files", [], |r| r.get(0))
+            .unwrap();
+        let err = attach_quick_action_file(&c, id, "big.bin", &big).unwrap_err();
+        assert!(err.contains("5 MB"), "{err}");
+        let after: i64 = c
+            .query_row("SELECT COUNT(*) FROM quick_action_files", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(before, after);
+
+        // Fill to the action cap in 5 MB chunks, then one more byte fails.
+        let chunk = vec![1u8; MAX_ACTION_FILE_BYTES];
+        for name in ["a.bin", "b.bin", "c.bin", "d.bin"] {
+            attach_quick_action_file(&c, id, name, &chunk).unwrap();
+        }
+        let err = attach_quick_action_file(&c, id, "e.bin", b"x").unwrap_err();
+        assert!(err.contains("20 MB"), "{err}");
+    }
+
+    #[test]
+    fn listing_is_name_ordered_and_remove_deletes_one_row() {
+        let c = conn();
+        let id = filed_action(&c);
+        attach_quick_action_file(&c, id, "zeta.txt", b"z").unwrap();
+        attach_quick_action_file(&c, id, "alpha.txt", b"a").unwrap();
+        attach_quick_action_file(&c, id, "Mid.txt", b"m").unwrap();
+        let listed = list_quick_action_files(&c, id).unwrap();
+        let names: Vec<&str> = listed.iter().map(|m| m.filename.as_str()).collect();
+        assert_eq!(names, vec!["alpha.txt", "Mid.txt", "zeta.txt"]);
+
+        let alpha = listed[0].clone();
+        remove_quick_action_file(&c, alpha.id).unwrap();
+        let listed = list_quick_action_files(&c, id).unwrap();
+        assert_eq!(listed.len(), 2);
+        assert!(remove_quick_action_file(&c, alpha.id).unwrap_err().contains("gone"));
+    }
+
+    #[test]
+    fn deleting_the_action_cascades_its_files() {
+        let c = conn();
+        let id = filed_action(&c);
+        attach_quick_action_file(&c, id, "a.txt", b"a").unwrap();
+        attach_quick_action_file(&c, id, "b.txt", b"b").unwrap();
+        delete_quick_action(&c, id).unwrap();
+        let left: i64 = c
+            .query_row("SELECT COUNT(*) FROM quick_action_files", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0);
+    }
+
+    #[test]
+    fn files_migrate_onto_legacy_databases() {
+        let dir = tempfile::tempdir().unwrap().into_path();
+        std::fs::create_dir_all(&dir).unwrap();
+        {
+            let raw = rusqlite::Connection::open(dir.join("sprout.db")).unwrap();
+            raw.execute_batch(
+                "CREATE TABLE quick_actions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    shell TEXT NOT NULL DEFAULT 'powershell' CHECK (shell IN ('powershell', 'cmd')),
+                    command TEXT NOT NULL,
+                    cwd TEXT,
+                    stoppable INTEGER NOT NULL DEFAULT 0,
+                    stop_command TEXT,
+                    note TEXT,
+                    notes TEXT,
+                    auto_run INTEGER NOT NULL DEFAULT 0,
+                    show_in_dock INTEGER NOT NULL DEFAULT 1,
+                    pre_check TEXT,
+                    pre_fix TEXT,
+                    position INTEGER NOT NULL DEFAULT 0
+                );
+                INSERT INTO quick_actions (name, command, position)
+                VALUES ('legacy', 'echo hi', 0);",
+            )
+            .unwrap();
+        }
+        let conn = crate::db::init_at(&dir).unwrap();
+        let listed = list_quick_actions(&conn).unwrap();
+        assert_eq!(listed.len(), 1);
+        let meta =
+            attach_quick_action_file(&conn, listed[0].id, "legacy.txt", b"data").unwrap();
+        assert_eq!(meta.filename, "legacy.txt");
+        assert_eq!(list_quick_action_files(&conn, listed[0].id).unwrap().len(), 1);
     }
 }

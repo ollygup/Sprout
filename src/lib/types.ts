@@ -347,6 +347,14 @@ export interface CompanionAudioState {
   playing: boolean;
 }
 
+/** The dock Companion toolbar's Back/Forward picture: what the live native
+ *  child can step to through its in-page history. Missing child reads as
+ *  disabled — never hidden. */
+export interface CompanionHistoryState {
+  can_go_back: boolean;
+  can_go_forward: boolean;
+}
+
 /** Which collection a Group buckets (ticket 89) — the discriminator that
  *  keeps the three namespaces apart at the data layer. */
 export type GroupsCollection = "launch" | "action" | "clip";
@@ -471,6 +479,17 @@ export interface QuickActionInput {
   /** Whether the dock lists this action. Main-app lists see every action;
    *  the dock filters on this. Missing (legacy) means visible. */
   show_in_dock: boolean;
+  /** The pre-action check: a shell command run first on every Run, under the
+   *  action's own shell and working directory inside a short timebox — exit 0
+   *  lets the main command run, anything else blocks it before anything
+   *  spawns. Trimmed on save; empty becomes null so an unused section leaves
+   *  no trace. Absent (legacy) means no check. */
+  pre_check?: string | null;
+  /** The pre-action fix: offered only when the check blocks a run, and run
+   *  only through its explicit command — never as part of Run itself.
+   *  Meaningless without a check, so saving one alone is refused. Same
+   *  trim-empty-to-null rule as the check. */
+  pre_fix?: string | null;
 }
 
 /** A Quick Action as stored: the input plus its library id. `group_id` is
@@ -488,6 +507,51 @@ export interface QuickActionRunState {
   running: boolean;
 }
 
+/** What one pre-action check decided: a pass lets the main command run, a
+ *  fail blocks it before anything spawns. The blocking outcome is the warn
+ *  dialog's payload — the trimmed check output plus whether a fix exists to
+ *  offer — so the dialog never re-reads the database. */
+export interface PreCheckReport {
+  passed: boolean;
+  output: string;
+  timed_out: boolean;
+  exit_code: number | null;
+  duration_ms: number;
+  has_fix: boolean;
+}
+
+/** What one explicit fix run decided. Reported back to its caller; the main
+ *  command still needs a fresh Run — a fix never continues into main on its
+ *  own. */
+export interface PreFixResult {
+  exit_code: number | null;
+  timed_out: boolean;
+  output: string;
+  duration_ms: number;
+}
+
+/** What one Run click decided: the main command started and is tracked, or
+ *  the pre-action check blocked it before anything spawned. The blocked
+ *  variant carries the warn payload — the check report plus the run log that
+ *  already holds the pre-check section (its path echoes back to the fix
+ *  command so the fix appends to the same file). */
+export type QuickActionRunOutcome =
+  | { outcome: "started" }
+  | ({ outcome: "check_blocked" } & PreCheckReport & {
+      log_path: string | null;
+    });
+
+/** One file attached to a Quick Action: identity plus name and size as
+ *  listed. The bytes travel only into the per-run staging directory and
+ *  backups — the list, the editor autocomplete, and the export all share
+ *  this shape and never the bytes. */
+export interface QuickActionFileMeta {
+  id: number;
+  action_id: number;
+  filename: string;
+  size: number;
+}
+
 /** A machine-local plain-text Clip (ticket 78), hand-authored for one-click
  *  re-copying. Machine-local — never part of Presets, Plan, or Preset
  *  exports; included in whole-app backups. */
@@ -495,11 +559,32 @@ export interface ClipInput {
   /** Display name; "" when untitled — surfaces fall back to the content's
    *  first line so the list stays readable without invented names. */
   name: string;
-  /** The text a copy puts back on the clipboard. Non-empty after trim. */
+  /** The text a copy puts back on the clipboard. Non-empty after trim for
+   *  text Clips; blank by design for image Clips (ticket 178). */
   content: string;
   /** Whether the dock lists this clip. The main-app page sees every clip;
    *  the dock filters on this. Missing (legacy) means visible. */
   show_in_dock: boolean;
+  /** The attached picture for an image-only Clip (ticket 178); absent for
+   *  text Clips. Skipped in serialization when absent so text-clip backups
+   *  keep their exact shape; defaulted on read so text-only backups parse. */
+  image?: ClipImage | null;
+}
+
+/** One picture attached to an image-only Clip (ticket 178): normalized
+ *  PNG/JPEG bytes (base64) plus the metadata lists and details render
+ *  without re-decoding. `hash` is the bytes identity the backup merge keys
+ *  on — the name is display-only. */
+export interface ClipImage {
+  /** Canonical mime: `image/png` or `image/jpeg` (backend-sniffed). */
+  mime: string;
+  /** The normalized raw bytes. */
+  bytes_base64: string;
+  /** Decoded pixel dimensions at ingest. */
+  width: number;
+  height: number;
+  /** Lowercase hex identity hash over the raw bytes. */
+  hash: string;
 }
 
 /** A Clip as stored: the input plus its library id. `group_id` is its

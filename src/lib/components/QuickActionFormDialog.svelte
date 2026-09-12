@@ -1,6 +1,6 @@
 <script lang="ts">
   import { tick } from "svelte";
-  import type { Group, QuickAction, QuickActionShell } from "$lib/types";
+  import type { Group, LaunchCommandTest, QuickAction, QuickActionShell } from "$lib/types";
   import type {
     AiApprovedRoot,
     AiBoundTarget,
@@ -22,12 +22,24 @@
     aiReadTargetFile,
     aiRevokeRoot,
     assignToGroup,
+    attachQuickActionFile,
     createGroup,
     createQuickAction,
+    formatActionFileBytes,
+    listQuickActionFiles,
+    QUICK_ACTION_FILE_MAX_BYTES,
+    QUICK_ACTION_FILES_MAX_BYTES,
+    removeQuickActionFile,
     testQuickAction,
     unassignFromGroup,
     updateQuickAction,
   } from "$lib/api";
+  import {
+    applyCompletion,
+    filesCompletion,
+    filesHint,
+    tokenizeQuickActionCommand,
+  } from "$lib/quickActionEditor";
   import { open as openFolderPicker } from "@tauri-apps/plugin-dialog";
   import Dialog from "./Dialog.svelte";
   import Button from "./Button.svelte";
@@ -79,6 +91,19 @@
   let autoRun = $state(false);
   let showInDock = $state(true);
   let detailsOpen = $state(false);
+  // Pre-action gate (ADR-0017): an optional check that runs first on every
+  // Run under this shell and directory, plus the fix offered only when the
+  // check blocks a run. Both ride behind Details — a second disclosure level
+  // for a rarely-needed gate (research 0004 rules 2–3) — and both trim to
+  // null on save, so an untouched section persists no trace.
+  let preCheck = $state("");
+  let preFix = $state("");
+  let preActionOpen = $state(false);
+  // The [Check] probe below: the same timeboxed Test path over the check
+  // text only — the action and the fix never run here.
+  let checking = $state(false);
+  let checkRan = $state(false);
+  let checkResult = $state<LaunchCommandTest | null>(null);
   let saving = $state(false);
   let error = $state("");
   let testing = $state(false);
@@ -134,6 +159,12 @@
       autoRun = action?.auto_run ?? false;
       showInDock = action?.show_in_dock ?? true;
       detailsOpen = false;
+      preCheck = action?.pre_check ?? "";
+      preFix = action?.pre_fix ?? "";
+      preActionOpen = false;
+      checking = false;
+      checkRan = false;
+      checkResult = null;
       saving = false;
       error = "";
       // AI-first on Add, manual-first on Edit: a new action starts from the
@@ -168,6 +199,17 @@
           ? String(action.group_id)
           : "";
       newGroupName = "";
+      // Files start empty every open: an edit reloads them below, an add
+      // stages picks in memory until the action exists. The editor's popup
+      // state resets likewise so no stale suggestion survives reopening.
+      fileRows = [];
+      filesError = "";
+      filesBusy = false;
+      filesAnnouncement = "";
+      suggestCaret = 0;
+      suggestActive = 0;
+      suggestClosed = false;
+      if (action) void loadFiles(action.id);
     }
   });
 
@@ -181,6 +223,36 @@
       return `'${trimmed}' is not an absolute path — the working directory must be a full path like D:\Work`;
     }
     return null;
+  }
+
+  /** One [Check] click: runs only the check text under the action's shell
+   *  and directory through the timeboxed Test path and reports it inline.
+   *  The probe reads the check alone, so the main command and the fix can
+   *  never run here — passing here still re-checks on Run. */
+  async function runCheck() {
+    if (checking) return;
+    if (!preCheck.trim()) {
+      error = "Type a pre-action check first.";
+      return;
+    }
+    const badCwd = cwdError(cwd);
+    if (badCwd) {
+      error = badCwd;
+      return;
+    }
+    error = "";
+    checkRan = true;
+    checking = true;
+    checkResult = null;
+    try {
+      checkResult = await testQuickAction(shell, preCheck.trim(), cwd.trim() || null);
+    } catch (e) {
+      console.error(e);
+      error = String(e);
+      checkRan = false;
+    } finally {
+      checking = false;
+    }
   }
 
   async function generateDraft() {
@@ -403,6 +475,15 @@
       error = badCwd;
       return;
     }
+    // A fix without a check has no trigger — it would sit in storage with
+    // no path that ever runs it. Refused plainly, with the backend's own
+    // wording, before anything persists.
+    const trimmedPreCheck = preCheck.trim() || null;
+    const trimmedPreFix = preFix.trim() || null;
+    if (!trimmedPreCheck && trimmedPreFix) {
+      error = "A pre-action fix needs a pre-action check — add a check command or clear the fix.";
+      return;
+    }
     // Content applied from a draft and then edited is rechecked before it
     // may save on AI authority: a refusal or clarification blocks with an
     // escape hatch to manual saving, never a silent pass. Unchanged applied
@@ -448,6 +529,8 @@
           note: trimmedNote,
           auto_run: autoRun,
           show_in_dock: showInDock,
+          pre_check: trimmedPreCheck,
+          pre_fix: trimmedPreFix,
         });
         // Group membership rides outside the edit payload (ticket 89) — the
         // same assign/unassign the row menu uses.
@@ -475,7 +558,22 @@
           note: trimmedNote,
           auto_run: autoRun,
           show_in_dock: showInDock,
+          pre_check: trimmedPreCheck,
+          pre_fix: trimmedPreFix,
         });
+        // Files picked while adding hang off the new row here — the same
+        // outside-the-payload shape as group placement below, and the backend
+        // revalidates names, dupes, and caps before anything is written.
+        for (const row of fileRows) {
+          if (row.bytesBase64 === null) continue;
+          try {
+            await attachQuickActionFile(created.id, row.filename, row.bytesBase64);
+          } catch (e) {
+            console.error(e);
+            error = String(e);
+            return;
+          }
+        }
         if (placing) {
           if (creatingGroup) {
             const group = await createGroup("action", trimmedGroupName);
@@ -492,6 +590,262 @@
     } finally {
       saving = false;
     }
+  }
+
+  /** One attached-file row: the stored id once persisted, in-memory bytes
+   *  while the action is still unsaved (an add has no row to hang files on
+   *  until creation resolves). */
+  interface AttachedFileRow {
+    id: number | null;
+    filename: string;
+    size: number;
+    bytesBase64: string | null;
+  }
+
+  let fileRows = $state<AttachedFileRow[]>([]);
+  let filesError = $state("");
+  let filesBusy = $state(false);
+  let filesAnnouncement = $state("");
+  let filePick: HTMLInputElement | null = $state(null);
+
+  /** The command editor stays a plain textarea (native paste/undo/IME); the
+   *  highlight copy behind it and the suggestion list below it are visual
+   *  only, announced through a live region instead of focus moves. */
+  let cmdEl = $state<HTMLTextAreaElement | null>(null);
+  let cmdHl = $state<HTMLPreElement | null>(null);
+  let suggestCaret = $state(0);
+  let suggestActive = $state(0);
+  let suggestClosed = $state(false);
+
+  const fileNames = $derived(fileRows.map((row) => row.filename));
+  const highlighted = $derived(tokenizeQuickActionCommand(command, shell, fileNames));
+  const filesCompletionState = $derived(
+    suggestClosed ? null : filesCompletion(command, suggestCaret, fileNames),
+  );
+  const suggestItems = $derived(filesCompletionState?.items ?? []);
+  const suggestOpen = $derived(
+    filesCompletionState !== null && suggestItems.length > 0,
+  );
+  const filesHintState = $derived(filesHint(command, fileRows.length));
+  const suggestAnnouncement = $derived(
+    !suggestOpen
+      ? ""
+      : suggestItems.length === 1 && suggestItems[0] === "<FilesDir>"
+        ? "One suggestion: the attached-files folder."
+        : `${suggestItems.length} attached-file suggestions.`,
+  );
+
+  function fileSizeOf(name: string): number {
+    return fileRows.find((row) => row.filename === name)?.size ?? 0;
+  }
+
+  function sortFileRows() {
+    fileRows = [...fileRows].sort((a, b) =>
+      a.filename.localeCompare(b.filename, undefined, { sensitivity: "base" }),
+    );
+  }
+
+  async function loadFiles(id: number) {
+    filesError = "";
+    try {
+      const listed = await listQuickActionFiles(id);
+      fileRows = listed.map((f) => ({
+        id: f.id,
+        filename: f.filename,
+        size: Number(f.size),
+        bytesBase64: null,
+      }));
+    } catch (e) {
+      console.error(e);
+      filesError = String(e);
+    }
+  }
+
+  function readPickedFile(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error("that file couldn't be read"));
+      reader.onload = () => {
+        const url = String(reader.result ?? "");
+        const bytes = url.split(",", 2)[1] ?? "";
+        if (!bytes) reject(new Error("that file couldn't be read — try again."));
+        else resolve(bytes);
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function onFilesPicked(event: Event) {
+    const input = event.target as HTMLInputElement | null;
+    const picked = [...(input?.files ?? [])];
+    if (input) input.value = "";
+    if (picked.length === 0) return;
+    filesError = "";
+    filesBusy = true;
+    try {
+      for (const file of picked) {
+        const base = file.name.split(/[\\/]/).pop()?.trim() ?? "";
+        if (!base) {
+          filesError = "One picked file has no usable name — skipped.";
+          continue;
+        }
+        if (
+          fileRows.some(
+            (row) => row.filename.toLowerCase() === base.toLowerCase(),
+          )
+        ) {
+          filesError = `'${base}' is already attached to this action.`;
+          continue;
+        }
+        if (file.size > QUICK_ACTION_FILE_MAX_BYTES) {
+          filesError = `'${base}' is ${formatActionFileBytes(file.size)} — files must stay at or under 5 MB.`;
+          continue;
+        }
+        const used = fileRows.reduce((n, row) => n + row.size, 0);
+        if (used + file.size > QUICK_ACTION_FILES_MAX_BYTES) {
+          filesError =
+            "These files would exceed the 20 MB per-action limit — remove one first.";
+          continue;
+        }
+        let bytesBase64: string;
+        try {
+          bytesBase64 = await readPickedFile(file);
+        } catch (e) {
+          console.error(e);
+          filesError = `'${base}' couldn't be read — ${e instanceof Error ? e.message : String(e)}`;
+          continue;
+        }
+        // An edit persists straight away (the row exists); an add stages in
+        // memory until creation resolves above.
+        if (editing && action) {
+          try {
+            const meta = await attachQuickActionFile(action.id, base, bytesBase64);
+            fileRows = [
+              ...fileRows,
+              {
+                id: meta.id,
+                filename: meta.filename,
+                size: Number(meta.size),
+                bytesBase64: null,
+              },
+            ];
+            sortFileRows();
+            filesAnnouncement = `Attached ${meta.filename}.`;
+          } catch (e) {
+            console.error(e);
+            filesError = String(e);
+          }
+        } else {
+          fileRows = [
+            ...fileRows,
+            { id: null, filename: base, size: file.size, bytesBase64 },
+          ];
+          sortFileRows();
+          filesAnnouncement = `Attached ${base}.`;
+        }
+      }
+    } finally {
+      filesBusy = false;
+    }
+  }
+
+  async function removeFile(row: AttachedFileRow) {
+    filesError = "";
+    if (row.id === null) {
+      fileRows = fileRows.filter((r) => r !== row);
+      filesAnnouncement = `Removed ${row.filename}.`;
+      return;
+    }
+    filesBusy = true;
+    try {
+      await removeQuickActionFile(row.id);
+      fileRows = fileRows.filter((r) => r !== row);
+      filesAnnouncement = `Removed ${row.filename}.`;
+    } catch (e) {
+      console.error(e);
+      filesError = String(e);
+    } finally {
+      filesBusy = false;
+    }
+  }
+
+  function trackCaret(reopen: boolean) {
+    if (cmdEl) suggestCaret = cmdEl.selectionStart ?? command.length;
+    if (reopen) {
+      suggestClosed = false;
+      suggestActive = 0;
+    }
+  }
+
+  function syncHlScroll() {
+    if (cmdEl && cmdHl) {
+      cmdHl.scrollTop = cmdEl.scrollTop;
+      cmdHl.scrollLeft = cmdEl.scrollLeft;
+    }
+  }
+
+  // Escape stays with the shared dialog's close (research 0010 keeps dialog
+  // keys un-rerouted): the list dismisses by typing on, choosing, or leaving
+  // the field — never by swallowing the dialog's own key.
+  function cmdKeydown(event: KeyboardEvent) {
+    if (!suggestOpen) return;
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      suggestActive = (suggestActive + 1) % suggestItems.length;
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      suggestActive =
+        (suggestActive - 1 + suggestItems.length) % suggestItems.length;
+    } else if (event.key === "Enter" || (event.key === "Tab" && !event.shiftKey)) {
+      event.preventDefault();
+      acceptSuggestion(suggestActive);
+    }
+  }
+
+  async function placeCaret(pos: number) {
+    await tick();
+    cmdEl?.focus();
+    cmdEl?.setSelectionRange(pos, pos);
+    suggestCaret = pos;
+  }
+
+  function acceptSuggestion(index: number) {
+    const state = filesCompletionState;
+    const item = state?.items[index];
+    if (!state || !item) return;
+    // Inserted raw: the run-time owner shell-quotes the staged path
+    // (ADR-0029), so the editor must not pre-quote either half.
+    const applied = applyCompletion(command, state.start, state.end, item);
+    command = applied.text;
+    suggestClosed = true;
+    suggestActive = 0;
+    void placeCaret(applied.caret);
+  }
+
+  /** One suggestion row's detail voice: the folder for the placeholder, the
+   *  file's size for a file — a `<FilesDir>\<name>` path reads back through
+   *  its filename so every row stays distinguishable. */
+  function suggestDetail(item: string): string {
+    if (item === "<FilesDir>") return "attached-files folder for this run";
+    const name = item.startsWith("<FilesDir>\\")
+      ? item.slice("<FilesDir>\\".length)
+      : item;
+    return formatActionFileBytes(fileSizeOf(name));
+  }
+
+  function insertFilesDir() {
+    const el = cmdEl;
+    const at = el?.selectionStart ?? command.length;
+    const to = el?.selectionEnd ?? at;
+    const applied = applyCompletion(
+      command,
+      Math.min(at, to),
+      Math.max(at, to),
+      "<FilesDir>",
+    );
+    command = applied.text;
+    suggestClosed = true;
+    void placeCaret(applied.caret);
   }
 </script>
 
@@ -815,17 +1169,137 @@
     <div class="field">
       <div class="field__label-row">
         <label class="field__label" for="qa-command">Command</label>
+        <InfoTip label="How file placeholders work">
+          <p>Attach files below, then reference their per-run folder with {"<FilesDir>"} — type &lt; for suggestions. The folder path is quoted for the selected shell when the action runs; wrapping the reference itself in quotes works too.</p>
+        </InfoTip>
       </div>
-      <textarea
-        id="qa-command"
-        class="field__cmd"
-        rows="6"
-        placeholder="e.g. docker compose up -d"
-        autocomplete="off"
-        spellcheck="false"
-        value={command}
-        oninput={(e) => (command = (e.target as HTMLTextAreaElement).value)}
-      ></textarea>
+      <div class="cmdwrap">
+        <pre
+          class="cmdwrap__hl"
+          aria-hidden="true"
+          bind:this={cmdHl}
+        ><code>{#each highlighted as tok}<span class="tok-{tok.kind}">{tok.text}</span>{/each}{#if command.endsWith("\n")}<span>&#8203;</span>{/if}</code></pre>
+        <textarea
+          id="qa-command"
+          class="field__cmd cmdwrap__input"
+          rows="6"
+          placeholder="e.g. docker compose up -d"
+          autocomplete="off"
+          autocapitalize="none"
+          spellcheck="false"
+          role="combobox"
+          aria-autocomplete="list"
+          aria-expanded={suggestOpen}
+          aria-controls="qa-files-suggest"
+          aria-activedescendant={suggestOpen ? `qa-suggest-${suggestActive}` : undefined}
+          bind:this={cmdEl}
+          value={command}
+          oninput={(e) => {
+            command = (e.target as HTMLTextAreaElement).value;
+            trackCaret(true);
+            syncHlScroll();
+          }}
+          onkeyup={() => trackCaret(false)}
+          onclick={() => trackCaret(false)}
+          onscroll={syncHlScroll}
+          onblur={() => (suggestClosed = true)}
+          onkeydown={cmdKeydown}
+        ></textarea>
+      </div>
+      {#if suggestOpen}
+        <div
+          class="suggest"
+          role="listbox"
+          id="qa-files-suggest"
+          aria-label="File placeholder suggestions"
+        >
+          {#each suggestItems as item, idx (item)}
+            <button
+              type="button"
+              role="option"
+              id="qa-suggest-{idx}"
+              aria-selected={idx === suggestActive}
+              class="suggest__item"
+              class:suggest__item--active={idx === suggestActive}
+              tabindex="-1"
+              onmousedown={(e) => e.preventDefault()}
+              onmouseenter={() => (suggestActive = idx)}
+              onclick={() => acceptSuggestion(idx)}
+            >
+              <span class="suggest__label">{item}</span>
+              <span class="suggest__detail">{suggestDetail(item)}</span>
+            </button>
+          {/each}
+          <p class="field__hint">↑ ↓ to choose · Enter to insert · Esc closes the dialog</p>
+        </div>
+      {/if}
+      <p class="sr-only" role="status">{suggestAnnouncement}</p>
+      {#if filesHintState === "unused"}
+        <p class="field__hint">
+          Attached files sit unused until the command references them — insert {"<FilesDir>"}
+          where the staged folder should land.
+        </p>
+      {:else if filesHintState === "missing"}
+        <p class="field__hint">
+          The command references {"<FilesDir>"} but no files are attached yet —
+          attach them below.
+        </p>
+      {/if}
+    </div>
+
+    <div class="field">
+      <div class="field__label-row">
+        <span class="field__label" id="qa-files-label">Files</span>
+        <InfoTip label="How attached files work">
+          <p>Files ship with the action and land in a per-run folder the command reaches through {"<FilesDir>"}. Without it the files stay unused; the folder path is quoted for the selected shell when the action runs, and wrapping the reference itself in quotes works too. Each file holds up to 5 MB; one action holds up to 20 MB — oversized picks are skipped with an inline note.</p>
+        </InfoTip>
+      </div>
+      {#if fileRows.length === 0}
+        <p class="field__hint">None attached — up to 5 MB per file, 20 MB per action.</p>
+      {:else}
+        <ul class="files__list" aria-labelledby="qa-files-label">
+          {#each fileRows as row (row.filename.toLowerCase())}
+            <li class="files__row">
+              <span class="files__name">{row.filename}</span>
+              <span class="files__size">{formatActionFileBytes(row.size)}</span>
+              <Button
+                type="button"
+                variant="ghost"
+                disabled={filesBusy}
+                onclick={() => void removeFile(row)}
+              >
+                Remove
+              </Button>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+      <div class="files__actions">
+        <Button
+          type="button"
+          variant="secondary"
+          disabled={filesBusy}
+          onclick={() => filePick?.click()}
+        >
+          Attach files…
+        </Button>
+        <Button type="button" variant="secondary" onclick={insertFilesDir} disabled={filesBusy || fileRows.length === 0}>
+          Insert
+        </Button>
+      </div>
+      <input
+        bind:this={filePick}
+        type="file"
+        multiple
+        class="sr-only"
+        tabindex="-1"
+        aria-hidden="true"
+        onchange={(e) => void onFilesPicked(e)}
+      />
+      {#if filesError}
+        <p class="files__error" role="alert">{filesError}</p>
+      {/if}
+      <p class="sr-only" role="status">{filesAnnouncement}</p>
     </div>
 
     <!-- Rarely-touched fields behind one Details disclosure: frequent intent
@@ -967,6 +1441,87 @@
             <p>Uncheck to hide this action from the Quick Launch dock. It stays here and stays runnable.</p>
           </InfoTip>
         </label>
+
+        <!-- Pre-action gate: an optional check that runs first on every Run,
+             plus the fix offered only when the check blocks one. Collapsed
+             until needed; empty leaves no trace on save. -->
+        <div class="preaction">
+          <Disclosure
+            open={preActionOpen}
+            controls="qa-preaction-body"
+            label="Pre-action"
+            onclick={() => (preActionOpen = !preActionOpen)}
+          />
+
+          <div id="qa-preaction-body" class="preaction__body" hidden={!preActionOpen}>
+            <div class="field">
+              <div class="field__label-row">
+                <label class="field__label" for="qa-pre-check">Pre-action check</label>
+                <InfoTip label="How the pre-action check works">
+                  <p>Runs first on every Run under this shell and directory, timeboxed. Exit 0 runs the action; anything else stops it before anything starts and offers the fix.</p>
+                </InfoTip>
+              </div>
+              <textarea
+                id="qa-pre-check"
+                class="field__cmd"
+                rows="3"
+                placeholder="e.g. node --version"
+                autocomplete="off"
+                spellcheck="false"
+                value={preCheck}
+                oninput={(e) => (preCheck = (e.target as HTMLTextAreaElement).value)}
+              ></textarea>
+            </div>
+
+            <div class="field">
+              <div class="field__label-row">
+                <label class="field__label" for="qa-pre-fix">Fix (optional)</label>
+                <InfoTip label="How the pre-action fix works">
+                  <p>Offered only when the check blocks a run. Runs once when chosen — never automatically, never with the action.</p>
+                </InfoTip>
+              </div>
+              <textarea
+                id="qa-pre-fix"
+                class="field__cmd"
+                rows="3"
+                placeholder="e.g. npm install"
+                autocomplete="off"
+                spellcheck="false"
+                value={preFix}
+                oninput={(e) => (preFix = (e.target as HTMLTextAreaElement).value)}
+              ></textarea>
+            </div>
+
+            <div class="check">
+              <div class="check__row">
+                <Button
+                  variant="secondary"
+                  disabled={checking || !preCheck.trim()}
+                  onclick={() => void runCheck()}
+                >
+                  {checking ? "Checking…" : "Check"}
+                </Button>
+                <p class="check__note">
+                  Runs only the check above under this shell and directory, timeboxed — the action and the fix never run here.
+                </p>
+              </div>
+              {#if checkRan && !checking}
+                {#if checkResult?.timed_out}
+                  <Notice tone="warn">Check timed out — the action would stay blocked.</Notice>
+                {:else if checkResult?.exit_code === 0}
+                  <Notice tone="ok">Check passed (exit 0).</Notice>
+                {:else if checkResult?.exit_code === null}
+                  <Notice tone="warn">Check could not start — the action would stay blocked.</Notice>
+                {:else}
+                  <Notice tone="warn">Check failed (exit {checkResult?.exit_code}) — the action would stay blocked.</Notice>
+                {/if}
+                {#if checkResult?.output.trim()}
+                  <pre class="check__output">{checkResult?.output}</pre>
+                {/if}
+              {/if}
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -984,10 +1539,10 @@
     {/if}
 
     <div class="form__actions">
-      <Button variant="secondary" onclick={oncancel} disabled={saving || testing}>
+      <Button variant="secondary" onclick={oncancel} disabled={saving || testing || checking}>
         Cancel
       </Button>
-      <Button kind="submit" disabled={saving || testing}>
+      <Button kind="submit" disabled={saving || testing || checking}>
         {saving
           ? editing
             ? "Saving…"
@@ -1109,6 +1664,228 @@
 
   .advanced__body[hidden] {
     display: none;
+  }
+
+  /* Single chrome on the wrap: the highlight copy and the textarea paint
+     only text, so the field can never grow a second edge — and the textarea
+     is block-level, so no inline baseline gap lingers under its bottom edge. */
+  .cmdwrap {
+    position: relative;
+    background: var(--bg-page);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    transition: border-color var(--dur-fast) var(--ease-out),
+      box-shadow var(--dur-fast) var(--ease-out);
+  }
+
+  .cmdwrap:focus-within {
+    border-color: var(--accent);
+    box-shadow: var(--ring-glow);
+  }
+
+  .cmdwrap__hl {
+    position: absolute;
+    inset: 0;
+    margin: 0;
+    overflow: hidden;
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    line-height: var(--leading-normal);
+    color: var(--text);
+    background: transparent;
+    border: 0;
+    border-radius: var(--radius);
+    padding: 8px 10px;
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
+    pointer-events: none;
+  }
+
+  .cmdwrap__hl code {
+    font: inherit;
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
+  }
+
+  .field__cmd.cmdwrap__input {
+    position: relative;
+    display: block;
+    width: 100%;
+    border: 0;
+    background: transparent;
+    color: transparent;
+    caret-color: var(--text);
+  }
+
+  .field__cmd.cmdwrap__input:focus {
+    outline: none;
+    border: 0;
+    box-shadow: none;
+  }
+
+  /* Token colors reuse the design-system palette only — comments faint,
+     strings warm, commands the single reserved accent (0006 pattern 6),
+     the files placeholder info. Color only, never weight, so the overlay
+     keeps the textarea's metrics. */
+  .tok-comment {
+    color: var(--text-faint);
+  }
+
+  .tok-string {
+    color: var(--warm-text);
+  }
+
+  .tok-command {
+    color: var(--accent);
+  }
+
+  .tok-placeholder {
+    color: var(--info-text);
+  }
+
+  /* Placeholder/file suggestions: the same flat in-flow list treatment as
+     the AI find rows — no overlay, no absolute placement, mouse and
+     keyboard share it while focus stays in the command box. */
+  .suggest {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    min-width: 0;
+  }
+
+  .suggest__item {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    min-width: 0;
+    text-align: left;
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    color: var(--text);
+    background: var(--bg-page);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: var(--space-1) var(--space-2);
+  }
+
+  .suggest__item--active {
+    border-color: var(--accent);
+    box-shadow: var(--ring-glow);
+  }
+
+  .suggest__label {
+    overflow-wrap: anywhere;
+  }
+
+  .suggest__detail {
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+  }
+
+  /* Attached files: the same flat list treatment — name plus mono size,
+     per-file Remove beside its row, attach/insert actions below. The list
+     stays absent until the first file (minimal-until-content). */
+  .files__list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    min-width: 0;
+  }
+
+  .files__row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-width: 0;
+  }
+
+  .files__name {
+    flex: 1;
+    min-width: 0;
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--text);
+    overflow-wrap: anywhere;
+  }
+
+  .files__size {
+    flex: none;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+  }
+
+  .files__actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .files__error {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--danger-text);
+    overflow-wrap: anywhere;
+  }
+
+  /* Pre-action gate nested in Details: the same flat disclosure treatment —
+     no frame, body separated by a dashed rule. `hidden` needs its own rule
+     or the flex display above keeps the panel permanently open. */
+  .preaction {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .preaction__body {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+    padding-top: var(--space-3);
+    border-top: 1px dashed var(--border);
+  }
+
+  .preaction__body[hidden] {
+    display: none;
+  }
+
+  /* [Check] probe: the same dashed-box treatment as the Test block — one
+     secondary button, one constraint line, verdict plus verbatim output. */
+  .check {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    border: 1px dashed var(--border-strong);
+    border-radius: var(--radius);
+    padding: var(--space-3);
+  }
+
+  .check__row {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-3);
+  }
+
+  .check__note {
+    margin: 0;
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+  }
+
+  .check__output {
+    margin: 0;
+    max-height: 160px;
+    overflow: auto;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    line-height: var(--leading-normal);
+    color: var(--text-muted);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
 
   /* AI drafting hero above the authored fields: the same flat disclosure

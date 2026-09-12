@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { trailApplyVisit } from "./companion";
 import {
   clampCompanionUserZoom,
   companionEffectiveZoom,
@@ -43,6 +44,11 @@ const AUDIO_RS_SOURCE = readFileSync(
   new URL("../../src-tauri/src/companion_audio.rs", import.meta.url),
   "utf8",
 );
+const HISTORY_RS_SOURCE = readFileSync(
+  new URL("../../src-tauri/src/companion_history.rs", import.meta.url),
+  "utf8",
+);
+const TYPES_SOURCE = readFileSync(new URL("./types.ts", import.meta.url), "utf8");
 
 describe("Companion native WebView contract", () => {
   it("uses the content frame's logical bounds without covering the toolbar", () => {
@@ -433,5 +439,225 @@ describe("Companion unborn window stays quiet", () => {
     // and no word anywhere.
     expect(ROUTE_SOURCE).toContain("COMPANION_BORN_TIMEOUT_MS");
     expect(ROUTE_SOURCE).toContain("never finished loading");
+  });
+});
+
+describe("Companion session trail behind Back/Forward", () => {
+  const A = "https://a.example/";
+  const B = "https://b.example";
+  const C = "https://c.example/path";
+
+  it("records fresh visits by dropping the forward trail", () => {
+    expect(trailApplyVisit([], -1, A, false)).toEqual({ history: [A], index: 0 });
+    expect(trailApplyVisit([A], 0, B, false)).toEqual({ history: [A, B], index: 1 });
+    // A fresh visit from mid-trail truncates the forward entries first.
+    expect(trailApplyVisit([A, B, C], 0, B, false)).toEqual({
+      history: [A, B],
+      index: 1,
+    });
+  });
+
+  it("moves the marker on history steps without rewriting the trail", () => {
+    expect(trailApplyVisit([A, B], 1, A, true)).toEqual({ history: [A, B], index: 0 });
+    expect(trailApplyVisit([A, B], 0, B, true)).toEqual({ history: [A, B], index: 1 });
+    // A revisit lands on its latest visit, never an earlier one.
+    expect(trailApplyVisit([A, B, A], 2, A, true).index).toBe(2);
+    expect(trailApplyVisit([A, B, A], 0, B, true)).toEqual({
+      history: [A, B, A],
+      index: 1,
+    });
+  });
+
+  it("falls back to a fresh visit when the step target left the trail", () => {
+    expect(trailApplyVisit([A], 0, C, true)).toEqual({ history: [A, C], index: 1 });
+  });
+
+  it("compares by URL key, so case and slash drift never fork the trail", () => {
+    expect(trailApplyVisit(["https://a.example"], 0, "https://A.EXAMPLE/", true)).toEqual({
+      history: ["https://a.example"],
+      index: 0,
+    });
+  });
+
+  it("renders Back/Forward always, disabled honestly at the trail ends", () => {
+    // Never hidden-then-jumping: no conditional mount around either button,
+    // so enabling never reflows the row (research 0004 rules 1 and 5).
+    expect(ROUTE_SOURCE).not.toContain("{#if companionCanGoBack}");
+    expect(ROUTE_SOURCE).not.toContain("{#if companionCanGoForward}");
+    expect(ROUTE_SOURCE).toContain("disabled={!companionCanGoBack");
+    expect(ROUTE_SOURCE).toContain("disabled={!companionCanGoForward");
+    // The learned affordance keeps its icons, labels and browser order —
+    // Back, Forward, then Reload.
+    const barAt = ROUTE_SOURCE.indexOf('<div class="qlw__companion-bar"');
+    const backAt = ROUTE_SOURCE.indexOf('label="Back"');
+    const forwardAt = ROUTE_SOURCE.indexOf('label="Forward"');
+    const reloadAt = ROUTE_SOURCE.indexOf("onclick={() => void companionReload()}");
+    expect(barAt).toBeGreaterThan(-1);
+    expect(backAt).toBeGreaterThan(barAt);
+    expect(forwardAt).toBeGreaterThan(backAt);
+    expect(reloadAt).toBeGreaterThan(forwardAt);
+    expect(ROUTE_SOURCE).toContain('icon="chevron-left"');
+    expect(ROUTE_SOURCE).toContain('icon="chevron-right"');
+  });
+
+  it("derives the disabled states from the live native child (preview: trail marker)", () => {
+    // Native path prefers the live child state so in-page link traversals are
+    // observed; the preview iframe keeps the trail marker.
+    expect(ROUTE_SOURCE).toContain("isTauri ? companionNativeBack : companionHistoryIndex > 0,");
+    expect(ROUTE_SOURCE).toContain("companionNativeForward");
+    expect(ROUTE_SOURCE).toContain("companionHistoryIndex < companionHistory.length - 1,");
+    // Mid-switch and mid-step the buttons wait instead of firing stale.
+    expect(ROUTE_SOURCE).toContain("companionSwitchingTo !== null || companionHistoryBusy}");
+    expect(ROUTE_SOURCE).toContain("let companionHistoryBusy = $state(false);");
+    expect(ROUTE_SOURCE).toContain("async function refreshCompanionHistory()");
+    expect(ROUTE_SOURCE).toContain("getCompanionHistoryState()");
+  });
+
+  it("drives native steps through the live child history, never a second child", () => {
+    const stepAt = ROUTE_SOURCE.indexOf("function stepCompanionHistory");
+    expect(stepAt).toBeGreaterThan(-1);
+    const stepBody = ROUTE_SOURCE.slice(stepAt, stepAt + 1800);
+    // Native branch delegates to the Rust history owner; the preview branch
+    // keeps the iframe fallback — never cited as native.
+    expect(stepBody).toContain("stepCompanionHistoryNative(direction)");
+    expect(stepBody).toContain("companionFrameEl.src = targetUrl");
+    const nativeAt = ROUTE_SOURCE.indexOf("async function stepCompanionHistoryNative");
+    expect(nativeAt).toBeGreaterThan(-1);
+    const nativeBody = ROUTE_SOURCE.slice(nativeAt, nativeAt + 1400);
+    expect(nativeBody).toContain("nativeCompanionGoBack()");
+    expect(nativeBody).toContain("nativeCompanionGoForward()");
+    expect(nativeBody).not.toContain("new Webview(");
+    expect(nativeBody).not.toContain("queueCompanionSiteSwitch");
+    // One creation seam in the whole page: the existing child lifetime.
+    expect(ROUTE_SOURCE.match(/new Webview\(/g)?.length).toBe(1);
+  });
+
+  it("says so when a native step fails instead of navigating nowhere", () => {
+    const nativeAt = ROUTE_SOURCE.indexOf("async function stepCompanionHistoryNative");
+    expect(nativeAt).toBeGreaterThan(-1);
+    const nativeBody = ROUTE_SOURCE.slice(nativeAt, nativeAt + 1400);
+    expect(nativeBody).toContain("error = String(e);");
+  });
+
+  it("records switch arrivals on the trail and clears a failed step marker", () => {
+    expect(ROUTE_SOURCE).toContain("trailApplyVisit(");
+    const applyAt = ROUTE_SOURCE.indexOf("function applyCompanionSite");
+    expect(applyAt).toBeGreaterThan(-1);
+    expect(ROUTE_SOURCE.slice(applyAt, applyAt + 1400)).toContain(
+      "companionPendingTrailKey = null;",
+    );
+    const failureAt = ROUTE_SOURCE.indexOf("onFailure: (site, switchError)");
+    expect(failureAt).toBeGreaterThan(-1);
+    expect(ROUTE_SOURCE.slice(failureAt, failureAt + 500)).toContain(
+      "companionPendingTrailKey = null;",
+    );
+  });
+
+  it("keeps reload and retry on the saved address in every state", () => {
+    const retryAt = ROUTE_SOURCE.indexOf("async function companionRetry");
+    const reloadAt = ROUTE_SOURCE.indexOf("async function companionReload");
+    expect(retryAt).toBeGreaterThan(-1);
+    expect(reloadAt).toBeGreaterThan(retryAt);
+    // Reload delegates to the single retry path — one recreate, no refresh of
+    // a current page.
+    expect(ROUTE_SOURCE.slice(reloadAt, reloadAt + 400)).toContain(
+      "await companionRetry();",
+    );
+    // Retry closes the child and re-syncs; the re-sync recreates at the saved
+    // address. Neither path navigates from history or a shown page.
+    const retryBody = ROUTE_SOURCE.slice(retryAt, reloadAt);
+    expect(retryBody).toContain("await syncCompanionWebview();");
+    expect(retryBody).not.toContain("companionHistory");
+    expect(retryBody).not.toContain("companionFrameEl");
+    expect(ROUTE_SOURCE).toContain("const targetUrl = companionUrl;");
+    // Back-then-reload returns to saved: the recreated child reports fresh
+    // (disabled) history after landing.
+    expect(retryBody).toContain("void refreshCompanionHistory();");
+  });
+
+  it("keeps the active-site reselect a no-op and Open externally saved-address", () => {
+    const chooseAt = ROUTE_SOURCE.indexOf("function chooseCompanionSite");
+    expect(chooseAt).toBeGreaterThan(-1);
+    const chooseBody = ROUTE_SOURCE.slice(chooseAt, chooseAt + 800);
+    expect(chooseBody).toContain("return;");
+    expect(chooseBody).toContain("queueCompanionSiteSwitch(site)");
+    // A fresh pick clears a stale Back/Forward failure line at request time.
+    expect(chooseBody).toContain("Couldn't go back");
+    expect(ROUTE_SOURCE).toContain("openCompanionExternal(companionUrl)");
+    expect(ROUTE_SOURCE).not.toContain("openCompanionExternal(companionHistory");
+  });
+
+  it("keeps Try again plus Open externally on the failure pane", () => {
+    const failureAt = ROUTE_SOURCE.indexOf("qlw__companion-failure");
+    expect(failureAt).toBeGreaterThan(-1);
+    const failureBody = ROUTE_SOURCE.slice(failureAt, failureAt + 1400);
+    expect(failureBody).toContain("() => void companionRetry()");
+    expect(failureBody).toContain("() => void companionOpenExternal()");
+  });
+});
+
+describe("Companion native history over the live child (ticket 177)", () => {
+  it("owns traversal in one Rust module with no second invocation site", () => {
+    expect(HISTORY_RS_SOURCE).toContain("GoBack");
+    expect(HISTORY_RS_SOURCE).toContain("GoForward");
+    expect(HISTORY_RS_SOURCE).toContain("CanGoBack");
+    expect(HISTORY_RS_SOURCE).toContain("CanGoForward");
+    expect(HISTORY_RS_SOURCE).toContain("add_HistoryChanged");
+    expect(HISTORY_RS_SOURCE).toContain("add_NavigationCompleted");
+    expect(HISTORY_RS_SOURCE).toContain("companion-history-changed");
+    // The child label is reused from the audio owner, never redeclared.
+    expect(HISTORY_RS_SOURCE).toContain("companion_audio::COMPANION_WEBVIEW_LABEL");
+    expect(HISTORY_RS_SOURCE).not.toContain('"companion"');
+    // No popup/new-window interception, no relaxed isolation here.
+    expect(HISTORY_RS_SOURCE).not.toContain("NewWindowRequested");
+    expect(HISTORY_RS_SOURCE).not.toContain("SetHandled");
+  });
+
+  it("registers the history commands beside the audio commands", () => {
+    expect(LIB_SOURCE).toContain("fn get_companion_history_state");
+    expect(LIB_SOURCE).toContain("fn companion_go_back");
+    expect(LIB_SOURCE).toContain("fn companion_go_forward");
+    expect(LIB_SOURCE).toContain("fn ensure_companion_history_hook");
+    expect(LIB_SOURCE).toContain("get_companion_history_state,");
+    expect(LIB_SOURCE).toContain("companion_go_back,");
+    expect(LIB_SOURCE).toContain("companion_go_forward,");
+    expect(LIB_SOURCE).toContain("ensure_companion_history_hook,");
+  });
+
+  it("exposes the history seam to the dock toolbar", () => {
+    expect(TYPES_SOURCE).toContain("interface CompanionHistoryState");
+    expect(TYPES_SOURCE).toContain("can_go_back: boolean;");
+    expect(TYPES_SOURCE).toContain("can_go_forward: boolean;");
+    expect(API_SOURCE).toContain("getCompanionHistoryState");
+    expect(API_SOURCE).toContain("companionGoBack");
+    expect(API_SOURCE).toContain("companionGoForward");
+    expect(API_SOURCE).toContain("ensureCompanionHistoryHook");
+    expect(API_SOURCE).toContain("COMPANION_HISTORY_CHANGED_EVENT");
+    expect(API_SOURCE).toContain("get_companion_history_state");
+    expect(API_SOURCE).toContain("companion_go_back");
+    expect(API_SOURCE).toContain("companion_go_forward");
+    expect(API_SOURCE).toContain("ensure_companion_history_hook");
+  });
+
+  it("listens for native navigations and hooks the live child on creation", () => {
+    expect(ROUTE_SOURCE).toContain("COMPANION_HISTORY_CHANGED_EVENT");
+    expect(ROUTE_SOURCE).toContain("ensureCompanionHistoryHook()");
+    expect(ROUTE_SOURCE).toContain("refreshCompanionHistory()");
+    // The picker stays the sole site-switching surface.
+    const chooseAt = ROUTE_SOURCE.indexOf("function chooseCompanionSite");
+    expect(chooseAt).toBeGreaterThan(-1);
+    expect(ROUTE_SOURCE.slice(chooseAt, chooseAt + 800)).toContain(
+      "queueCompanionSiteSwitch(site)",
+    );
+  });
+
+  it("keeps the saved-address picker as the sole switch surface", () => {
+    // Back/Forward never duplicate a switch the picker already offers: the
+    // native step body contains no saved-site lookup or switch queue.
+    const nativeAt = ROUTE_SOURCE.indexOf("async function stepCompanionHistoryNative");
+    expect(nativeAt).toBeGreaterThan(-1);
+    const nativeBody = ROUTE_SOURCE.slice(nativeAt, nativeAt + 1400);
+    expect(nativeBody).not.toContain("companionUrlList.find");
+    expect(nativeBody).not.toContain("queueCompanionSiteSwitch");
   });
 });

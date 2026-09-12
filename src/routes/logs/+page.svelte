@@ -195,10 +195,10 @@
     </div>
 
     {@render logSection(
-      "runs",
-      "Run folders",
-      loc.runs,
-      "No run folders yet. Each run's raw output lands in its own folder.",
+      "launch",
+      "Quick Launch runs",
+      loc.quick_launch_runs,
+      "No Quick Launch runs yet. Each run's started, skipped, and failed entries land in its own folder.",
     )}
     {@render logSection(
       "actions",
@@ -207,10 +207,10 @@
       "No Quick Action runs yet. Each run's live output and its stop/exit lines land in its own folder.",
     )}
     {@render logSection(
-      "launch",
-      "Quick Launch runs",
-      loc.quick_launch_runs,
-      "No Quick Launch runs yet. Each run's started, skipped, and failed entries land in its own folder.",
+      "runs",
+      "Run folders",
+      loc.runs,
+      "No run folders yet. Each run's raw output lands in its own folder.",
     )}
   {/if}
 </section>

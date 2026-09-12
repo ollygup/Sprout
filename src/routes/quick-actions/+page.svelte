@@ -1,14 +1,17 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import type { Group, QuickAction } from "$lib/types";
+  import type { PreCheckReport, PreFixResult } from "$lib/types";
   import {
     aiManagedStatus,
     deleteQuickAction,
     exportQuickAction,
     getSettings,
+    listQuickActionFiles,
     listQuickActions,
     moveQuickAction,
     runQuickAction,
+    runQuickActionFix,
     updateQuickAction,
   } from "$lib/api";
   import {
@@ -32,6 +35,7 @@
   } from "$lib/quickActionRuns.svelte";
   import QuickActionRunControl from "$lib/components/QuickActionRunControl.svelte";
   import Button from "$lib/components/Button.svelte";
+  import Dialog from "$lib/components/Dialog.svelte";
   import GroupNameDialog from "$lib/components/GroupNameDialog.svelte";
   import GroupAccordion from "$lib/components/GroupAccordion.svelte";
   import Icon from "$lib/components/Icon.svelte";
@@ -51,6 +55,7 @@
   import PageHeader from "$lib/components/PageHeader.svelte";
   import SearchInput from "$lib/components/SearchInput.svelte";
   import { hasNote } from "$lib/noteFormat";
+  import { actionExportTarget } from "$lib/quickActionExport";
 
   let quickActions = $state<QuickAction[]>([]);
   let loading = $state(true);
@@ -77,6 +82,15 @@
   let deleting: QuickAction | null = $state(null);
   // Detail peek — centered dialog matching Product-details grammar (research 0006 pattern 13)
   let details: QuickAction | null = $state(null);
+  // The check-first warn dialog (research 0007): a Run whose pre-action
+  // check fails lands here with the check output instead of starting. The
+  // payload carries everything the dialog shows, so it never re-reads the
+  // action. Null report = closed.
+  let warnAction: QuickAction | null = $state(null);
+  let warnReport: (PreCheckReport & { log_path: string | null }) | null = $state(null);
+  let warnFixRunning = $state(false);
+  let warnFixResult: PreFixResult | null = $state(null);
+  let warnFixError = $state("");
 
   // Whether the authoring dialog may offer AI drafting: true only while an
   // existing-local route is configured with a named model (ADR-0031 keeps
@@ -168,16 +182,88 @@
 
   /** Runs the action through the same tracked spawn as the Quick Launch
    *  window (ticket 94); the running state itself lives in the shared
-   *  quickActionRuns store. A rejection surfaces in the error line — never
-   *  silent. */
+   *  quickActionRuns store. A pass starts the tracked run with a notice; a
+   *  failing pre-action check opens the moment-of-use warn dialog with the
+   *  check output instead — a rejection surfaces in the error line. Nothing
+   *  on this path is ever silent. */
   async function run(action: QuickAction) {
     error = "";
     try {
-      await runQuickAction(action.id);
+      const outcome = await runQuickAction(action.id);
+      if (outcome.outcome === "started") {
+        flash(`${action.name} started.`);
+      } else {
+        warnAction = action;
+        warnReport = {
+          passed: outcome.passed,
+          output: outcome.output,
+          timed_out: outcome.timed_out,
+          exit_code: outcome.exit_code,
+          duration_ms: outcome.duration_ms,
+          has_fix: outcome.has_fix,
+          log_path: outcome.log_path,
+        };
+        warnFixRunning = false;
+        warnFixResult = null;
+        warnFixError = "";
+      }
     } catch (e) {
       console.error(e);
       error = String(e);
     }
+  }
+
+  /** Closes the warn dialog with no effect — the blocked action stays
+   *  unrun, exactly what Cancel promises. */
+  function closeWarn() {
+    warnAction = null;
+    warnReport = null;
+    warnFixRunning = false;
+    warnFixResult = null;
+    warnFixError = "";
+  }
+
+  /** One explicit fix run from the warn dialog: runs the fix once under the
+   *  action's shell and directory, shows its verdict inline, and returns to
+   *  the dialog — the main command still needs a fresh Run afterwards. */
+  async function runWarnFix() {
+    if (!warnAction || !warnReport || warnFixRunning) return;
+    warnFixRunning = true;
+    warnFixError = "";
+    try {
+      warnFixResult = await runQuickActionFix(warnAction.id, warnReport.log_path);
+    } catch (e) {
+      console.error(e);
+      warnFixError = String(e);
+    } finally {
+      warnFixRunning = false;
+    }
+  }
+
+  /** A fresh Run after the warning: the chain re-checks first, so a
+   *  still-failing check reopens the warn dialog with fresh output rather
+   *  than running anything silently. */
+  async function runAnyway() {
+    const action = warnAction;
+    closeWarn();
+    if (action) await run(action);
+  }
+
+  /** Plain verdict lines for the warn dialog — constraints and outcomes
+   *  only, no tutorials. */
+  function checkVerdict(report: { timed_out: boolean; exit_code: number | null }): string {
+    if (report.timed_out) return "Check timed out — the action did not run.";
+    if (report.exit_code === 0) return "Check passed (exit 0).";
+    if (report.exit_code === null) return "Check could not start — the action did not run.";
+    return `Check failed (exit ${report.exit_code}) — the action did not run.`;
+  }
+
+  function fixVerdict(result: PreFixResult): string {
+    if (result.timed_out) return "Fix timed out.";
+    if (result.exit_code === 0)
+      return "Fix finished (exit 0). Run the action again to retry the check.";
+    if (result.exit_code === null) return "Fix could not start.";
+    return `Fix finished (exit ${result.exit_code}).`;
   }
 
   /** Stop via the shared store's lifecycle (tickets 62 & 92): Stopping is
@@ -264,20 +350,31 @@
 
   /** One row's export through the moment-of-use save picker (research 0007):
    *  the file is the unchanged backup envelope with a one-element array, so
-   *  it restores through Settings → Backup with honest counts. The notice
-   *  states the payload rule up front: the same shell, command and working
-   *  directory restores as skipped under any name, never duplicated. */
+   *  it restores through Settings → Backup with honest counts. The picker
+   *  follows the attached files — a zip bundle name and filter while any are
+   *  attached, plain JSON while fileless — because the backend picks that
+   *  same format by content. The notice stays one short line naming the
+   *  attached files, so it reads inside the page's flash lifetime. */
   async function exportViaDialog(action: QuickAction) {
+    let fileCount = 0;
+    try {
+      fileCount = (await listQuickActionFiles(action.id)).length;
+    } catch (e) {
+      console.error(e);
+      error = String(e);
+      return;
+    }
+    const target = actionExportTarget(action.name, fileCount);
     const path = await saveDialog({
       title: `Export ${action.name} as backup`,
-      defaultPath: `${action.name}.json`,
-      filters: [{ name: "Sprout backup", extensions: ["json"] }],
+      defaultPath: target.defaultPath,
+      filters: target.filters,
     });
     if (!path) return;
     try {
       await exportQuickAction(path, action.id);
       flash(
-        `Exported ${action.name} to ${path}. Restore it through Settings → Backup — it adds the action unless the same shell, command and working directory already exists under any name, in which case it is skipped, not duplicated.`
+        `Exported ${action.name}${fileCount > 0 ? `, including ${fileCount} attached file${fileCount === 1 ? "" : "s"}` : ""}.`
       );
     } catch (e) {
       console.error(e);
@@ -700,6 +797,66 @@
   </p>
 </ConfirmDialog>
 
+<!-- The check-first warn dialog: the pre-action check failed, so the action
+     never started. One primary (Run anyway); Run fix appears only while the
+     blocked action carries a fix. Focus trap, Escape, and the header X all
+     close it like Cancel — nothing runs unless its button says so. -->
+<Dialog
+  open={warnReport !== null}
+  title={warnAction ? `${warnAction.name}: check failed` : "Check failed"}
+  onclose={closeWarn}
+  width={560}
+>
+  {#if warnReport}
+    <div class="warn">
+      <Notice tone="warn">
+        The pre-action check failed, so the action did not run.
+        {#if warnReport.has_fix}
+          Run the fix, run anyway, or cancel.
+        {:else}
+          Run anyway, or cancel.
+        {/if}
+      </Notice>
+      <p class="warn__verdict" role="status">{checkVerdict(warnReport)}</p>
+      {#if warnReport.output.trim()}
+        <pre class="warn__output">{warnReport.output}</pre>
+      {:else}
+        <p class="warn__empty">The check produced no output.</p>
+      {/if}
+      {#if warnFixError}
+        <Notice tone="error">{warnFixError}</Notice>
+      {/if}
+      {#if warnFixResult}
+        <p class="warn__verdict" role="status">{fixVerdict(warnFixResult)}</p>
+        {#if warnFixResult.output.trim()}
+          <pre class="warn__output">{warnFixResult.output}</pre>
+        {/if}
+      {/if}
+      <div class="warn__actions">
+        {#if warnReport.has_fix}
+          <Button
+            variant="secondary"
+            disabled={warnFixRunning}
+            onclick={() => void runWarnFix()}
+          >
+            {warnFixRunning ? "Running fix…" : "Run fix"}
+          </Button>
+        {/if}
+        <Button disabled={warnFixRunning} onclick={() => void runAnyway()}>
+          Run anyway
+        </Button>
+        <Button
+          variant="secondary"
+          disabled={warnFixRunning}
+          onclick={closeWarn}
+        >
+          Cancel
+        </Button>
+      </div>
+    </div>
+  {/if}
+</Dialog>
+
 <GroupNameDialog
   naming={groups.naming}
   draft={groups.nameDraft}
@@ -780,6 +937,51 @@
   .reorder-note__clear:focus-visible {
     outline: 2px solid var(--ring);
     outline-offset: 2px;
+  }
+
+  /* The check-first warn dialog: verdict lines plus the verbatim check
+     output in the dialog's mono voice, actions right-aligned like every
+     other dialog. Tokens only — no new sizing. */
+  .warn {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+
+  .warn__verdict {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--text);
+  }
+
+  .warn__output {
+    margin: 0;
+    max-height: 200px;
+    overflow: auto;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    line-height: var(--leading-normal);
+    color: var(--text-muted);
+    background: var(--bg-page);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: var(--space-2) var(--space-3);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .warn__empty {
+    margin: 0;
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+  }
+
+  .warn__actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: var(--space-2);
+    margin-top: var(--space-2);
   }
 
   .empty-cta {

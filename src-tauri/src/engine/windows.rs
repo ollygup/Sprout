@@ -16,7 +16,7 @@
 //! The winget bootstrap runs only in the elevated worker, where
 //! `Add-AppxPackage` is allowed.
 
-mod inspection;
+pub(crate) mod inspection;
 
 use std::collections::HashMap;
 use std::time::Duration;

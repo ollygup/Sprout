@@ -7,6 +7,7 @@ import type {
   BackupImportSummary,
   BackupSelection,
   Clip,
+  ClipImage,
   ClipInput,
   Composition,
   ImportResult,
@@ -19,10 +20,13 @@ import type {
   LaunchShell,
   LogLocations,
   PresetRecord,
+  PreFixResult,
   Product,
   ProductPresetImpact,
   QuickAction,
+  QuickActionFileMeta,
   QuickActionInput,
+  QuickActionRunOutcome,
   QuickActionShell,
   QuickLaunchDockState,
   Requirement,
@@ -314,9 +318,23 @@ export function moveQuickAction(id: number, toPosition: number): Promise<void> {
 /** Runs one stored Quick Action (tickets 50 & 62): hidden PowerShell,
  *  working directory honored, current user, no elevation, no status UI. The
  *  run is tracked for its lifetime — the window learns Run ↔ Stop through
- *  `quick-action-run-state-changed` events. */
-export function runQuickAction(id: number): Promise<void> {
-  return invoke<void>("run_quick_action", { id });
+ *  `quick-action-run-state-changed` events. A configured pre-action check
+ *  runs first: a pass continues to the tracked main command, a fail stops
+ *  before anything spawns and resolves to the warn payload instead. */
+export function runQuickAction(id: number): Promise<QuickActionRunOutcome> {
+  return invoke<QuickActionRunOutcome>("run_quick_action", { id });
+}
+
+/** Runs one action's pre-action fix exactly once — only this explicit
+ *  command runs it, never Run itself. The fix appends to the blocked run's
+ *  log when that run's path echoes back intact, else to a fresh run folder.
+ *  A fix never continues into the main command; that still needs a fresh
+ *  Run. Refused when the action has no fix configured. */
+export function runQuickActionFix(
+  id: number,
+  logPath: string | null
+): Promise<PreFixResult> {
+  return invoke<PreFixResult>("run_quick_action_fix", { id, logPath });
 }
 
 /** Stops a running Quick Action (ticket 62): runs its stop command when it
@@ -341,6 +359,52 @@ export function testQuickAction(
   cwd: string | null
 ): Promise<LaunchCommandTest> {
   return invoke<LaunchCommandTest>("test_quick_action", { shell, command, cwd });
+}
+
+// ------------------- Action files ------------------------------------------
+
+/** The largest one attached file may hold: 5 MB of raw bytes. The dialog
+ *  pre-checks it for instant feedback; the backend enforces it before
+ *  anything is written. */
+export const QUICK_ACTION_FILE_MAX_BYTES = 5 * 1024 * 1024;
+
+/** The largest one action's files may total: the 20 MB v1 cap, pre-checked
+ *  and enforced likewise. */
+export const QUICK_ACTION_FILES_MAX_BYTES = 20 * 1024 * 1024;
+
+/** Lists one action's attached files in name order: id, name, and size —
+ *  never the bytes. Runs and backups read the bytes backend-side. */
+export function listQuickActionFiles(id: number): Promise<QuickActionFileMeta[]> {
+  return invoke<QuickActionFileMeta[]>("list_quick_action_files", { id });
+}
+
+/** Attaches one file to an action: plain file names only, unique per action,
+ *  5 MB per file and 20 MB per action. The content arrives base64-encoded and
+ *  is validated before anything reaches the disk. */
+export function attachQuickActionFile(
+  id: number,
+  filename: string,
+  bytesBase64: string
+): Promise<QuickActionFileMeta> {
+  return invoke<QuickActionFileMeta>("attach_quick_action_file", {
+    id,
+    filename,
+    bytesBase64,
+  });
+}
+
+/** Deletes one attached file row. An unknown id is a plain error, never a
+ *  silent success. */
+export function removeQuickActionFile(fileId: number): Promise<void> {
+  return invoke<void>("remove_quick_action_file", { fileId });
+}
+
+/** One-line byte size for file rows — the row's mono metadata voice, the same
+ *  shape the image-clip rows use. */
+export function formatActionFileBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes >= 10240 ? 0 : 1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 /** Requests one AI Script draft through the single configured route: a
@@ -412,6 +476,114 @@ export function moveClip(id: number, toPosition: number): Promise<void> {
  *  only after the write landed, so a "Copied" flash never lies. */
 export function copyClip(id: number): Promise<void> {
   return invoke<void>("copy_clip", { id });
+}
+
+// ------------------- Image Clips (ticket 178) ------------------------------
+
+/** The largest image an image Clip accepts: 5 MB of raw bytes. The frontend
+ *  pre-checks it for instant feedback; the backend enforces it. */
+export const CLIP_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+
+/** Appends an image-only Clip from pasted/picked bytes (raw base64, no
+ *  data-URL prefix): name plus one PNG/JPEG picture. Over-cap or
+ *  non-PNG-JPEG bytes are refused plainly before anything stores. */
+export function createClipImage(
+  name: string,
+  dataBase64: string
+): Promise<Clip> {
+  return invoke<Clip>("create_clip_image", { name, dataBase64 });
+}
+
+/** Renames an image Clip / flips its dock flag in place. Text ids are
+ *  refused plainly — text edits stay on `updateClip` untouched. */
+export function updateClipImage(
+  id: number,
+  name: string,
+  showInDock: boolean
+): Promise<void> {
+  return invoke<void>("update_clip_image", { id, name, showInDock });
+}
+
+/** Puts one image Clip's picture back on the clipboard through the same
+ *  Rust-command-driven clipboard path text copies use (no new JS plugin
+ *  surface beyond `invoke`). The pixels come from `decodeImageToRgba`;
+ *  resolves only after the write landed, so the "Copied" flash never lies. */
+export function copyClipImage(
+  id: number,
+  rgbaBase64: string,
+  width: number,
+  height: number
+): Promise<void> {
+  return invoke<void>("copy_clip_image", { id, rgbaBase64, width, height });
+}
+
+/** Renders one stored image as a same-document data URL for `<img>` —
+ *  thumbnails and details decode nothing themselves. */
+export function clipImageUrl(image: ClipImage): string {
+  return `data:${image.mime};base64,${image.bytes_base64}`;
+}
+
+/** One-line picture summary for rows and tooltips — kind plus decoded
+ *  dimensions plus byte size, in the row's mono metadata voice. */
+export function clipImageMeta(image: ClipImage): string {
+  const kind =
+    image.mime === "image/png"
+      ? "PNG"
+      : image.mime === "image/jpeg"
+        ? "JPEG"
+        : image.mime;
+  const dims =
+    image.width > 0 && image.height > 0
+      ? ` · ${image.width} × ${image.height}`
+      : "";
+  const bytes = Math.floor((image.bytes_base64.length * 3) / 4);
+  return `${kind}${dims} · ${formatClipImageBytes(bytes)}`;
+}
+
+function formatClipImageBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes >= 10240 ? 0 : 1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** Decodes a data URL to RGBA pixels via canvas — the one image decoder
+ *  this tree already ships, so no new dependency decodes JPEG. Drawn from
+ *  a data URL, the canvas is never tainted. Failures throw plainly for the
+ *  caller's error line — never silent. */
+export async function decodeImageToRgba(dataUrl: string): Promise<{
+  rgbaBase64: string;
+  width: number;
+  height: number;
+}> {
+  try {
+    const img = new Image();
+    img.src = dataUrl;
+    await img.decode();
+    if (!img.naturalWidth || !img.naturalHeight) {
+      throw new Error("empty image");
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx) throw new Error("no 2d context");
+    ctx.drawImage(img, 0, 0);
+    const data = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const pixels = data.data;
+    let binary = "";
+    for (let i = 0; i < pixels.length; i += 0x8000) {
+      binary += String.fromCharCode(...pixels.subarray(i, i + 0x8000));
+    }
+    return {
+      rgbaBase64: btoa(binary),
+      width: canvas.width,
+      height: canvas.height,
+    };
+  } catch (e) {
+    throw new Error(
+      `That image couldn't be decoded for copying — ${e instanceof Error ? e.message : String(e)}`
+    );
+  }
 }
 
 // ------------------- Groups (ticket 89) ------------------------------------
@@ -503,6 +675,35 @@ export function getCompanionAudioState(): Promise<import("./types").CompanionAud
 export function setCompanionMuted(muted: boolean): Promise<import("./types").CompanionAudioState> {
   return invoke<import("./types").CompanionAudioState>("set_companion_muted", { muted });
 }
+
+/** Companion history: the Back/Forward enable-state of the live native child
+ *  (in-page website routing). Missing child reads as disabled. */
+export function getCompanionHistoryState(): Promise<import("./types").CompanionHistoryState> {
+  return invoke<import("./types").CompanionHistoryState>("get_companion_history_state");
+}
+
+/** Steps the live native child back through its in-page history; resolves
+ *  with the fresh enable-state. */
+export function companionGoBack(): Promise<import("./types").CompanionHistoryState> {
+  return invoke<import("./types").CompanionHistoryState>("companion_go_back");
+}
+
+/** Steps the live native child forward through its in-page history; resolves
+ *  with the fresh enable-state. */
+export function companionGoForward(): Promise<import("./types").CompanionHistoryState> {
+  return invoke<import("./types").CompanionHistoryState>("companion_go_forward");
+}
+
+/** Attaches the native history observers to the live child (idempotent) and
+ *  resolves with the current enable-state. Observers forward every in-page
+ *  navigation as `COMPANION_HISTORY_CHANGED_EVENT`. */
+export function ensureCompanionHistoryHook(): Promise<import("./types").CompanionHistoryState> {
+  return invoke<import("./types").CompanionHistoryState>("ensure_companion_history_hook");
+}
+
+/** The frontend event carrying fresh Back/Forward enable-state after any
+ *  native in-page navigation. */
+export const COMPANION_HISTORY_CHANGED_EVENT = "companion-history-changed";
 
 /** Companion per-monitor height ratio (ticket 125) — falls back to global. */
 export function getCompanionHeightRatio(display: string): Promise<number | null> {

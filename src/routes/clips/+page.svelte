@@ -2,12 +2,19 @@
   import { onMount } from "svelte";
   import type { Clip, Group } from "$lib/types";
   import {
+    clipImageMeta,
+    clipImageUrl,
+    CLIP_IMAGE_MAX_BYTES,
     copyClip,
+    copyClipImage,
+    createClipImage,
+    decodeImageToRgba,
     deleteClip,
     getSettings,
     listClips,
     moveClip,
     updateClip,
+    updateClipImage,
   } from "$lib/api";
   import {
     countMembers,
@@ -23,8 +30,11 @@
     shouldShowDockFilter,
     type DockVisibility,
   } from "$lib/dockVisibility";
-  import { clipTitle } from "$lib/format";
+  import { clipTitle, formatBytes } from "$lib/format";
   import Button from "$lib/components/Button.svelte";
+  import Dialog from "$lib/components/Dialog.svelte";
+  import TextInput from "$lib/components/TextInput.svelte";
+  import InfoTip from "$lib/components/InfoTip.svelte";
   import GroupNameDialog from "$lib/components/GroupNameDialog.svelte";
   import GroupAccordion from "$lib/components/GroupAccordion.svelte";
   import Icon from "$lib/components/Icon.svelte";
@@ -71,6 +81,15 @@
   let copiedId = $state<number | null>(null);
   let copiedAnnouncement = $state("");
   let copiedTimer: ReturnType<typeof setTimeout> | undefined;
+
+  /** Image-aware row title (ticket 178): named images show their name,
+   *  untitled ones read "Image" — clipTitle's first-line fallback needs text
+   *  that image Clips don't carry. Text rows keep clipTitle untouched. */
+  function clipName(clip: Clip): string {
+    return clip.image
+      ? clip.name.trim() || "Image"
+      : clipTitle(clip.name, clip.content);
+  }
 
   // Groups (tickets 89/91): the same per-collection pattern as Quick Actions
   // (ticket 90) — the page-features gear menu is the feature's only switch
@@ -157,10 +176,18 @@
 
   async function copy(clip: Clip) {
     try {
-      await copyClip(clip.id);
+      if (clip.image) {
+        // The pixels decode here (canvas); the write itself stays behind
+        // the Rust clipboard command — the flash below only runs once the
+        // write landed, so it stays honest like the text path.
+        const rgba = await decodeImageToRgba(clipImageUrl(clip.image));
+        await copyClipImage(clip.id, rgba.rgbaBase64, rgba.width, rgba.height);
+      } else {
+        await copyClip(clip.id);
+      }
       // The write landed — now the flash may honestly say Copied.
       copiedId = clip.id;
-      copiedAnnouncement = `${clipTitle(clip.name, clip.content)} copied.`;
+      copiedAnnouncement = `${clipName(clip)} copied.`;
       clearTimeout(copiedTimer);
       copiedTimer = setTimeout(() => (copiedId = null), 1200);
     } catch (e) {
@@ -203,14 +230,19 @@
 
   /** Per-item dock visibility (research 0006 pattern 4: the control lives on
    *  its object): hidden clips stay fully listed here and copyable — only
-   *  the dock filters them out. */
+   *  the dock filters them out. Image Clips flip through their own update
+   *  so the text path stays untouched. */
   async function toggleDockVisibility(clip: Clip) {
     busy = true;
     error = "";
     try {
       const visible = !(clip.show_in_dock ?? true);
-      await updateClip({ ...clip, show_in_dock: visible });
-      const title = clipTitle(clip.name, clip.content);
+      if (clip.image) {
+        await updateClipImage(clip.id, clip.name, visible);
+      } else {
+        await updateClip({ ...clip, show_in_dock: visible });
+      }
+      const title = clipName(clip);
       flash(
         visible
           ? `"${title}" will show in the dock.`
@@ -222,6 +254,132 @@
       error = String(e);
     } finally {
       busy = false;
+    }
+  }
+
+  // Image Clips (ticket 178): the add/edit dialog below reuses the shared
+  // Dialog + TextInput + Button foundation — ClipFormDialog stays the
+  // text-clip form untouched. Paste lands from the clipboard, Choose-file
+  // opens the OS picker; both preview before saving, and the backend
+  // re-validates authoritatively (PNG/JPEG, 5 MB cap).
+  let imgOpen = $state(false);
+  let imgEditing: Clip | null = $state(null);
+  let imgName = $state("");
+  let imgDataUrl = $state("");
+  let imgBytes = $state("");
+  let imgMeta = $state("");
+  let imgShowInDock = $state(true);
+  let imgSaving = $state(false);
+  let imgError = $state("");
+  let imgFile: HTMLInputElement | null = $state(null);
+
+  function openImgAdd() {
+    imgEditing = null;
+    imgName = "";
+    imgDataUrl = "";
+    imgBytes = "";
+    imgMeta = "";
+    imgShowInDock = true;
+    imgSaving = false;
+    imgError = "";
+    imgOpen = true;
+  }
+
+  function openImgEdit(clip: Clip) {
+    if (!clip.image) return;
+    imgEditing = clip;
+    imgName = clip.name;
+    imgDataUrl = clipImageUrl(clip.image);
+    imgBytes = clip.image.bytes_base64;
+    imgMeta = clipImageMeta(clip.image);
+    imgShowInDock = clip.show_in_dock ?? true;
+    imgSaving = false;
+    imgError = "";
+    imgOpen = true;
+  }
+
+  function readFileAsDataUrl(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () =>
+        reject(new Error("that file couldn't be read"));
+      reader.onload = () => resolve(String(reader.result ?? ""));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  /** Takes a pasted/picked File: instant type+size feedback here, preview on
+   *  success — the save path re-validates through the backend either way. */
+  async function takeImageFile(file: File) {
+    imgError = "";
+    if (file.type !== "image/png" && file.type !== "image/jpeg") {
+      imgError = "Only PNG and JPEG images can be kept as clips.";
+      return;
+    }
+    if (file.size > CLIP_IMAGE_MAX_BYTES) {
+      imgError = "That image is over the 5 MB limit — pick a smaller file.";
+      return;
+    }
+    if (file.size === 0) {
+      imgError = "That file has no image data.";
+      return;
+    }
+    try {
+      imgDataUrl = await readFileAsDataUrl(file);
+    } catch (e) {
+      console.error(e);
+      imgError = `That file couldn't be read — ${e instanceof Error ? e.message : String(e)}`;
+      return;
+    }
+    imgBytes = imgDataUrl.split(",", 2)[1] ?? "";
+    if (!imgBytes) {
+      imgError = "That file couldn't be read — try again.";
+      imgDataUrl = "";
+      return;
+    }
+    const kind = file.type === "image/png" ? "PNG" : "JPEG";
+    imgMeta = `${kind} · ${formatBytes(file.size)}`;
+  }
+
+  /** Paste lands anywhere inside the dialog: the first clipboard image wins;
+   *  anything else is refused plainly, never silently. */
+  function handleImgPaste(e: ClipboardEvent) {
+    const file = [...(e.clipboardData?.files ?? [])].find((f) =>
+      f.type.startsWith("image/")
+    );
+    if (!file) {
+      imgError = "No image in the clipboard — copy a PNG or JPEG first.";
+      return;
+    }
+    e.preventDefault();
+    void takeImageFile(file);
+  }
+
+  async function saveImage() {
+    imgError = "";
+    if (!imgBytes) {
+      imgError = imgEditing
+        ? "That clip lost its image — close and try again."
+        : "Paste an image or choose a file first.";
+      return;
+    }
+    imgSaving = true;
+    try {
+      if (imgEditing) {
+        await updateClipImage(imgEditing.id, imgName.trim(), imgShowInDock);
+        imgOpen = false;
+        flash(`"${imgName.trim() || "Image"}" saved.`);
+      } else {
+        const created = await createClipImage(imgName.trim(), imgBytes);
+        imgOpen = false;
+        flash(`"${clipName(created)}" added to Quick Clips.`);
+      }
+      await load();
+    } catch (e) {
+      console.error(e);
+      imgError = String(e);
+    } finally {
+      imgSaving = false;
     }
   }
 
@@ -271,14 +429,14 @@
       menu = null;
       return;
     }
-    const title = clipTitle(clip.name, clip.content);
+    const title = clipName(clip);
     const slice = moveSlice(clip);
     const index = slice.indexOf(clip);
     const items: ContextMenuItem[] = [
       {
         label: "Edit",
         icon: "pencil",
-        onselect: () => openEdit(clip),
+        onselect: () => (clip.image ? openImgEdit(clip) : openEdit(clip)),
       },
     ];
     if (groups.enabled) {
@@ -395,7 +553,7 @@
 </svelte:head>
 
 {#snippet clipRow(clip: Clip)}
-  {@const title = clipTitle(clip.name, clip.content)}
+  {@const title = clipName(clip)}
   <li class="rack__row">
     <button
       type="button"
@@ -406,9 +564,22 @@
       <span class="rack__badge" aria-hidden="true">
         <Icon name={copiedId === clip.id ? "check" : "copy"} size={14} />
       </span>
+      {#if clip.image}
+        <!-- Decorative thumbnail (the name beside it carries the meaning);
+             full image lives in the edit dialog, copy is the row's verb. -->
+        <img
+          class="rack__thumb"
+          src={clipImageUrl(clip.image)}
+          alt=""
+          width={32}
+          height={32}
+        />
+      {/if}
       <span class="rack__name">{title}</span>
       {#if copiedId === clip.id}
         <span class="rack__copied">Copied</span>
+      {:else if clip.image}
+        <span class="rack__content">{clipImageMeta(clip.image)}</span>
       {:else}
         <span class="rack__content">{clip.content}</span>
       {/if}
@@ -443,10 +614,16 @@
         <Icon name="plus" size={15} />
         Add
       </Button>
+      <!-- The second create stays secondary: one primary per header row
+           (research 0005 rule 2) — Add is this page's main verb. -->
+      <Button variant="secondary" onclick={openImgAdd} disabled={busy}>
+        <Icon name="plus" size={15} />
+        Add image
+      </Button>
     {/snippet}
     {#snippet subtitle()}
       {clips.length} {clips.length === 1 ? "clip" : "clips"}.
-      Click a clip to put its text back on your clipboard. The Quick Launch
+      Click a clip to put it back on your clipboard — text or image. The Quick Launch
       window's Quick Clips tab copies them too, once any exist.
     {/snippet}
     {#snippet toolbar()}
@@ -499,14 +676,15 @@
     <EmptyState icon="copy" title="No clips yet">
       <p>
         Press <strong>Add</strong> and paste the text you re-type most — support
-        replies, commands, addresses. Clicking a clip puts its text back on
+        replies, commands, addresses — or <strong>Add image</strong> for a
+        PNG/JPEG picture. Clicking a clip puts it back on
         your clipboard. Once one clip exists, a Quick Clips tab appears in the
         Quick Launch window for two-click copying from the tray.
       </p>
     </EmptyState>
   {:else if matchedCount === 0 && filter.trim() !== ""}
     <EmptyState icon="search" title={`Nothing matches “${filter.trim()}”`}>
-      <p>Search looks at clip names and their text.</p>
+      <p>Search looks at clip names and their text (images by name).</p>
       {#if dockVisibility !== "all"}
         <div class="empty-cta">
           <Button variant="secondary" onclick={() => (dockVisibility = "all")}>
@@ -592,9 +770,9 @@
   oncancel={() => (deleting = null)}
 >
   <p>
-    <strong>{deleting ? clipTitle(deleting.name, deleting.content) : ""}</strong>
+    <strong>{deleting ? clipName(deleting) : ""}</strong>
     will be removed from this page and from the Quick Launch window's Quick
-    Clips tab. The text is deleted.
+    Clips tab. {#if deleting?.image}The image is deleted.{:else}The text is deleted.{/if}
   </p>
 </ConfirmDialog>
 
@@ -634,6 +812,115 @@
   }}
   oncancel={() => (formOpen = false)}
 />
+
+<!-- Image Clip dialog (ticket 178): paste or pick one PNG/JPEG, preview it,
+     then name it. Editing shows the full saved image read-only above the
+     name — the details surface for image Clips on this page. -->
+<Dialog
+  open={imgOpen}
+  title={imgEditing ? "Edit image clip" : "Add an image clip"}
+  onclose={() => (imgOpen = false)}
+  width={560}
+  focusTarget="#clip-image-name"
+>
+  <div class="imgform" onpaste={handleImgPaste}>
+    {#if !imgEditing}
+      <p class="imgform__hint">
+        Paste a PNG or JPEG from your clipboard anywhere in this dialog, or
+        choose a file — up to 5 MB, one picture per clip.
+      </p>
+      <div class="imgform__pick">
+        <Button
+          variant="secondary"
+          onclick={() => imgFile?.click()}
+          disabled={imgSaving}
+        >
+          <Icon name="plus" size={15} />
+          Choose file…
+        </Button>
+        <input
+          bind:this={imgFile}
+          type="file"
+          accept="image/png,image/jpeg"
+          class="imgform__file"
+          tabindex="-1"
+          aria-hidden="true"
+          onchange={(e) => {
+            const picked = (e.currentTarget as HTMLInputElement).files?.[0];
+            e.currentTarget.value = "";
+            if (picked) void takeImageFile(picked);
+          }}
+        />
+      </div>
+    {/if}
+
+    {#if imgDataUrl}
+      <img
+        class="imgform__preview"
+        src={imgDataUrl}
+        alt={imgEditing
+          ? `Image saved as ${imgEditing.name.trim() || "Image"}`
+          : "Preview of the image to save"}
+      />
+      {#if imgMeta}
+        <p class="imgform__meta">{imgMeta}</p>
+      {/if}
+    {/if}
+
+    <TextInput
+      id="clip-image-name"
+      label="Name"
+      placeholder="Optional — untitled images show as “Image”"
+      value={imgName}
+      onchange={(v) => (imgName = v)}
+      info="How naming works"
+    >
+      {#snippet infobody()}
+        <p>
+          Optional. An unnamed image is listed as “Image”, so you never have
+          to invent a name.
+        </p>
+      {/snippet}
+    </TextInput>
+
+    <label class="imgform__dockvis">
+      <input
+        type="checkbox"
+        class="imgform__dockvis-check"
+        checked={imgShowInDock}
+        onchange={(e) =>
+          (imgShowInDock = (e.target as HTMLInputElement).checked)}
+      />
+      <span class="imgform__dockvis-title">Show in dock</span>
+      <InfoTip label="What showing in the dock does">
+        <p>Uncheck to hide this clip from the Quick Launch dock. It stays here and stays copyable.</p>
+      </InfoTip>
+    </label>
+
+    {#if imgError}
+      <p class="imgform__error" role="alert">{imgError}</p>
+    {/if}
+
+    <div class="imgform__actions">
+      <Button
+        variant="secondary"
+        onclick={() => (imgOpen = false)}
+        disabled={imgSaving}
+      >
+        Cancel
+      </Button>
+      <Button onclick={() => void saveImage()} disabled={imgSaving}>
+        {imgSaving
+          ? imgEditing
+            ? "Saving…"
+            : "Adding…"
+          : imgEditing
+            ? "Save changes"
+            : "Add image clip"}
+      </Button>
+    </div>
+  </div>
+</Dialog>
 
 <ContextMenu ctx={menu} onclose={() => (menu = null)} />
 
@@ -740,6 +1027,19 @@
     color: var(--accent);
   }
 
+  /* Row thumbnail (ticket 178): a token-sized square that never stretches
+     the row — cover-crop keeps any aspect ratio inside it, and the row's
+     existing ellipsis still absorbs narrow widths. */
+  .rack__thumb {
+    width: var(--space-6);
+    height: var(--space-6);
+    flex-shrink: 0;
+    object-fit: cover;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+    background: var(--bg-surface);
+  }
+
   .rack__name {
     flex-shrink: 0;
     max-width: 40%;
@@ -800,6 +1100,86 @@
     border-radius: var(--radius);
     font-size: var(--text-xs);
     color: var(--text-muted);
+  }
+
+  /* Image Clip dialog (ticket 178): the text form's vertical rhythm with the
+     same tokens — hint, preview, name, dock toggle, actions. */
+  .imgform {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+    min-width: 0;
+  }
+
+  .imgform__hint {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--text-muted);
+  }
+
+  .imgform__pick {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+
+  /* The OS picker opens from the button above — the input itself is never
+     a keyboard or screen-reader stop. */
+  .imgform__file {
+    display: none;
+  }
+
+  .imgform__preview {
+    display: block;
+    max-width: 100%;
+    max-height: calc(var(--space-7) * 10);
+    width: auto;
+    margin: 0 auto;
+    object-fit: contain;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--bg-surface);
+  }
+
+  .imgform__meta {
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+  }
+
+  .imgform__dockvis {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    cursor: pointer;
+  }
+
+  .imgform__dockvis-check {
+    margin: 0;
+    accent-color: var(--accent);
+    width: 14px;
+    height: 14px;
+  }
+
+  .imgform__dockvis-title {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  .imgform__error {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--danger-text);
+    overflow-wrap: anywhere;
+  }
+
+  .imgform__actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--space-2);
+    margin-top: var(--space-2);
   }
 
   /* The live region is the shared `.sr-only` utility (tokens.css) — its

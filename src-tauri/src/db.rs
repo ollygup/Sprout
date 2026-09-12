@@ -128,6 +128,8 @@ fn migrate(conn: &Connection) -> Result<()> {
             notes        TEXT,
             auto_run     INTEGER NOT NULL DEFAULT 0,
             show_in_dock INTEGER NOT NULL DEFAULT 1,
+            pre_check    TEXT,
+            pre_fix      TEXT,
             position     INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS clips (
@@ -136,7 +138,21 @@ fn migrate(conn: &Connection) -> Result<()> {
             content  TEXT NOT NULL,
             show_in_dock INTEGER NOT NULL DEFAULT 1,
             position INTEGER NOT NULL DEFAULT 0
-        );",
+        );
+        CREATE TABLE IF NOT EXISTS clip_images (
+            clip_id INTEGER PRIMARY KEY REFERENCES clips(id) ON DELETE CASCADE,
+            mime    TEXT NOT NULL,
+            bytes   BLOB NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS quick_action_files (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            action_id INTEGER NOT NULL REFERENCES quick_actions(id) ON DELETE CASCADE,
+            filename  TEXT NOT NULL COLLATE NOCASE,
+            bytes     BLOB NOT NULL,
+            UNIQUE(action_id, filename)
+        );
+        CREATE INDEX IF NOT EXISTS idx_quick_action_files_action
+            ON quick_action_files(action_id);",
     )?;
     ensure_preset_imported_column(conn)?;
     ensure_product_timestamps(conn)?;
@@ -145,8 +161,11 @@ fn migrate(conn: &Connection) -> Result<()> {
     ensure_quick_action_note(conn)?;
     ensure_quick_action_auto_run(conn)?;
     ensure_quick_action_shell(conn)?;
+    ensure_quick_action_pre_action(conn)?;
     ensure_show_in_dock_columns(conn)?;
+    ensure_clip_images_table(conn)?;
     ensure_item_group_columns(conn)?;
+    ensure_quick_action_files(conn)?;
     ensure_ai_approved_roots(conn)
 }
 
@@ -365,6 +384,63 @@ fn ensure_quick_action_shell(conn: &Connection) -> Result<()> {
             "ALTER TABLE quick_actions ADD COLUMN shell TEXT NOT NULL DEFAULT 'powershell' CHECK (shell IN ('powershell', 'cmd'))",
         )?;
     }
+    Ok(())
+}
+
+/// Upgrades databases created before the pre-action section existed: adds
+/// the nullable `pre_check`/`pre_fix` columns to `quick_actions`, so every
+/// existing row reads back with no pre-action. Fresh databases already have
+/// both. Idempotent — re-runs change nothing. Absent-by-default matters: a
+/// check that never existed must never start gating runs after an upgrade.
+fn ensure_quick_action_pre_action(conn: &Connection) -> Result<()> {
+    for column in ["pre_check", "pre_fix"] {
+        let exists: bool = conn.query_row(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('quick_actions') WHERE name = '{column}')"
+            ),
+            [],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            conn.execute_batch(&format!("ALTER TABLE quick_actions ADD COLUMN {column} TEXT"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Upgrades databases created before image Clips existed (ticket 178):
+/// creates the `clip_images` table holding each image Clip's one picture.
+/// Fresh databases already have it. Idempotent — re-runs change nothing.
+/// The `clip_id` primary key enforces one image per Clip v1, and
+/// `ON DELETE CASCADE` removes the picture with its Clip.
+fn ensure_clip_images_table(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS clip_images (
+             clip_id INTEGER PRIMARY KEY REFERENCES clips(id) ON DELETE CASCADE,
+             mime    TEXT NOT NULL,
+             bytes   BLOB NOT NULL
+         );",
+    )?;
+    Ok(())
+}
+
+/// Upgrades databases created before action files existed: creates the
+/// `quick_action_files` table holding one row per attached file. Fresh
+/// databases already have it. Idempotent — re-runs change nothing. Removal
+/// of an action deletes its files through the foreign-key cascade, which is
+/// why the table carries no separate cleanup path.
+fn ensure_quick_action_files(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS quick_action_files (
+             id        INTEGER PRIMARY KEY AUTOINCREMENT,
+             action_id INTEGER NOT NULL REFERENCES quick_actions(id) ON DELETE CASCADE,
+             filename  TEXT NOT NULL COLLATE NOCASE,
+             bytes     BLOB NOT NULL,
+             UNIQUE(action_id, filename)
+         );
+         CREATE INDEX IF NOT EXISTS idx_quick_action_files_action
+             ON quick_action_files(action_id);",
+    )?;
     Ok(())
 }
 
@@ -2101,6 +2177,8 @@ mod tests {
             note: None,
             auto_run: false,
             show_in_dock: true,
+            pre_check: None,
+            pre_fix: None,
         };
         crate::quick_actions::create_quick_action(&conn, &action).unwrap();
         assert_eq!(crate::quick_actions::list_quick_actions(&conn).unwrap().len(), 1);
@@ -2154,6 +2232,8 @@ mod tests {
             note: None,
             auto_run: false,
             show_in_dock: true,
+            pre_check: None,
+            pre_fix: None,
         };
         crate::quick_actions::create_quick_action(&conn, &tracked).unwrap();
         let list = crate::quick_actions::list_quick_actions(&conn).unwrap();
@@ -2235,6 +2315,43 @@ mod tests {
         let clips = crate::clips::list_clips(&conn).unwrap();
         assert_eq!(clips.len(), 1);
         assert!(clips[0].clip.show_in_dock);
+    }
+
+    #[test]
+    fn migrates_databases_created_before_clip_images() {
+        // Databases from before image Clips have no `clip_images` table —
+        // migration creates it empty (one image per Clip via the `clip_id`
+        // primary key, cascade on Clip delete) and existing text Clips keep
+        // listing with no image attached.
+        let dir = test_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        {
+            let conn = Connection::open(dir.join("sprout.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE clips (
+                     id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                     name     TEXT NOT NULL,
+                     content  TEXT NOT NULL,
+                     show_in_dock INTEGER NOT NULL DEFAULT 1,
+                     position INTEGER NOT NULL DEFAULT 0
+                 );
+                 INSERT INTO clips (name, content, show_in_dock, position)
+                 VALUES ('legacy', 'legacy text', 1, 0);",
+            )
+            .unwrap();
+        }
+        let conn = init_at(&dir).unwrap();
+        let clips = crate::clips::list_clips(&conn).unwrap();
+        assert_eq!(clips.len(), 1);
+        assert!(clips[0].clip.image.is_none());
+        let images: i64 = conn
+            .query_row("SELECT COUNT(*) FROM clip_images", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(images, 0);
+        // The migration is idempotent — re-running init changes nothing.
+        drop(conn);
+        let conn = init_at(&dir).unwrap();
+        assert_eq!(crate::clips::list_clips(&conn).unwrap().len(), 1);
     }
 
     #[test]

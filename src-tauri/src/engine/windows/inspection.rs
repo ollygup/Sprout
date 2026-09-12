@@ -431,8 +431,10 @@ fn is_shell_chrome_class(class: &str) -> bool {
 
 /// Whether any direct child of `pid` is still alive — the wait's abort
 /// companion to the child-window step of the new-window resolution: a dead
-/// wrapper with a living child still has a window to wait for.
-fn children_alive(pid: u32) -> bool {
+/// wrapper with a living child still has a window to wait for. Also the
+/// staged-files release's drain check: a shell that already exited may still
+/// own a starting GUI program.
+pub(crate) fn children_alive(pid: u32) -> bool {
     all_processes()
         .into_iter()
         .any(|(child, parent)| parent == pid && process_alive(child))

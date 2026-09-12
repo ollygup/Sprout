@@ -1274,7 +1274,7 @@
         title: "Open a Sprout backup",
         multiple: false,
         directory: false,
-        filters: [{ name: "Sprout backup", extensions: ["json"] }],
+        filters: [{ name: "Sprout backup", extensions: ["json", "zip"] }],
       });
       if (typeof picked !== "string") return;
       backupBusy = true;

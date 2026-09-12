@@ -1,6 +1,12 @@
 //! ADR-0029 keeps process lifetime and shell invocation knowledge with their owners.
+mod files;
 mod process;
 mod shell;
+
+pub(crate) use files::{
+    cleanup_staged_dir, contains_files_placeholder, expand_files_dir, release_staged_dir,
+    stage_action_files, sweep_stale_staged_dirs,
+};
 
 pub(crate) use process::{
     action_argv, available_disk_bytes, capture_hidden, capture_powershell, extract_zip_hidden,

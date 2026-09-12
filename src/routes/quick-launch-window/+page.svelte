@@ -5,6 +5,7 @@
   import type {
     Clip,
     CompanionAudioState,
+    CompanionHistoryState,
     CompanionSite,
     Group,
     LaunchEntry,
@@ -12,8 +13,17 @@
     QuickAction,
   } from "$lib/types";
   import {
+    clipImageMeta,
+    clipImageUrl,
+    companionGoBack as nativeCompanionGoBack,
+    companionGoForward as nativeCompanionGoForward,
+    COMPANION_HISTORY_CHANGED_EVENT,
     copyClip,
+    copyClipImage,
+    decodeImageToRgba,
+    ensureCompanionHistoryHook,
     getCompanionAudioState,
+    getCompanionHistoryState,
     getQuickLaunchDockState,
     getSettings,
     listClips,
@@ -66,6 +76,7 @@
     companionUrlKey,
     createCompanionSiteSwitchQueue,
     normalizeCompanionSiteZoom,
+    trailApplyVisit,
   } from "$lib/companion";
   import Button from "$lib/components/Button.svelte";
   import ContextMenu, {
@@ -197,15 +208,56 @@
     );
     return normalizeCompanionSiteZoom(hit?.zoom ?? null);
   }
+  // Browser preview uses an iframe; the Windows runtime uses WebView2 or the stable failure surface.
+  // Detect Tauri reliably — __TAURI_IPC__ is always present in Tauri webviews, __TAURI__ may be delayed.
+  // WHY up here: the Back/Forward enable-state below already branches on it.
+  const isTauri = typeof window !== "undefined" && !!((window as any).__TAURI__ || (window as any).__TAURI_IPC__ || (window as any).__TAURI_INTERNALS__);
   // The bar readout's effective zoom — re-derives when the frame resizes or
   // the site's explicit zoom changes.
   const companionShownZoom = $derived(companionAppliedZoom(companionFrameWidth));
   const companionZoomAuto = $derived(companionUserZoom === null);
   let companionRatio = $state(0.40);
-  let companionCanGoBack = $state(false);
-  let companionCanGoForward = $state(false);
+  // The browser-preview fallback trail behind Back/Forward — every saved
+  // address the iframe showed, in visit order, used only when not in Tauri.
+  // The native child traverses its own in-page history through Rust
+  // (companion_history owner); the flags below prefer that live state there,
+  // so link clicks inside the page are observed and stepped. The trail
+  // survives only as the preview fallback, never as native evidence
+  // (ADR-0022 Companion is a single isolated site).
   let companionHistory: string[] = $state([]);
   let companionHistoryIndex = $state(-1);
+  // Live native enable-state (Tauri path); the preview fallback reads the
+  // trail marker instead. Missing child reads as disabled — never hidden.
+  let companionNativeBack = $state(false);
+  let companionNativeForward = $state(false);
+  const companionCanGoBack = $derived(
+    isTauri ? companionNativeBack : companionHistoryIndex > 0,
+  );
+  const companionCanGoForward = $derived(
+    isTauri
+      ? companionNativeForward
+      : companionHistoryIndex >= 0 &&
+          companionHistoryIndex < companionHistory.length - 1,
+  );
+
+  /** Refreshes the native Back/Forward enable-state from the live child.
+   *  Missing child reads as disabled; failures keep the last picture quiet —
+   *  the buttons simply stay as they were until the next navigation. */
+  async function refreshCompanionHistory() {
+    if (!isTauri) return;
+    if (!companionVisible || !companionUrl) {
+      companionNativeBack = false;
+      companionNativeForward = false;
+      return;
+    }
+    try {
+      const state = await getCompanionHistoryState();
+      companionNativeBack = state.can_go_back;
+      companionNativeForward = state.can_go_forward;
+    } catch (e) {
+      console.error("companion history sync failed", e);
+    }
+  }
   let companionDragging = $state(false);
   let qlwMainEl: HTMLDivElement | null = $state(null);
   let companionFrameEl: HTMLIFrameElement | null = $state(null);
@@ -254,6 +306,11 @@
   let companionSiteMenuFocusFirst = $state(false);
   let companionSiteTrigger: HTMLButtonElement | undefined = $state();
   let companionSwitchingTo: CompanionSite | null = $state(null);
+  // The Back/Forward step currently inside the switch queue, as a URL key —
+  // lets the apply path tell a trail step (move the marker) from a fresh
+  // arrival (record a visit). Plain marker, never reactive: only compared,
+  // never rendered.
+  let companionPendingTrailKey: string | null = null;
   let companionSwitchAnnouncement = $state("");
   function hasCompanionUrl(url: string | null): url is string {
     return typeof url === "string" && url.trim().length > 0;
@@ -281,10 +338,22 @@
       ) ?? site;
     companionUrl = latest.url;
     companionUserZoom = normalizeCompanionSiteZoom(latest.zoom ?? null);
-    companionHistory = [latest.url];
-    companionHistoryIndex = 0;
-    companionCanGoBack = false;
-    companionCanGoForward = false;
+    // The preview-fallback trail: a preview Back/Forward step only moves the
+    // marker to that visit, while every fresh saved-address arrival drops the
+    // forward trail and records itself — returning restores nothing, and
+    // Reload always has the saved address to return to (ADR-0022 Companion is
+    // a single isolated site). The native path ignores this trail; its
+    // enable-state comes from the live child.
+    const applied = trailApplyVisit(
+      companionHistory,
+      companionHistoryIndex,
+      latest.url,
+      companionPendingTrailKey !== null &&
+        companionPendingTrailKey === companionUrlKey(latest.url),
+    );
+    companionHistory = applied.history;
+    companionHistoryIndex = applied.index;
+    companionPendingTrailKey = null;
     companionWebviewFailed = false;
     companionFailedUrl = null;
     companionFailureDetail = "";
@@ -302,6 +371,14 @@
     },
     onApplied: applyCompanionSite,
     onFailure: (site, switchError) => {
+      // A failed trail step must not leave its marker behind to mislabel the
+      // next arrival as a step.
+      if (
+        companionPendingTrailKey !== null &&
+        companionPendingTrailKey === companionUrlKey(site.url)
+      ) {
+        companionPendingTrailKey = null;
+      }
       console.error("companion site switch failed", switchError);
       error = `Couldn't switch Companion to ${companionDisplayName(site)} — ${String(switchError)}`;
     },
@@ -317,6 +394,9 @@
       return;
     }
     if (error.startsWith("Couldn't switch Companion to ")) error = "";
+    if (error.startsWith("Couldn't go back") || error.startsWith("Couldn't go forward")) {
+      error = "";
+    }
     queueCompanionSiteSwitch(site);
   }
 
@@ -526,8 +606,7 @@
     return () => observer.disconnect();
   });
   // Browser preview uses an iframe; the Windows runtime uses WebView2 or the stable failure surface.
-  // Detect Tauri reliably — __TAURI_IPC__ is always present in Tauri webviews, __TAURI__ may be delayed
-  const isTauri = typeof window !== "undefined" && !!((window as any).__TAURI__ || (window as any).__TAURI_IPC__ || (window as any).__TAURI_INTERNALS__);
+  // (Tauri detection lives near the top, beside the history enable-state.)
   const useWebview = $derived(companionVisible && isTauri && !companionWebviewFailed);
   // Splitter follows the 0.25–0.60 clamp — single source with settings.rs
   function clampCompanionRatio(v: number): number {
@@ -649,19 +728,24 @@
     // stay on the auto zoom. A newer persist landing after this read wins on
     // the next quick-launch-changed pass.
     companionUserZoom = companionStoredZoomForUrl(url);
-    // Init history when url changes
+    // The preview-fallback trail survives background refreshes: a matching
+    // saved address only re-seats the marker, while a genuinely new one (a
+    // switch made in the main app) records a fresh visit — a theme save or
+    // group toggle never wipes preview Back/Forward. Companion Off clears the
+    // trail, so no stale address survives to be stepped to. The native path
+    // ignores this trail; its enable-state comes from the live child below.
     if (companionUrl) {
-      if (companionHistory.length === 0 || companionHistory[0] !== companionUrl) {
-        companionHistory = [companionUrl];
-        companionHistoryIndex = 0;
-        companionCanGoBack = false;
-        companionCanGoForward = false;
-      }
+      const aligned = trailApplyVisit(
+        companionHistory,
+        companionHistoryIndex,
+        companionUrl,
+        true,
+      );
+      companionHistory = aligned.history;
+      companionHistoryIndex = aligned.index;
     } else {
       companionHistory = [];
       companionHistoryIndex = -1;
-      companionCanGoBack = false;
-      companionCanGoForward = false;
     }
     // The resolved ratio is in — re-sync so the first paint never measures a
     // pre-layout rect at the init value (the ratio assignment above also
@@ -676,22 +760,61 @@
     } catch (e) {
       console.error(e);
     }
+    // The native enable-state follows the live child — refresh it here so a
+    // switch made in the main app settles the toolbar even before the next
+    // in-page navigation event arrives.
+    void refreshCompanionHistory();
+  }
+  // The sole history chrome (ADR-0022 Companion is a single isolated site):
+  // traverses the live native child's in-page history on the native path
+  // (link clicks and other navigations inside the loaded page, observed
+  // through the Rust history owner), while browser preview keeps its
+  // saved-address-trail iframe fallback. The saved-site picker stays the sole
+  // site-switching surface — Back/Forward never duplicate a switch it already
+  // offers. A failed native step says so on the error line instead of
+  // navigating nowhere (research 0004 rule 5: silence reads as breakage).
+  // Whether the Back/Forward step is in flight — the buttons wait instead of
+  // firing into a stale page.
+  let companionHistoryBusy = $state(false);
+  function stepCompanionHistory(direction: -1 | 1) {
+    if (isTauri) {
+      void stepCompanionHistoryNative(direction);
+      return;
+    }
+    if (companionSwitchingTo !== null || !companionVisible || !companionUrl) return;
+    const next = companionHistoryIndex + direction;
+    if (next < 0 || next >= companionHistory.length) return;
+    const targetUrl = companionHistory[next];
+    if (!companionFrameEl) return;
+    companionHistoryIndex = next;
+    companionFrameEl.src = targetUrl;
+  }
+  async function stepCompanionHistoryNative(direction: -1 | 1) {
+    if (
+      companionHistoryBusy ||
+      companionSwitchingTo !== null ||
+      !companionVisible ||
+      !companionUrl
+    )
+      return;
+    companionHistoryBusy = true;
+    try {
+      const state =
+        direction < 0 ? await nativeCompanionGoBack() : await nativeCompanionGoForward();
+      companionNativeBack = state.can_go_back;
+      companionNativeForward = state.can_go_forward;
+      if (error.startsWith("Couldn't go ")) error = "";
+    } catch (e) {
+      error = String(e);
+    } finally {
+      companionHistoryBusy = false;
+    }
   }
   function companionGoBack() {
-    if (!companionFrameEl || companionHistoryIndex <= 0) return;
-    companionHistoryIndex -= 1;
-    const url = companionHistory[companionHistoryIndex];
-    companionCanGoBack = companionHistoryIndex > 0;
-    companionCanGoForward = companionHistoryIndex < companionHistory.length - 1;
-    if (companionFrameEl) companionFrameEl.src = url;
+    stepCompanionHistory(-1);
   }
   function companionGoForward() {
-    if (!companionFrameEl || companionHistoryIndex >= companionHistory.length - 1) return;
-    companionHistoryIndex += 1;
-    const url = companionHistory[companionHistoryIndex];
-    companionCanGoBack = companionHistoryIndex > 0;
-    companionCanGoForward = companionHistoryIndex < companionHistory.length - 1;
-    if (companionFrameEl) companionFrameEl.src = url;
+    stepCompanionHistory(1);
   }
   async function companionOpenExternal() {
     if (!companionUrl || companionOpeningExternal) return;
@@ -734,6 +857,13 @@
       companionMuteBusy = false;
     }
   }
+  // Retry always recreates at the SAVED address (`companionUrl`) — never a
+  // shown, live, or history-derived page. The child has no refresh of its
+  // current document through the pinned surface; recreation is the reload,
+  // so a failed or drifted pane recovers to exactly what the user saved
+  // (ADR-0022 Companion is a single isolated site). A recreated child starts
+  // with no in-page history — refresh the toolbar to the honest disabled
+  // picture once it lands (Back-then-reload always returns to saved).
   async function companionRetry() {
     const webview = companionWebview;
     companionWebview = null;
@@ -745,11 +875,15 @@
       try { await webview.close(); } catch {}
     }
     await syncCompanionWebview();
+    void refreshCompanionHistory();
   }
   // Ticket 161: Reload reuses the recreate path above (null handle, close,
   // born/failed flags reset, resync) — the saved site URL is untouched, so a
   // stuck login recovers to a fresh page at the same address. Busy-guarded
   // like the bar's mixer/external buttons; never navigation chrome (ADR-0022).
+  // Reload-is-saved holds in every state — fresh, Back-stepped, or failed:
+  // this delegates to the retry path, which recreates at the saved address
+  // unconditionally and never refreshes a current page.
   async function companionReload() {
     if (companionReloading || !companionUrl) return;
     companionReloading = true;
@@ -797,23 +931,33 @@
     await persistCompanionUserZoom(null);
   }
   function handleCompanionLoad() {
-    // Track in-pane navigation for Back/Forward (0004:2 show-if-you-can).
-    // For cross-origin iframes we cannot read contentWindow.location, so we
-    // synthesize history growth via load count — after first nav, Back appears.
-    // The current Tauri child-WebView surface does not expose native history state.
+    // Browser-preview fallback only: the native child has no readable
+    // location through the pinned JavaScript surface, so in-pane traversals
+    // there stay outside this trail (ADR-0022 Companion is a single isolated
+    // site). Same-origin preview frames expose their address, so arrivals
+    // record here; cross-origin reads echo the last-set value and self-dedupe
+    // below. The preview Back/Forward flags derive from the trail, so no state
+    // is set here beyond the visit itself; the native flags come from the
+    // live child instead.
     try {
       const current = companionFrameEl?.src ?? companionUrl ?? "";
-      if (current && companionHistory[companionHistoryIndex] !== current) {
-        // Truncate forward history on new nav
-        companionHistory = companionHistory.slice(0, companionHistoryIndex + 1);
-        companionHistory.push(current);
-        companionHistoryIndex = companionHistory.length - 1;
+      if (
+        current &&
+        companionUrlKey(current) !==
+          companionUrlKey(companionHistory[companionHistoryIndex] ?? "")
+      ) {
+        // A preview arrival is a fresh visit, never a step: it truncates any
+        // forward trail left by Back.
+        const visited = trailApplyVisit(
+          companionHistory,
+          companionHistoryIndex,
+          current,
+          false,
+        );
+        companionHistory = visited.history;
+        companionHistoryIndex = visited.index;
       }
     } catch {}
-    companionCanGoBack = companionHistoryIndex > 0;
-    companionCanGoForward = companionHistoryIndex < companionHistory.length - 1;
-    // Simulate after first real navigation inside pane, Back appears — if we
-    // have only one entry, keep false until second load
   }
   function onCompanionSplitterPointerDown(e: PointerEvent) {
     if (!qlwMainEl) return;
@@ -1024,6 +1168,17 @@
             .catch((e) => {
               console.error("companion audio sync failed", e);
             });
+          // A fresh child starts with no in-page history — attach the native
+          // observers, then read the honest disabled picture.
+          void ensureCompanionHistoryHook()
+            .then((state) => {
+              if (companionWebview !== wv) return;
+              companionNativeBack = state.can_go_back;
+              companionNativeForward = state.can_go_forward;
+            })
+            .catch((e) => {
+              console.error("companion history hook failed", e);
+            });
         });
         wv.once("tauri://error", (e) => {
           if (companionWebview !== wv) return;
@@ -1140,6 +1295,12 @@
     listen<CompanionAudioState>("companion-audio-changed", (e) => {
       companionMuted = e.payload.muted;
       companionPlaying = e.payload.playing;
+    }).then((fn) => unlisteners.push(fn));
+    // Native in-page navigations fan their enable-state out so Back/Forward
+    // follow link clicks without polling.
+    listen<CompanionHistoryState>(COMPANION_HISTORY_CHANGED_EVENT, (e) => {
+      companionNativeBack = e.payload.can_go_back;
+      companionNativeForward = e.payload.can_go_forward;
     }).then((fn) => unlisteners.push(fn));
     return () => {
       unlisteners.forEach((fn) => fn());
@@ -1575,19 +1736,35 @@
   }
 
   /** Copies via the clipboard command and flashes the row only once the
-   *  write has honestly landed (ticket 78's command contract). */
+   *  write has honestly landed (ticket 78's command contract). Image Clips
+   *  (ticket 178) decode to pixels here; the write itself stays behind the
+   *  Rust clipboard command like the text path. */
   async function copy(clip: Clip) {
     error = "";
     try {
-      await copyClip(clip.id);
+      if (clip.image) {
+        const rgba = await decodeImageToRgba(clipImageUrl(clip.image));
+        await copyClipImage(clip.id, rgba.rgbaBase64, rgba.width, rgba.height);
+      } else {
+        await copyClip(clip.id);
+      }
       copiedId = clip.id;
-      copiedAnnouncement = `${clipTitle(clip.name, clip.content)} copied.`;
+      copiedAnnouncement = `${clipName(clip)} copied.`;
       clearTimeout(copiedTimer);
       copiedTimer = setTimeout(() => (copiedId = null), 1200);
     } catch (e) {
       console.error(e);
       error = String(e);
     }
+  }
+
+  /** Image-aware row title (ticket 178): untitled images read "Image" —
+   *  clipTitle's first-line fallback needs text image Clips don't carry.
+   *  Text rows keep clipTitle untouched. */
+  function clipName(clip: Clip): string {
+    return clip.image
+      ? clip.name.trim() || "Image"
+      : clipTitle(clip.name, clip.content);
   }
 
   function close() {
@@ -1794,22 +1971,35 @@
   {/snippet}
 
   {#snippet clipRow(clip: Clip)}
-    {@const title = clipTitle(clip.name, clip.content)}
+    {@const title = clipName(clip)}
     <!-- Ticket 134: thin adapter over the shared QuickLaunchRow shell — badge, title, excerpt
-         and the tooltip text stay collection content; the shell owns the card box and tip. -->
+         and the tooltip text stay collection content; the shell owns the card box and tip.
+         Ticket 178: image rows add a token-sized thumbnail and swap the excerpt/tooltip
+         for the picture summary — same shell, same copy verb, same Copied flash. -->
     <QuickLaunchRow
       mainLabel={`Copy ${title} to the clipboard`}
       tipId={`qlw-tip-clip-${clip.id}`}
       tipName={title}
-      tipBody={clip.content}
+      tipBody={clip.image ? clipImageMeta(clip.image) : clip.content}
       onmain={() => copy(clip)}
     >
       <span class="qlw__clip-badge" aria-hidden="true">
         <Icon name={copiedId === clip.id ? "check" : "copy"} size={14} />
       </span>
+      {#if clip.image}
+        <img
+          class="qlw__clip-thumb"
+          src={clipImageUrl(clip.image)}
+          alt=""
+          width={32}
+          height={32}
+        />
+      {/if}
       <span class="qlw__clip-name">{title}</span>
       {#if copiedId === clip.id}
         <span class="qlw__clip-copied">Copied</span>
+      {:else if clip.image}
+        <span class="qlw__clip-excerpt">{clipImageMeta(clip.image)}</span>
       {:else}
         <span class="qlw__clip-excerpt">{clip.content}</span>
       {/if}
@@ -2009,12 +2199,26 @@
       ></div>
       <div class="qlw__companion" style:flex={companionRatio + " 1 0%"}>
         <div class="qlw__companion-bar" bind:this={companionBarEl}>
-          {#if companionCanGoBack}
-            <IconButton icon="chevron-left" label="Back" quiet onclick={companionGoBack} />
-          {/if}
-          {#if companionCanGoForward}
-            <IconButton icon="chevron-right" label="Forward" quiet onclick={companionGoForward} />
-          {/if}
+          <!-- Back/Forward are the sole history chrome (ADR-0022 Companion is
+               a single isolated site): always present, honestly disabled with
+               no native history and mid-step/mid-switch — never hidden, so
+               enabling never jumps the row (research 0004 rules 1 and 5). They join Reload
+               and Open externally in the never-overflow set; only zoom, the
+               mixer and mute move behind ⋯. -->
+          <IconButton
+            icon="chevron-left"
+            label="Back"
+            quiet
+            disabled={!companionCanGoBack || companionSwitchingTo !== null || companionHistoryBusy}
+            onclick={companionGoBack}
+          />
+          <IconButton
+            icon="chevron-right"
+            label="Forward"
+            quiet
+            disabled={!companionCanGoForward || companionSwitchingTo !== null || companionHistoryBusy}
+            onclick={companionGoForward}
+          />
           <!-- Ticket 161: Reload recreates the child WebView (bad login /
                dead-end recovery) — left cluster, before the URL; mute/mixer/
                external order untouched. Icon "refresh" is the verified Icon.svelte name. -->
@@ -2475,6 +2679,19 @@
     display: inline-flex;
     flex-shrink: 0;
     color: var(--accent);
+  }
+
+  /* Row thumbnail (ticket 178): the same token-sized square as the main
+     page's rows — cover-crop holds any aspect ratio, and the excerpt's
+     ellipsis still absorbs the 340px dock width. */
+  .qlw__clip-thumb {
+    width: var(--space-6);
+    height: var(--space-6);
+    flex-shrink: 0;
+    object-fit: cover;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+    background: var(--bg-surface);
   }
 
   .qlw__clip-name {

@@ -8,6 +8,7 @@
  mod backup;
   mod clips;
   mod companion_audio;
+  mod companion_history;
   mod constants;
 mod db;
 mod domain;
@@ -40,6 +41,8 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::Connection;
 use tauri::{AppHandle, Emitter, Manager, State};
+
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 
 use domain::{Preset, PresetRecord, Product, ProductRecord, Requirement};
 use engine::{windows::WindowsWingetEngine, DesktopInfo, LauncherEngine, PlatformEngine};
@@ -1353,6 +1356,42 @@ fn move_quick_action(
     Ok(())
 }
 
+/// Lists one action's attached files in name order: id, name, and size, never
+/// the bytes. The files editor renders this; runs and backups read the bytes
+/// backend-side.
+#[tauri::command]
+fn list_quick_action_files(
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<Vec<quick_actions::QuickActionFileMeta>, String> {
+    let conn = lock(&state)?;
+    quick_actions::list_quick_action_files(&conn, id)
+}
+
+/// Attaches one file to an action: plain file names only, unique per action,
+/// 5 MB per file and 20 MB per action. The content arrives base64-encoded and
+/// is checked before anything reaches the disk.
+#[tauri::command]
+fn attach_quick_action_file(
+    state: State<'_, AppState>,
+    id: i64,
+    filename: String,
+    bytes_base64: String,
+) -> Result<quick_actions::QuickActionFileMeta, String> {
+    let bytes = B64
+        .decode(bytes_base64.trim())
+        .map_err(|_| "That file's content is not valid base64.".to_string())?;
+    let conn = lock(&state)?;
+    quick_actions::attach_quick_action_file(&conn, id, &filename, &bytes)
+}
+
+/// Deletes one attached file row.
+#[tauri::command]
+fn remove_quick_action_file(state: State<'_, AppState>, file_id: i64) -> Result<(), String> {
+    let conn = lock(&state)?;
+    quick_actions::remove_quick_action_file(&conn, file_id)
+}
+
 // ------------------- Quick Clips (ticket 78) ------------------------------
 
 /// Lists every Clip in list order (ticket 78).
@@ -1445,6 +1484,9 @@ fn move_clip(
 /// Puts one stored Clip's content back on the clipboard (ticket 78), through
 /// the clipboard-manager plugin on the Rust side. Returns success only after
 /// the write landed, so surfaces can flash their "Copied" feedback honestly.
+/// Image Clips carry no text — they refuse here plainly and copy through
+/// `copy_clip_image` instead, so the flash can never lie about an empty
+/// write.
 #[tauri::command]
 fn copy_clip(app: AppHandle, state: State<'_, AppState>, id: i64) -> Result<(), String> {
     use tauri_plugin_clipboard_manager::ClipboardExt;
@@ -1453,8 +1495,107 @@ fn copy_clip(app: AppHandle, state: State<'_, AppState>, id: i64) -> Result<(), 
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "This clip no longer exists — refresh and try again".to_string())?;
     drop(conn);
+    if clip.clip.image.is_some() && clip.clip.content.trim().is_empty() {
+        return Err("That clip is an image — copy it from its row to put the picture on the clipboard.".into());
+    }
     app.clipboard()
         .write_text(clip.clip.content)
+        .map_err(|e| format!("Could not reach the clipboard: {e}"))
+}
+
+// ------------------- Image Clips (ticket 178) ------------------------------
+
+/// Stores one image Clip's validated bytes under `name` — the shared core
+/// behind the pasted-bytes and picked-file commands. Emits
+/// `quick-launch-changed` like `create_clip` so the conditional Quick Clips
+/// tab appears without reopening the window.
+fn store_image_clip(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    name: &str,
+    bytes: &[u8],
+) -> Result<clips::Clip, String> {
+    clips::validate_image_bytes(bytes)?;
+    let conn = lock(state)?;
+    let created = clips::create_clip_image(&conn, name, bytes).map_err(|e| e.to_string())?;
+    drop(conn);
+    emit_quick_launch_changed(app);
+    Ok(created)
+}
+
+/// Appends an image-only Clip from pasted/picked bytes (base64): name plus
+/// one PNG/JPEG picture (normalized, 5 MB cap, one per Clip v1). Over-cap or
+/// non-PNG-JPEG bytes are refused plainly before anything stores.
+#[tauri::command]
+fn create_clip_image(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    name: String,
+    data_base64: String,
+) -> Result<clips::Clip, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let bytes = STANDARD
+        .decode(data_base64.trim())
+        .map_err(|_| "That image data couldn't be read — paste or pick the file again.".to_string())?;
+    store_image_clip(&app, &state, &name, &bytes)
+}
+
+/// Renames an image Clip / flips its dock flag in place (ticket 178). Text
+/// ids are refused plainly — text edits stay on `update_clip` untouched.
+#[tauri::command]
+fn update_clip_image(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: i64,
+    name: String,
+    show_in_dock: bool,
+) -> Result<(), String> {
+    let conn = lock(&state)?;
+    if !clips::has_clip_image(&conn, id).map_err(|e| e.to_string())? {
+        return Err("That clip isn't an image clip — refresh and try again.".into());
+    }
+    clips::update_clip_image(&conn, id, &name, show_in_dock).map_err(|e| e.to_string())?;
+    drop(conn);
+    emit_quick_launch_changed(&app);
+    Ok(())
+}
+
+/// Puts one image Clip's picture back on the clipboard (ticket 178) through
+/// the same clipboard-manager plugin `copy_clip` drives (ADR-0029: the
+/// clipboard stays behind its existing owner — no second invocation site).
+/// The frontend decodes the stored PNG/JPEG to RGBA via canvas (the one
+/// decoder this tree already ships) and hands the pixels here; the command
+/// verifies the shape before the write lands, so the "Copied" flash stays
+/// honest and failures surface plainly, never silent.
+#[tauri::command]
+fn copy_clip_image(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: i64,
+    rgba_base64: String,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+    let conn = lock(&state)?;
+    let has = clips::has_clip_image(&conn, id).map_err(|e| e.to_string())?;
+    drop(conn);
+    if !has {
+        return Err("That clip has no image to copy — refresh and try again.".into());
+    }
+    if width == 0 || height == 0 || width > 16384 || height > 16384 {
+        return Err("That image's dimensions look wrong — try copying again.".into());
+    }
+    let rgba = STANDARD
+        .decode(rgba_base64.trim())
+        .map_err(|_| "That image couldn't be decoded — try copying again.".to_string())?;
+    if rgba.len() != width as usize * height as usize * 4 {
+        return Err("That image couldn't be decoded — try copying again.".into());
+    }
+    let image = tauri::image::Image::new_owned(rgba, width, height);
+    app.clipboard()
+        .write_image(&image)
         .map_err(|e| format!("Could not reach the clipboard: {e}"))
 }
 
@@ -1574,16 +1715,45 @@ fn update_groups_enabled(
     Ok(())
 }
 
+/// What one Run click (or one auto-run firing) decided: the main command
+/// started and is tracked, or the pre-action check blocked it before anything
+/// spawned. The blocked variant is the warn dialog's payload — the trimmed
+/// check output, whether a fix exists to offer, and the run log that already
+/// holds the pre-check section (its path echoes back to the fix command so
+/// the fix appends to the same file).
+#[derive(serde::Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum QuickActionRunOutcome {
+    Started,
+    CheckBlocked(CheckBlockedPayload),
+}
+
+/// The warn payload behind [`QuickActionRunOutcome::CheckBlocked`]: the
+/// check's own report plus the log it was written to.
+#[derive(serde::Serialize)]
+pub struct CheckBlockedPayload {
+    #[serde(flatten)]
+    pub report: quick_actions::PreCheckReport,
+    pub log_path: Option<String>,
+}
+
 /// Runs one stored Quick Action (tickets 50 & 62): the action's PowerShell
 /// command, hidden (`CREATE_NO_WINDOW`), working directory honored when set,
-/// current user, no elevation, no status UI, no notification. The spawned
-/// process is tracked in the per-session registry for its lifetime — a reaper
-/// thread waits on it and emits `quick-action-run-state-changed` on exit, so
-/// the Quick Launch window flips Run ↔ Stop with no polling. A stoppable
-/// action that is already running is rejected — stop it first (the window
-/// shows Stop, not Run, while tracked).
+/// current user, no elevation, no status UI, no notification. A configured
+/// pre-action check runs first under the same shell and directory inside a
+/// short box — a pass continues to the main command, a fail stops before
+/// anything spawns and reports the warn payload. The spawned process is
+/// tracked in the per-session registry for its lifetime — a reaper thread
+/// waits on it and emits `quick-action-run-state-changed` on exit, so the
+/// Quick Launch window flips Run ↔ Stop with no polling. A stoppable action
+/// that is already running is rejected — stop it first (the window shows
+/// Stop, not Run, while tracked).
 #[tauri::command]
-fn run_quick_action(app: AppHandle, state: State<'_, AppState>, id: i64) -> Result<(), String> {
+fn run_quick_action(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<QuickActionRunOutcome, String> {
     let conn = lock(&state)?;
     let action = quick_actions::get_quick_action(&conn, id)
         .map_err(|e| e.to_string())?
@@ -1599,12 +1769,14 @@ fn run_quick_action(app: AppHandle, state: State<'_, AppState>, id: i64) -> Resu
 /// one path behind both the Run command and the once-per-start auto-run, so
 /// a flagged action at boot behaves exactly as if Run were clicked (same
 /// logs, same registry, same run-state events). A stoppable action that is
-/// already running is rejected — stop it first.
+/// already running is rejected — stop it first. Attached files stage only
+/// when the command carries `<FilesDir>` (ticket 179): a failing pre-action
+/// check stops before anything stages or spawns.
 fn start_tracked_run(
     app: &AppHandle,
     state: &AppState,
     action: &quick_actions::QuickAction,
-) -> Result<(), String> {
+) -> Result<QuickActionRunOutcome, String> {
     let id = action.id;
     if action.action.stoppable
         && state
@@ -1618,13 +1790,117 @@ fn start_tracked_run(
             action.action.name
         ));
     }
-    let log_path = quick_actions::new_run_log_path(&crate::db::logs_dir(), &action.action.name);
+    // The check-first chain: a configured pre-action check runs before
+    // anything spawns, under the action's own shell and directory through the
+    // timeboxed Test core. Its section lands in this run's log either way; a
+    // pass continues to the main command below, a fail stops here — the main
+    // command never spawns, and the caller gets the warn payload. Logging
+    // stays best-effort: a log that cannot be created never blocks the run
+    // itself (ADR-0017 run logging).
+    let mut log_path = None;
+    if let Some(check) = quick_actions::normalized_pre_check(&action.action) {
+        let report = quick_actions::run_pre_check(&action.action);
+        log_path = quick_actions::new_run_log_path(&crate::db::logs_dir(), &action.action.name);
+        if let Some(p) = &log_path {
+            quick_actions::write_stage_header(
+                p,
+                "pre-check",
+                &action.action.name,
+                id,
+                &check,
+                quick_actions::normalized_cwd(&action.action).as_deref(),
+            );
+            quick_actions::write_stage_output(p, &report.output);
+            quick_actions::write_stage_exit(p, "pre-check", report.exit_code);
+        }
+        if !report.passed {
+            return Ok(QuickActionRunOutcome::CheckBlocked(CheckBlockedPayload {
+                report,
+                log_path: log_path
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().into_owned()),
+            }));
+        }
+    }
+    // Attached files (ticket 179): stage only when the command carries
+    // `<FilesDir>` — the blobs copy to a per-run temp directory and the
+    // placeholder expands to its quoted absolute path inside
+    // `spawn_tracked_run`. Without the placeholder the files stay inert:
+    // nothing stages, nothing fails. Staging happens after a passing check,
+    // so a blocked run leaves no temp directory behind.
+    let staged: Option<(std::path::PathBuf, Vec<String>)> =
+        if crate::windows_execution::contains_files_placeholder(&action.action.command) {
+            let blobs = {
+                let conn = state.db.lock().map_err(|e| e.to_string())?;
+                quick_actions::list_quick_action_file_blobs(&conn, id)?
+            };
+            let names: Vec<String> = blobs.iter().map(|(name, _)| name.clone()).collect();
+            let dir = crate::windows_execution::stage_action_files(&blobs)?;
+            Some((dir, names))
+        } else {
+            None
+        };
+    spawn_tracked_run(app, state, action, log_path, staged)
+}
+
+/// Spawns the main command and tracks it for its lifetime: hidden under its
+/// selected shell (ADR-0017), working directory honored, current user, no
+/// elevation. Takes the run's log path when the check-first chain already
+/// created one, so a passing check and its main command share one
+/// `output.log`; creates one when there was no check. Takes the staged files
+/// directory when the command carried `<FilesDir>`: the run sees the
+/// placeholder-expanded text under the same shell and directory, and the
+/// reaper removes the directory once the tracked process exits.
+fn spawn_tracked_run(
+    app: &AppHandle,
+    state: &AppState,
+    action: &quick_actions::QuickAction,
+    log_path: Option<std::path::PathBuf>,
+    staged: Option<(std::path::PathBuf, Vec<String>)>,
+) -> Result<QuickActionRunOutcome, String> {
+    let id = action.id;
+    let log_path = log_path
+        .or_else(|| quick_actions::new_run_log_path(&crate::db::logs_dir(), &action.action.name));
     let log_file = log_path.as_ref().and_then(|p| quick_actions::open_run_log(p));
-    let child = match quick_actions::spawn_quick_action(&action.action, log_file.as_ref()) {
+    // The stored command runs as-is unless files staged: then the run sees
+    // the placeholder-expanded text under the same shell and directory.
+    let child = match &staged {
+        Some((dir, names)) => {
+            let expanded = match crate::windows_execution::expand_files_dir(
+                &action.action.command,
+                action.action.shell.as_str(),
+                dir,
+                names,
+            ) {
+                Ok(expanded) => expanded,
+                Err(e) => {
+                    crate::windows_execution::cleanup_staged_dir(dir);
+                    if let Some(p) = &log_path {
+                        quick_actions::append_log_line(
+                            p,
+                            &format!("{} start failed: {e}", quick_actions::log_stamp()),
+                        );
+                    }
+                    return Err(e);
+                }
+            };
+            crate::windows_execution::spawn_action(
+                action.action.shell.as_str(),
+                &expanded,
+                quick_actions::normalized_cwd(&action.action).as_deref(),
+                log_file.as_ref(),
+            )
+        }
+        None => quick_actions::spawn_quick_action(&action.action, log_file.as_ref()),
+    };
+    let child = match child {
         Ok(child) => child,
         Err(e) => {
             // The failure is the run's only record — land it in the folder
             // when there is one (ticket 64), then fail loudly.
+            if let Some((dir, _)) = &staged {
+                crate::windows_execution::cleanup_staged_dir(dir);
+            }
             if let Some(p) = &log_path {
                 quick_actions::append_log_line(
                     p,
@@ -1637,6 +1913,12 @@ fn start_tracked_run(
     let pid = child.id();
     if let Some(p) = &log_path {
         quick_actions::write_run_log_header(p, &action.action, id, pid);
+        if let Some((_, names)) = &staged {
+            quick_actions::append_log_line(
+                p,
+                &format!("  files: {} attached, staged for this run", names.len()),
+            );
+        }
     }
     let exited = quick_actions::ExitSignal::new();
     state
@@ -1659,8 +1941,11 @@ fn start_tracked_run(
     // code in the run's output.log (ticket 64), marks the exit signal so a
     // Stop's watchdog stands down (ticket 92), drops the registry entry
     // (only if this run is still the tracked one — a Stop already removed
-    // it), and tells the window. PIDs die with the boot anyway, so the
-    // registry stays per-session.
+    // it), tells the window, and releases the staged files directory when one
+    // exists: shell exit ends tracking, but the directory waits out GUI
+    // programs the shell started before deleting, so a starting Notepad
+    // still finds its file. PIDs die with the boot anyway, so
+    // the registry stays per-session.
     let thread_app = app.clone();
     std::thread::spawn(move || {
         let mut child = child;
@@ -1680,8 +1965,11 @@ fn start_tracked_run(
             "quick-action-run-state-changed",
             quick_actions::QuickActionRunState { id, running: false },
         );
+        if let Some((dir, _)) = staged {
+            crate::windows_execution::release_staged_dir(&dir, pid);
+        }
     });
-    Ok(())
+    Ok(QuickActionRunOutcome::Started)
 }
 
 /// Stops a running Quick Action: runs the action's own stop command when it
@@ -1746,6 +2034,78 @@ fn stop_quick_action(state: State<'_, AppState>, id: i64) -> Result<(), String> 
             Ok(())
         }
     }
+}
+
+/// Runs one action's pre-action fix exactly once: only this explicit command
+/// runs it — never Run, never auto-run — under the action's own shell and
+/// directory inside the same short box as the check. The fix appends to the
+/// blocked run's log when the warn payload's path echoes back intact, else to
+/// a fresh run folder; either way under its own `pre-fix` header with its own
+/// exit line. A fix never continues into the main command — that still needs
+/// a fresh Run.
+#[tauri::command]
+fn run_quick_action_fix(
+    state: State<'_, AppState>,
+    id: i64,
+    log_path: Option<String>,
+) -> Result<quick_actions::PreFixResult, String> {
+    let conn = lock(&state)?;
+    let action = quick_actions::get_quick_action(&conn, id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| {
+            "This quick action is no longer in the list — refresh and try again".to_string()
+        })?;
+    drop(conn);
+    let fix = quick_actions::normalized_pre_fix(&action.action)
+        .ok_or_else(|| "This quick action has no pre-action fix configured.".to_string())?;
+    let log_path = resolve_fix_log_path(&action.action.name, log_path);
+    if let Some(p) = &log_path {
+        quick_actions::write_stage_header(
+            p,
+            "pre-fix",
+            &action.action.name,
+            id,
+            &fix,
+            quick_actions::normalized_cwd(&action.action).as_deref(),
+        );
+    }
+    let result = quick_actions::run_pre_fix(&action.action);
+    if let Some(p) = &log_path {
+        quick_actions::write_stage_output(p, &result.output);
+        quick_actions::write_stage_exit(p, "pre-fix", result.exit_code);
+    }
+    Ok(result)
+}
+
+/// Where a fix run logs: the blocked run's own file when the echoed path
+/// still names an `output.log` inside this machine's Quick Action log tree,
+/// else a fresh run folder. Anything unexpected falls back to a fresh folder
+/// — logging never fails the fix itself (ADR-0017 run logging).
+fn resolve_fix_log_path(
+    action_name: &str,
+    echoed: Option<String>,
+) -> Option<std::path::PathBuf> {
+    if let Some(echoed) = echoed {
+        let candidate = std::path::PathBuf::from(&echoed);
+        let qa_root = crate::db::logs_dir().join(quick_actions::QA_LOGS_DIR_NAME);
+        let shape_ok = candidate
+            .file_name()
+            .map(|name| name == std::ffi::OsStr::new("output.log"))
+            .unwrap_or(false)
+            && candidate
+                .parent()
+                .and_then(|run| run.parent())
+                .map(|root| root == qa_root.as_path())
+                .unwrap_or(false)
+            && candidate
+                .parent()
+                .map(|run| run.is_dir())
+                .unwrap_or(false);
+        if shape_ok {
+            return Some(candidate);
+        }
+    }
+    quick_actions::new_run_log_path(&crate::db::logs_dir(), action_name)
 }
 
 /// The ids of every Quick Action whose tracked process is still alive
@@ -2351,6 +2711,44 @@ fn set_companion_muted(
     Ok(live)
 }
 
+/// The dock toolbar's Back/Forward enable-state: what the live native child
+/// can step to through its in-page history. Missing child reads as disabled.
+#[tauri::command]
+fn get_companion_history_state(
+    app: AppHandle,
+) -> Result<companion_history::CompanionHistoryState, String> {
+    Ok(companion_history::current_state(&app))
+}
+
+/// Steps the live native child back through its in-page history, then reports
+/// the fresh enable-state for the toolbar.
+#[tauri::command]
+fn companion_go_back(
+    app: AppHandle,
+) -> Result<companion_history::CompanionHistoryState, String> {
+    companion_history::go_back(&app)
+}
+
+/// Steps the live native child forward through its in-page history, then
+/// reports the fresh enable-state for the toolbar.
+#[tauri::command]
+fn companion_go_forward(
+    app: AppHandle,
+) -> Result<companion_history::CompanionHistoryState, String> {
+    companion_history::go_forward(&app)
+}
+
+/// Attaches the native history observers to the live child (idempotent) and
+/// returns the current enable-state. The observers forward every in-page
+/// navigation as `companion-history-changed` so the toolbar follows link
+/// clicks without polling.
+#[tauri::command]
+fn ensure_companion_history_hook(
+    app: AppHandle,
+) -> Result<companion_history::CompanionHistoryState, String> {
+    companion_history::ensure_history_hook(&app)
+}
+
 /// Opens (or focuses) the main window (ticket 123): the dock header's mark
 /// click and any other surface that needs a non-tray entry point. Enqueues
 /// through the off-thread single-flight seam — never the blocking call, which
@@ -2759,6 +3157,11 @@ pub fn run() {
                     eprintln!("Could not open the main window: {e}");
                 }
             }
+            // The staged-files orphan sweep: crash and daemon litter from
+            // runs no live session can reference never accumulates past a
+            // relaunch. Synchronous and millisecond-cheap — one temp-folder
+            // listing of day-old directory names.
+            crate::windows_execution::sweep_stale_staged_dirs();
             // The once-per-start Quick Action auto-run: every flagged action
             // fires once, in list order, through the same tracked path as a
             // Run click — same logs, same registry, same run-state events, so
@@ -2790,11 +3193,20 @@ pub fn run() {
                         }
                     };
                     for action in &flagged {
-                        if let Err(e) = start_tracked_run(&handle, &state, action) {
-                            eprintln!(
-                                "Quick Action auto-run: '{}' did not start: {e}",
-                                action.action.name
-                            );
+                        match start_tracked_run(&handle, &state, action) {
+                            Ok(QuickActionRunOutcome::Started) => {}
+                            Ok(QuickActionRunOutcome::CheckBlocked(payload)) => {
+                                eprintln!(
+                                    "Quick Action auto-run: '{}' pre-check blocked the run: {}",
+                                    action.action.name, payload.report.output
+                                );
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "Quick Action auto-run: '{}' did not start: {e}",
+                                    action.action.name
+                                );
+                            }
                         }
                     }
                 });
@@ -2900,7 +3312,11 @@ pub fn run() {
             update_quick_action,
             delete_quick_action,
             move_quick_action,
+            list_quick_action_files,
+            attach_quick_action_file,
+            remove_quick_action_file,
             run_quick_action,
+            run_quick_action_fix,
             stop_quick_action,
             list_running_quick_actions,
             test_quick_action,
@@ -2925,6 +3341,9 @@ pub fn run() {
             delete_clip,
             move_clip,
             copy_clip,
+            create_clip_image,
+            update_clip_image,
+            copy_clip_image,
             list_groups,
             create_group,
             rename_group,
@@ -2957,6 +3376,10 @@ pub fn run() {
             set_companion_height_ratio_for_display,
             get_companion_audio_state,
             set_companion_muted,
+            get_companion_history_state,
+            companion_go_back,
+            companion_go_forward,
+            ensure_companion_history_hook,
             set_settings_dirty,
             destroy_main_window
         ])

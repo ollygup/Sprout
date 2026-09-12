@@ -1288,6 +1288,8 @@ mod tests {
             note: None,
             auto_run: false,
             show_in_dock: true,
+            pre_check: None,
+            pre_fix: None,
         };
         crate::quick_actions::validate_quick_action(&action).unwrap();
         let saved = crate::quick_actions::create_quick_action(&conn, &action).unwrap();

@@ -20,6 +20,32 @@ export function companionUrlKey(url: string): string {
   return url.trim().toLowerCase().replace(/\/+$/, "");
 }
 
+/** The session trail behind the dock Companion's Back/Forward (ADR-0022
+ *  Companion is a single isolated site: Back/Forward are its sole history
+ *  chrome, and the pinned JavaScript child-WebView surface exposes no
+ *  traversal, so steps re-drive the saved-address switch they came from).
+ *  A history step only moves the marker to that visit; every fresh
+ *  saved-address arrival drops the forward trail and records itself, so
+ *  returning restores nothing and Reload always has the saved address to
+ *  return to. Key-compared, so case or trailing-slash drift never forks the
+ *  trail. A step whose target left the trail falls back to a fresh visit
+ *  rather than stranding the marker. Pure — the dock page owns the reactive
+ *  state and decides which arrivals count as steps. */
+export function trailApplyVisit(
+  history: string[],
+  index: number,
+  url: string,
+  isHistoryStep: boolean,
+): { history: string[]; index: number } {
+  if (isHistoryStep) {
+    const key = companionUrlKey(url);
+    for (let i = history.length - 1; i >= 0; i -= 1) {
+      if (companionUrlKey(history[i]) === key) return { history, index: i };
+    }
+  }
+  return { history: [...history.slice(0, index + 1), url], index: index + 1 };
+}
+
 export interface CompanionSiteSwitchCallbacks {
   persist: (url: string) => Promise<void>;
   onPending: (site: CompanionSite | null) => void;
