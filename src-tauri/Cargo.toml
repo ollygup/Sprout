@@ -3,7 +3,7 @@ name = "sprout"
 # App version. Single source of truth: this file — tauri.conf.json omits
 # `version` and Tauri v2 auto-inherits it from here into the exe metadata,
 # the window, and the installer. Never restate it elsewhere.
-version = "0.9.2"
+version = "0.9.3"
 description = "Preset-driven Windows software-installation desktop app"
 authors = ["Sprout contributors"]
 edition = "2021"
@@ -70,6 +70,10 @@ ureq = { version = "2", default-features = false, features = ["tls"] }
 # not verify against the embedded public key. Tiny pure-Rust verifier — no
 # Tauri updater baggage, no size-budget impact.
 minisign-verify = "0.2"
+# Offline static Discord Rich Presence (ADR-0033): handwired local-IPC client,
+# no OAuth, no account access. All seven transitive deps are already in the
+# lockfile, so the size-budget delta is the crate itself.
+discord-rich-presence = "1"
 
 [dev-dependencies]
 tempfile = "3"

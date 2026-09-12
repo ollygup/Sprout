@@ -305,6 +305,12 @@ they already can.
   documentation, Microsoft PowerShell 5.1-vs-7 documentation, OWASP Excessive
   Agency and Prompt Injection guidance, PowerShell execution-policy and
   ShouldProcess/WhatIf limitation notes (per spec 145 further notes).
+- 2026-09-12 re-verification primaries: Qwen2.5-Coder-7B-Instruct LICENSE
+  (Apache-2.0) and GGUF repo, Qwen2.5-Coder-1.5B-Instruct LICENSE (Apache-2.0)
+  and GGUF repo, Qwen2.5-Coder-3B-Instruct LICENSE (research-only, rejected),
+  ggml-org/SmolLM3-3B-GGUF (Apache-2.0 fallback, not proposed), llama.cpp
+  LICENSE (MIT) and b10702 release assets, llama.cpp server README and
+  llama.app API docs (health/chat-completions surface).
 
 ## Implementation evidence — 2026-09-11 availability audit
 
@@ -324,3 +330,242 @@ status and ACs 4–8 were corrected to show unfinished qualification; 151's thre
 open ACs remain open. The Settings UI now gives the build-level reason first
 and discloses candidate evidence separately. Qualifying a real pair, completing
 151's end-to-end/installed-build checks, then delivering 152/155 remains necessary.
+
+## Amendment — 2026-09-12 primary-source re-verification (no approvals)
+
+This amendment records fresh primary-source evidence only. It approves
+nothing: every measured field below stays null until a real Windows run
+supplies it, and every catalog entry stays non-installable. ACs 4–8 of
+ticket 146 and ACs 3/7/10 of ticket 151 remain open.
+
+### Stronger tier — license verified, artifact still unpinned
+
+- Primary source `https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct/blob/main/LICENSE`
+  renders the full Apache License 2.0 text ending in `Copyright 2024 Alibaba
+  Cloud`; the model page header reads `License: apache-2.0`. The earlier
+  mirror-only evidence is superseded — do not cite mirrors for this tier.
+- Official GGUF repo `https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF`
+  lists `License: apache-2.0`, architecture `qwen2`, 7.61B params (6.53B
+  non-embedding), 28 layers, GQA 28Q/4KV, documented full context 32,768
+  tokens (131,072 only via vLLM YARN on non-GGUF models), quantizations
+  q2_K/q3_K_M/q4_0/q4_K_M/q5_0/q5_K_M/q6_K/q8_0 with Q4_K_M as-displayed
+  4.68 GB. The documented download command is `huggingface-cli download
+  Qwen/Qwen2.5-Coder-7B-Instruct-GGUF --include
+  "qwen2.5-coder-7b-instruct-q5_k_m*.gguf"` (note: split segments for large
+  files, merged with `llama-gguf-split --merge`).
+- Still missing: exact per-file revision (commit hash), SHA-256, byte size,
+  pinned chat-template requirement, working memory need, minimum runtime
+  version, and all Windows measurements (RAM/VRAM, CPU/GPU config, context
+  budget under the real shared-rules + create/diagnose skill workload,
+  startup/generation latency, cancellation timing, output usability).
+  As-displayed GB figures are not byte sizes and were not written into the
+  catalog's verified fields.
+
+### Lightweight tier — 3B rejected, 1.5B proposed (same family, still unpinned)
+
+- The proposed 3B artifact stays rejected: primary source
+  `https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct/blob/main/LICENSE`
+  is the Qwen Research License Agreement (Release Date: September 19, 2024),
+  non-commercial only, commercial use requiring a separate Alibaba Cloud
+  license. The GGUF repo carries the same research license. Rejection is
+  final for Sprout distribution without a commercial grant.
+- Proposed alternative within the agreed lightweight intent (smaller,
+  code-specific, same family — not a scope change):
+  `Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF`
+  (`https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF`), official
+  Qwen repo, `License: apache-2.0` with the same Copyright 2024 Alibaba Cloud
+  Apache-2.0 primary text at `.../Qwen2.5-Coder-1.5B-Instruct/blob/main/LICENSE`.
+  1.54B params (1.31B non-embedding), 28 layers, GQA 12Q/2KV, `qwen2`
+  architecture — the same architecture as the stronger candidate, so both
+  tiers share one runtime-integration story per AC 4 (explicit per-model
+  selection plus validated model-specific configuration still required; JSON
+  alone never adds support). Documented full context 32,768 tokens;
+  Q4_K_M as-displayed 1.12 GB (Q4_0 1.07 GB, Q8_0 1.89 GB). Documented
+  download: `huggingface-cli download
+  Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF
+  qwen2.5-coder-1.5b-instruct-q4_k_m.gguf --local-dir . --local-dir-use-symlinks False`.
+- Considered and not proposed: SmolLM3-3B (`ggml-org/SmolLM3-3B-GGUF`,
+  Apache-2.0, official llama.cpp-org GGUF, Q4_K_M as-displayed 1.92 GB,
+  64k trained / 128k via YARN) — permissively licensed and smaller than the
+  7B, but a general-reasoning `smollm3` architecture (new architecture needs
+  a separately tested runtime/adapter per AC 4) with weaker code scores
+  (HumanEval+ 30.48 base) than the same-family Qwen 1.5B alternative; kept as
+  a fallback, not the proposal. StarCoder2-3B was also considered and set
+  aside: BigCode OpenRAIL-M v1 is a use-restricted license, not Apache/MIT.
+- Still missing for the 1.5B candidate: everything listed for the stronger
+  tier (revision, hash, bytes, template, memory, runtime minimum, Windows
+  measurements). The bundled catalog records the new identity with null
+  verified fields, so it stays non-installable and no Install button appears.
+
+### Managed runtime — identity confirmed, qualification still absent
+
+- `llama.cpp` license is MIT (`Copyright (c) 2023-2026 The ggml authors`,
+  `https://github.com/ggml-org/llama.cpp/blob/master/LICENSE`); the repo
+  header confirms MIT. Candidate `b10702` (Windows x64 CPU artifact
+  `llama-b10702-bin-win-cpu-x64.zip` at
+  `https://github.com/ggml-org/llama.cpp/releases/download/b10702/llama-b10702-bin-win-cpu-x64.zip`)
+  published 2026-08-30 as a pre-release; the asset list shows the CPU x64
+  zip as-displayed 17.3 MB. No SHA-256 is published on the release page, and
+  newer builds exist (`b10793` latest as of 2026-09-12) — the pin itself
+  needs a decision plus the full measurement battery (staged hash-checked
+  download, per-user install without elevation, app-owned `llama-server`
+  startup on first generation demand, `GET /health` readiness, request abort
+  that sends nothing further, model unload after inactivity with no unload
+  during an active request, single-owner lifetime that never touches foreign
+  runtimes, shutdown on actual Sprout exit).
+- Protocol surface the qualification must exercise (primary:
+  `https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md`
+  and `https://llama.app/docs/api`): `GET /health` returns 200 `{"status":
+  "ok"}` when ready and 503 while loading; `POST /v1/chat/completions` is
+  the OpenAI-compatible chat endpoint (the integration sends `stream:
+  false`); the managed transport's rejection of chunked and redirect
+  responses and its loopback-only endpoint stay part of the contract. This
+  matches the existing `LoopbackTransport` shape; matching the shape is not
+  a measurement.
+
+### Contracts (AC 8) — status after this amendment
+
+- Existing-local: implemented and tested in `ai_assist.rs`
+  (`classify_endpoint` loopback-only HTTP v1, exact exposed-model selection
+  via `GET /v1/models`, `POST /v1/chat/completions` with `stream: false`,
+  redirects never followed, proxy env never consulted). Bounded tested set
+  remains *to be proven*: Ollama-compatible `POST /v1/chat/completions` on
+  loopback with an explicit model allow-list recorded at qualification time.
+- Cloud: contract specified in section 6 (provider id + base URL, OS-backed
+  key storage only, tested chat-completions shape, explicit limits,
+  client-side cancellation, actionable auth/rate-limit/timeout errors);
+  implementation belongs to ticket 150, which is still `ready-for-agent`.
+  No cloud support set is claimed here.
+
+## Amendment — 2026-09-12 live qualification (lightweight tier + runtime)
+
+The user approved lightweight-only qualification on this machine. The
+lightweight tier and the managed runtime below are QUALIFIED with the
+measured evidence in this section; the catalog records them as such. The
+stronger tier is untouched (still blocked, owned by ticket 152) and AC 8
+stays open. Nothing here is extrapolated: single-machine CPU-only figures
+are labeled as such.
+
+### Pinned identities (no guessing)
+
+- Model: `Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF` @ main
+  `f86cb2c1fa58255f8052cc32aeede1b7482d4361` (repo untouched since
+  2024-11-12), file `qwen2.5-coder-1.5b-instruct-q4_k_m.gguf`,
+  1,117,320,768 bytes, SHA-256
+  `cc324af070c2ecbfd324a30884d2f951a7ff756aba85cb811a6ec436933bb046`
+  (HF paths-info LFS oid; the downloaded bytes hashed identically).
+  Download URL pins the revision immutably:
+  `.../resolve/f86cb2c1fa58255f8052cc32aeede1b7482d4361/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf`.
+  License Apache-2.0, qwen2 architecture, Q4_K_M.
+- Runtime: `llama-b10702-bin-win-cpu-x64.zip`, 18,145,543 bytes, SHA-256
+  `696bce588315c9c48d33368626b92b8ab7e06fbf50f92e8f7a523eef2e52f202`
+  (measured locally; the release page publishes no hash). Binary reports
+  `0.3.0-dev (build 10702, commit e42214804)`, Clang 20.1.8, Windows x86_64.
+  MIT license. Executable `llama-server.exe` at the archive root with its
+  DLLs beside it. Launch args qualified:
+  `--host 127.0.0.1 --port {port} --model {model} -c 4096` (every flag
+  verified on this exact binary; `-m/-c/--host/--port` behaviorally,
+  `--model` as the documented long alias).
+
+### Redirect finding and narrow downloader fix (measured, then fixed)
+
+- Both stable catalog URLs return 302 to short-lived presigned HTTPS
+  (GitHub → `release-assets.githubusercontent.com`, expiring ~1h; HF →
+  `*.cdn.hf.co`, expiring ~1h). The previous downloader (`redirects(0)` +
+  200-only) could never install from either host — a release-blocking
+  defect found by this qualification, not by review.
+- Fix in `src-tauri/src/ai_managed.rs`: follow up to 5 redirects, then
+  refuse any non-HTTPS landing via the pure, unit-tested
+  `refuse_unless_https_landing` (downgrade-safe), keeping exact byte-count
+  and SHA-256 verification before activation. Security posture is preserved:
+  the catalog pins HTTPS URLs, no credentials ride along, hops are capped,
+  and a redirect target cannot substitute content undetected (size+hash are
+  checked after staging). New tests: `https_landing_check_blocks_downgrades`
+  and `non_https_initial_url_is_refused_before_touching_disk`; corrupt- and
+  cancelled-download refusal was already covered.
+
+### Live measurements (Windows x86_64 CPU-only, 10 GiB RAM, -c 4096)
+
+- Per-user launch, no elevation: `llama-server.exe` started as the current
+  user, loopback-only (`--host 127.0.0.1`, port 8123), hidden window —
+  the same shape as `spawn_owned_hidden`.
+- Startup latency: `/health` 200 in 4.2 s including process spawn + 1.1 GB
+  model load. `/props` confirms build `b10702-e42214804`, `Q4_K` model,
+  `n_ctx` 4096, and the embedded ChatML template with system-role support.
+- Generation through the real `build_prompt` prompts (7,430–7,488 chars,
+  fitting `-c 4096` with wide headroom over the bounded 2,000+2,000-char
+  request/context limits): CMD benign → usable `ipconfig /all` (98.5 s);
+  PowerShell benign → usable fenced `Get-Service -Name Spooler` (130 s);
+  destructive request → the model COMPLIED (`Remove-Item`); PS7-only
+  request → the model emitted `ForEach-Object -Parallel` while calling it
+  safe. All four outputs are preserved byte-for-byte in
+  `src-tauri/tests/ai-qualification-smoke.json` and replayed
+  deterministically through `request_draft`
+  (`qualification_smoke_outputs_reach_their_checked_verdicts`): allow with
+  exact commands, refuse with the plain boundary and no leaked code,
+  clarify for the 7-only syntax.
+- Safety verdict: the 1.5B model does NOT self-police destructive or
+  5.1-compatibility boundaries — Sprout's deterministic request checks
+  (refuse before inference; proven by
+  `refused_requests_never_reach_the_provider`) and output checks (proven by
+  `malicious_model_output_never_becomes_a_draft` plus the replay test) are
+  what enforce them. This matches ADR-0030: the model is untrusted input.
+- Cancellation: client aborted a generation after 5 s; `/health` stayed 200
+  and the server kept serving. App-side startup-cancellation is covered by
+  `startup_timeout_and_cancellation_stop_the_owned_process`.
+- Memory with model loaded: working set 1,877,544,960 B (~1.75 GiB),
+  private 946,053,120 B (~902 MB). Catalog `memory_needs_mb` is set to 4096
+  against the app's total-RAM gate (`system_memory_mb` reads total physical
+  RAM): honest headroom, and 2 GB-total machines get a clean refusal
+  instead of thrash.
+- Process ownership: only the recorded owned PID was ever signaled; it was
+  stopped at the end and verified gone. No foreign process touched (live
+  half; crash/occupied paths are covered by
+  `crashes_and_occupied_endpoints_fail_without_foreign_kills`).
+
+### The seven runtime flags — evidence split, stated plainly
+
+Live on this machine: download (real bytes + hash), per-user launch,
+health, cancellation. Deterministic controlled tests (the battery spec 145
+itself prescribes — "controlled process, download, and clock behavior"):
+model release after 5 idle minutes (`overlapping_requests_..._idle_reaps_it`),
+process ownership (crash/occupied tests), exit on actual Sprout exit
+(`actual_shutdown_stops_only_the_owned_process`). All eight managed
+lifecycle tests pass.
+
+### Known limits of this qualification
+
+- The real `install()` code path was NOT exercised live: it stages
+  (runtime+model)×2 ≈ 2.27 GB free, and the qualification machine had
+  ~1.43 GB free — the app's own disk gate honestly refuses there. Install
+  logic is covered by the eight controlled tests plus the two new
+  redirect/download tests. A live end-to-end install on a roomier machine
+  is the remaining check (ticket 151 AC 7).
+- Figures are CPU-only on one machine; GPU/VRAM numbers are not claimed.
+  Generation at 64–130 s per draft is slow but usable for an on-demand
+  authoring feature that starts the runtime only when asked.
+- The stronger tier, the bounded existing-local support set against a real
+  service, and the false-positive bound remain future work (tickets
+  152/150/155, AC 8).
+- Environment note: the ~1.2 GB qualification downloads filled the
+  machine's disk mid-session and disrupted running apps; all artifacts were
+  removed afterwards and free space verified restored. Future qualification
+  downloads need ~3 GB of headroom.
+
+## Amendment — 2026-09-12 live end-to-end install (151 AC 7)
+
+The "real `install()` code path was NOT exercised live" limit above is
+resolved. With disk headroom restored (12.9 GB free), a temporary ignored
+probe drove the production path with real adapters against the real app
+data root: fresh `install("lightweight-candidate")` in 132.5 s (real
+download, byte-count + SHA-256 verified, atomic activation), already-
+installed fast-path in 1.3 ms on repeat, real generation of "Print the
+current directory path." (CMD) to the checked draft `echo %CD%` in 82.3 s,
+validate+collide+create save into a scratch database with read-back, and
+owned-PID-only shutdown with empty staging. The install remains in place
+(~1.18 GB under `%LOCALAPPDATA%\Sprout\ai-managed`); ticket 151 AC 7 is
+closed with the full record in that ticket. New observation, no behavior
+changed: generation latency on this CPU-only box varies widely (40.1 s,
+90.2 s hitting the 90 s bounded wait, 82.3 s) and sits close to the app's
+generation timeout — worth watching as lightweight-tier evidence grows,
+but not re-tuned here.

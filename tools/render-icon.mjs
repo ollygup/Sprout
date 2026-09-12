@@ -142,10 +142,19 @@ const s0 = [Number(stemM[1]), Number(stemM[2])];
 const s1 = [s0[0], s0[1] + Number(stemV[1])];
 
 // ---- rendering ---------------------------------------------------------------
-function render(size) {
+// WHY one renderer with options instead of three scripts: the geometry parse
+// above is the single source of every Sprout raster — a second code path
+// would drift from the shipped icon without failing loudly (ADR-0029's
+// one-owner spirit applied to brand art).
+// opts.background: "tile" (rounded tile + transparent corners, the app
+// icon), "square" (fully opaque brand field for surfaces that composite
+// badly with transparency), "none" (mark only on transparency for badges).
+// opts.stemWidth overrides the SVG stroke for small-size legibility.
+function render(size, opts = {}) {
+  const background = opts.background ?? "tile";
   const k = size / baseSize;
   const rx = baseRx * k;
-  const halfW = (stemWidth * k) / 2;
+  const halfW = ((opts.stemWidth ?? stemWidth) * k) / 2;
   const [a0x, a0y] = [s0[0] * k, s0[1] * k];
   const [a1x, a1y] = [s1[0] * k, s1[1] * k];
   const stemLen2 = (a1x - a0x) ** 2 + (a1y - a0y) ** 2;
@@ -158,8 +167,9 @@ function render(size) {
     loop: s.loop.map(([x, y]) => [x * k, y * k]),
   }));
 
-  const inRoundedRect = (x, y) => {
+  const inBackground = (x, y) => {
     if (x < 0 || x > size || y < 0 || y > size) return false;
+    if (background !== "tile") return true;
     if (x >= rx && x <= size - rx) return true;
     if (y >= rx && y <= size - rx) return true;
     const cx = x < rx ? rx : size - rx;
@@ -178,12 +188,14 @@ function render(size) {
   };
 
   const colorAt = (x, y) => {
-    if (!inRoundedRect(x, y)) return null;
+    if (!inBackground(x, y)) return null;
     if (inStem(x, y)) return stem;
     for (const s of scaled) {
       if (x >= s.minX && x <= s.maxX && y >= s.minY && y <= s.maxY && inLoop(x, y, s.loop)) return s.fill;
     }
-    return field;
+    // WHY null instead of the field for "none": a badge overlays as a disc —
+    // any opaque pixel outside the mark would show as a square block.
+    return background === "none" ? null : field;
   };
 
   const ss = size <= 64 ? 8 : size <= 256 ? 4 : 2;
@@ -326,6 +338,17 @@ writePng("icon.png", render(512), 512);
 writePng("app-icon.png", render(1024), 1024);
 writePng("StoreLogo.png", render(50), 50);
 for (const s of [30, 44, 71, 89, 107, 142, 150, 284, 310]) writePng(`Square${s}x${s}Logo.png`, render(s), s);
+
+// ---- Discord portal + Rich Presence art (1024 PNG, upload-ready) -----------
+// WHY these reuse the icon geometry unchanged: portal art must read as the
+// same brand at 1024 as the taskbar does at 32 — same tile, same sprout,
+// same three greens. app_icon_1024 is byte-identical to app-icon.png by
+// construction (same call). rp_large squares the tile fully opaque for
+// surfaces that composite badly with transparency. rp_small drops the tile
+// and doubles the stem so the mark survives ~24 px badge display.
+writePng("app_icon_1024.png", render(1024), 1024);
+writePng("rp_large.png", render(1024, { background: "square" }), 1024);
+writePng("rp_small.png", render(1024, { background: "none", stemWidth: 112 }), 1024);
 
 writeFileSync(
   join(iconsDir, "icon.ico"),

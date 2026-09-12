@@ -827,6 +827,143 @@ pub struct DraftInput {
     pub grants: RequestGrants,
 }
 
+/// Parses a model reply into a draft. Small local models emit near-JSON for
+/// benign requests, and refusing every such reply would fail requests the
+/// checks would otherwise allow. Anything hostile still faces `check_output`
+/// afterwards, so the model stays untrusted input (ADR-0030).
+fn parse_draft_json(text: &str) -> Result<DraftJson, ProviderError> {
+    let fenced = unfence(text);
+    if let Ok(parsed) = serde_json::from_str(fenced) {
+        return Ok(parsed);
+    }
+    let candidate = first_balanced_object(fenced).unwrap_or(fenced);
+    serde_json::from_str(candidate)
+        .or_else(|_| serde_json::from_str(&repair_json(candidate)))
+        .map_err(|_| ProviderError::Malformed)
+}
+
+/// The first `{...}` span, so prose around the object cannot break parsing.
+/// String contents (with `\` escapes) never affect brace depth.
+fn first_balanced_object(text: &str) -> Option<&str> {
+    let start = text.find('{')?;
+    let bytes = text.as_bytes();
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut index = start;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_string {
+            if byte == b'\\' {
+                index += 1;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+        } else if byte == b'"' {
+            in_string = true;
+        } else if byte == b'{' {
+            depth += 1;
+        } else if byte == b'}' {
+            depth -= 1;
+            if depth == 0 {
+                return Some(&text[start..=index]);
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
+/// Escapes stray quotes and lone backslashes inside strings and drops
+/// trailing commas, because small-model Windows-path values arrive with
+/// exactly these defects.
+fn repair_json(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut repaired = String::with_capacity(text.len());
+    let mut in_string = false;
+    let mut index = 0;
+    while index < chars.len() {
+        let current = chars[index];
+        if !in_string {
+            if current == '"' {
+                in_string = true;
+                repaired.push(current);
+            } else if current == ',' {
+                let mut ahead = index + 1;
+                while ahead < chars.len() && chars[ahead].is_whitespace() {
+                    ahead += 1;
+                }
+                let trailing = ahead >= chars.len()
+                    || matches!(chars.get(ahead), Some('}') | Some(']'));
+                if !trailing {
+                    repaired.push(current);
+                }
+            } else {
+                repaired.push(current);
+            }
+        } else if current == '\\' {
+            // A valid escape rides through untouched as a pair; anything
+            // else gains the missing backslash. Either way the escaped
+            // character is consumed here, never re-read as a delimiter.
+            let escaped = matches!(
+                chars.get(index + 1),
+                Some('"') | Some('\\') | Some('/') | Some('b') | Some('f') | Some('n')
+                    | Some('r') | Some('t') | Some('u')
+            );
+            if escaped {
+                repaired.push(current);
+                if let Some(next) = chars.get(index + 1) {
+                    repaired.push(*next);
+                }
+                index += 1;
+            } else {
+                repaired.push('\\');
+                repaired.push(current);
+            }
+        } else if current == '\n' || current == '\r' {
+            // A raw line break inside a string ends it when structure
+            // follows: small-model values sometimes never close before the
+            // line ends. Bare newlines are invalid inside strict strings
+            // anyway, so closing here can only recover, never corrupt.
+            if in_string {
+                let mut ahead = index + 1;
+                while ahead < chars.len() && chars[ahead].is_whitespace() {
+                    ahead += 1;
+                }
+                if ahead >= chars.len()
+                    || matches!(
+                        chars.get(ahead),
+                        Some(',') | Some('}') | Some(']') | Some(':')
+                    )
+                {
+                    repaired.push('"');
+                    in_string = false;
+                }
+            }
+            repaired.push(current);
+        } else if current == '"' {
+            let mut ahead = index + 1;
+            while ahead < chars.len() && chars[ahead].is_whitespace() {
+                ahead += 1;
+            }
+            let closing = ahead >= chars.len()
+                || matches!(
+                    chars.get(ahead),
+                    Some(',') | Some('}') | Some(']') | Some(':')
+                );
+            if closing {
+                in_string = false;
+                repaired.push(current);
+            } else {
+                repaired.push_str("\\\"");
+            }
+        } else {
+            repaired.push(current);
+        }
+        index += 1;
+    }
+    repaired
+}
+
 /// Strips one markdown fence pair. Models wrap JSON in fences despite the
 /// JSON-only instruction; unwrapping is parsing, not execution.
 fn unfence(text: &str) -> &str {
@@ -869,7 +1006,7 @@ pub fn request_draft(
         Ok(raw) => raw,
         Err(error) => return DraftOutcome::Failed { message: error.message() },
     };
-    let parsed: DraftJson = match serde_json::from_str(unfence(&raw)) {
+    let parsed: DraftJson = match parse_draft_json(&raw) {
         Ok(parsed) => parsed,
         Err(_) => {
             return DraftOutcome::Failed {
@@ -1059,6 +1196,195 @@ mod tests {
             assert_eq!(draft.shell, shell);
             assert_eq!(draft.command, command);
             assert!(!draft.executed, "drafts are marked unexecuted");
+        }
+    }
+
+    /// Ticket 151 AC 7 (architectural half): the managed path exposes the same
+    /// authoring/refusal/context interface as the existing-local path — one
+    /// `request_draft` seam, not a separate execution pipeline. The
+    /// managed-shaped provider below mirrors `ManagedRequest`: it serves a
+    /// pinned manifest model name and ignores the requested one, while the
+    /// existing-local shape rides the requested name through. Both must reach
+    /// identical checked verdicts; the real-model end-to-end half stays open
+    /// under ticket 146 qualification.
+    struct ManagedShapedClient {
+        inner: TestClient,
+        pinned_model: String,
+        sent_model: Mutex<Vec<String>>,
+    }
+
+    impl ManagedShapedClient {
+        fn new(script: Vec<Scripted>, pinned_model: &str) -> Self {
+            Self {
+                inner: TestClient::new(script),
+                pinned_model: pinned_model.to_string(),
+                sent_model: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl DraftProvider for ManagedShapedClient {
+        fn generate(&self, prompt: &DraftPrompt, _model: &str) -> Result<String, ProviderError> {
+            self.sent_model
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(self.pinned_model.clone());
+            self.inner.generate(prompt, &self.pinned_model)
+        }
+    }
+
+    #[test]
+    fn managed_and_existing_local_share_the_checked_draft_path() {
+        let skills = skills();
+        for (request, body) in [
+            (
+                "Show my IP configuration",
+                chat_body("ipconfig", "Shows IP configuration."),
+            ),
+            (
+                "Show my IP configuration",
+                chat_body("del C:\\Temp\\notes.txt", "Trust me, this is safe."),
+            ),
+        ] {
+            let existing = TestClient::new(vec![Scripted::Body(body.clone())]);
+            let managed =
+                ManagedShapedClient::new(vec![Scripted::Body(body)], "manifest-model");
+            let mut existing_input = draft_input("cmd", request);
+            existing_input.model = "user-picked-model".to_string();
+            let mut managed_input = draft_input("cmd", request);
+            managed_input.model = "user-picked-model".to_string();
+            let existing_outcome = request_draft(&existing, &skills, &existing_input);
+            let managed_outcome = request_draft(&managed, &skills, &managed_input);
+            match (&existing_outcome, &managed_outcome) {
+                (
+                    DraftOutcome::Draft { draft: left },
+                    DraftOutcome::Draft { draft: right },
+                ) => {
+                    assert_eq!(left.command, right.command);
+                    assert!(!left.executed && !right.executed, "drafts stay unexecuted");
+                }
+                (
+                    DraftOutcome::Refused { message: left },
+                    DraftOutcome::Refused { message: right },
+                ) => {
+                    assert_eq!(left, right, "both paths refuse identically");
+                    assert!(left.contains(REFUSAL_BOUNDARY));
+                    assert!(!left.contains("del C:"), "rejected code never leaks");
+                }
+                _ => panic!(
+                    "managed and existing-local must agree, got {existing_outcome:?} vs {managed_outcome:?}"
+                ),
+            }
+        }
+    }
+
+    /// Ticket 151 AC 7 (real-model half): the outputs the qualified
+    /// lightweight candidate actually produced on 2026-09-12 (fixtures in
+    /// `tests/ai-qualification-smoke.json`, provenance inside) replayed
+    /// through the same `request_draft` seam with benign requests — the
+    /// harness the app itself uses, since refused requests never reach
+    /// inference. Benign drafts become usable drafts with the exact
+    /// commands, the destructive output refuses with the plain boundary and
+    /// no leaked code, and the PowerShell 7-only output is held for
+    /// clarification instead of saved.
+    #[test]
+    fn qualification_smoke_outputs_reach_their_checked_verdicts() {
+        let text = include_str!("../tests/ai-qualification-smoke.json");
+        let fixture: Value = serde_json::from_str(text).expect("smoke fixtures parse");
+        assert_eq!(fixture["schema_version"], 1);
+        for case in fixture["cases"].as_array().expect("smoke case list") {
+            let id = case["id"].as_str().unwrap_or("?");
+            let shell = case["shell"].as_str().unwrap_or("powershell");
+            let body = case["body"].as_str().unwrap_or_default();
+            let expected = case["expected"].as_str().unwrap_or("?");
+            let benign_request = if shell == "cmd" {
+                "Show my IP configuration"
+            } else {
+                "Show the status of the Print Spooler service"
+            };
+            let client = TestClient::new(vec![Scripted::Body(body.to_string())]);
+            let outcome = request_draft(&client, &skills(), &draft_input(shell, benign_request));
+            match expected {
+                "allow-draft" => {
+                    let DraftOutcome::Draft { draft } = outcome else {
+                        panic!("{id} must draft, got {outcome:?}");
+                    };
+                    assert_eq!(
+                        draft.command,
+                        case["expected_command"].as_str().unwrap_or_default(),
+                        "{id} keeps its qualified command"
+                    );
+                    assert!(!draft.executed, "{id} drafts stay unexecuted");
+                }
+                "refuse" => {
+                    let DraftOutcome::Refused { message } = outcome else {
+                        panic!("{id} must refuse, got {outcome:?}");
+                    };
+                    assert!(message.contains(REFUSAL_BOUNDARY), "{id} carries the boundary");
+                    assert!(
+                        !message.contains("Remove-Item"),
+                        "{id} leaks no rejected code"
+                    );
+                }
+                "clarify" => assert!(
+                    matches!(outcome, DraftOutcome::Clarify { .. }),
+                    "{id} must clarify, got {outcome:?}"
+                ),
+                other => panic!("{id} has an unknown expectation: {other}"),
+            }
+        }
+    }
+
+    /// The near-JSON layer behind the zip-backup smoke case: each defect
+    /// class the small model emits must recover exactly, and anything beyond
+    /// repair must stay an error rather than a partial draft.
+    #[test]
+    fn near_json_defects_recover_or_stay_errors() {
+        for (body, command) in [
+            (
+                "Here is your draft:\n{\"command\": \"ipconfig\"}\nHope this helps.",
+                "ipconfig",
+            ),
+            (
+                "{\"command\": \"echo C:\\Temp\\dl\"}",
+                "echo C:\\Temp\\dl",
+            ),
+            ("{\"command\": \"ipconfig\",}", "ipconfig"),
+        ] {
+            let parsed =
+                parse_draft_json(body).unwrap_or_else(|_| panic!("must recover: {body}"));
+            assert_eq!(parsed.command, command);
+        }
+        let stray = parse_draft_json("{\"command\": \"ipconfig\", \"note\": \"say \"hi\" ok\"}")
+            .expect("stray quotes are content");
+        assert_eq!(stray.command, "ipconfig");
+        // A value that never closes before its line ends still recovers —
+        // the small model drops closing quotes, not just escapes them.
+        let unclosed =
+            parse_draft_json("{\"command\": \"ipconfig\", \"items\": [\"ends here\n  ],\n}")
+                .expect("unterminated line closes at structure");
+        assert_eq!(unclosed.command, "ipconfig");
+        // Valid escapes ride through untouched: repair must never rewrite
+        // well-formed replies (a prior version double-processed `\"`).
+        for intact in [
+            "{\"command\": \"echo \\\"hi\\\" C:\\\\Temp\"}",
+            "{\"command\": \"Get-Service -Name Spooler\"}",
+        ] {
+            let parsed = parse_draft_json(intact).expect("valid stays valid");
+            let reparsed: DraftJson =
+                serde_json::from_str(&repair_json(intact)).expect("repair is idempotent");
+            assert_eq!(parsed.command, reparsed.command);
+        }
+        for garbage in [
+            "not json at all",
+            "{\"command\": ",
+            "",
+            "```json\n{\"command\": \"ipconfig\"\n```",
+        ] {
+            assert!(
+                parse_draft_json(garbage).is_err(),
+                "must stay an error: {garbage}"
+            );
         }
     }
 

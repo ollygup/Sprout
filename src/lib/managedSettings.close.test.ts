@@ -64,7 +64,12 @@ describe("Managed setup disclosure", () => {
     const host = await openSettings();
     const form = host.querySelector("form")!;
     expect(form.textContent).toContain("Managed setup is unavailable in this build");
-    expect(form.textContent).not.toContain(catalog.managed_runtime.blocker);
+    // The shipped catalog's qualified entries carry an empty blocker, and
+    // every string contains "" — only assert the blocker stays out of the
+    // form when there is one to leak.
+    if (catalog.managed_runtime.blocker) {
+      expect(form.textContent).not.toContain(catalog.managed_runtime.blocker);
+    }
     expect(form.textContent).not.toContain("Not qualified");
     expect(form.textContent).not.toContain(catalog.tiers[0].candidate_artifact);
     const details = button(host, "Why unavailable?");

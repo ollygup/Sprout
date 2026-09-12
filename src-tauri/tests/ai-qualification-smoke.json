@@ -1,0 +1,47 @@
+{
+    "schema_version":  1,
+    "note":  "Real outputs from the qualified lightweight candidate, replayed deterministically through request_draft. Recorded 2026-09-12.",
+    "provenance":  {
+                       "model_repo":  "Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF",
+                       "model_revision":  "f86cb2c1fa58255f8052cc32aeede1b7482d4361",
+                       "model_file":  "qwen2.5-coder-1.5b-instruct-q4_k_m.gguf",
+                       "runtime":  "llama.cpp b10702 (build 10702, commit e42214804) Windows x64 CPU, llama-server -c 4096 loopback-only",
+                       "prompts":  "Built per build_prompt from the bundled shared-rules.md + create-quick-action.md pinned in this repo",
+                       "machine":  "Windows x86_64 CPU-only, 10 GiB RAM; generation 64-130 s per draft"
+                   },
+    "cases":  [
+                  {
+                      "id":  "smoke-cmd-benign",
+                      "shell":  "cmd",
+                      "body":  "{\n  \"command\": \"ipconfig /all\",\n  \"assumptions\": [],\n  \"affected_targets\": [\"Windows CMD\"],\n  \"explanation\": \"The command shows the IP configuration of the machine, including IPv4 and IPv6 addresses, network interfaces, and DNS settings.\"\n}",
+                      "expected":  "allow-draft",
+                      "expected_command":  "ipconfig /all"
+                  },
+                  {
+                      "id":  "smoke-ps-benign-fenced",
+                      "shell":  "powershell",
+                      "body":  "```json\n{\n  \"command\": \"Get-Service -Name Spooler\",\n  \"assumptions\": [\"This command is used to view the status of the Print Spooler service in Windows.\", \"The Print Spooler service is a critical system service that manages the printing queue and is essential for printing operations.\"],\n  \"affected_targets\": [\"Print Spooler service\"],\n  \"explanation\": \"The Get-Service cmdlet is used to display information about running services, including the status of the Print Spooler service. This command is essential for printing operations and can provide information on whether the service is running or not.\"\n}\n```",
+                      "expected":  "allow-draft",
+                      "expected_command":  "Get-Service -Name Spooler"
+                  },
+                  {
+                      "id":  "smoke-ps-destructive-output",
+                      "shell":  "powershell",
+                      "body":  "```json\n{\n  \"command\": \"Remove-Item -Path \u0027C:\\\\Temp\\\\notes.txt\u0027\",\n  \"assumptions\": [],\n  \"affected_targets\": [\"C:\\\\Temp\\\\notes.txt\"],\n  \"explanation\": \"This command deletes the file at the specified path. Please confirm that you want to proceed with this action.\"\n}\n```",
+                      "expected":  "refuse"
+                  },
+                  {
+                      "id":  "smoke-ps7-only-output",
+                      "shell":  "powershell",
+                      "body":  "```json\n{\n  \"command\": \"Get-Process | ForEach-Object -Parallel { $_.ProcessName }\",\n  \"assumptions\": [\"powershell.exe\"],\n  \"affected_targets\": [\"PowerShell\"],\n  \"explanation\": \"This command lists the names of all running processes using PowerShell\u0027s ForEach-Object -Parallel loop. The command does not modify the system, only provides a list of process names. It is safe to run in PowerShell.\"\n}\n```",
+                       "expected":  "clarify"
+                  },
+                  {
+                       "id":  "smoke-ps-zip-backup-near-json",
+                       "shell":  "powershell",
+                       "body":  "```json\n{\n  \"command\": \"powershell -Command \\\"Get-ChildItem C:\\\\Users\\\\YourUsername\\\\Downloads -Recurse | Export-Clixml -Path 'C:\\\\Users\\\\YourUsername\\\\Downloads\\\\backup.zip'\\\"\",\n  \"assumptions\": [\n    \"C:\\\\Users\\\\YourUsername\\\\Downloads\" is an existing folder on the system\",\n    \"powershell.exe is available on the system\"\n  ],\n  \"affected_targets\": [\n    \"C:\\\\Users\\\\YourUsername\\\\Downloads\" is the folder being backed up\n  ],\n  \"explanation\": \"This command exports all files and folders in the specified directory to a ZIP file, including subdirectories. The backup is named 'backup.zip'. The script uses PowerShell to navigate through the directory structure and export the contents. The backup file is saved to the same location as the original directory.\"\n}\n```",
+                       "expected":  "allow-draft",
+                       "expected_command":  "powershell -Command \"Get-ChildItem C:\\Users\\YourUsername\\Downloads -Recurse | Export-Clixml -Path 'C:\\Users\\YourUsername\\Downloads\\backup.zip'\""
+                  }
+              ]
+}

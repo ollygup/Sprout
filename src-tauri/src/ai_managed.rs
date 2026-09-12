@@ -32,6 +32,14 @@ const IDLE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const IO_POLL: Duration = Duration::from_millis(200);
 const MAX_HTTP_RESPONSE: usize = 65_536;
+/// Distribution hosts answer a pinned catalog URL with a short-lived
+/// redirect (measured 2026-09-12: GitHub release assets and HuggingFace
+/// resolve URLs both return 302 to presigned HTTPS). Following stays safe
+/// here because the staged bytes are still size- and SHA-256-verified before
+/// anything is activated, no credentials ride along, the hop count is
+/// capped, and any non-HTTPS landing is refused by
+/// `refuse_unless_https_landing`.
+const MAX_REDIRECTS: u32 = 5;
 
 #[derive(Clone, Deserialize)]
 struct Catalog {
@@ -277,11 +285,12 @@ impl Downloader for HttpDownloader {
         let response = ureq::AgentBuilder::new()
             .timeout_connect(Duration::from_secs(20))
             .timeout_read(Duration::from_secs(30))
-            .redirects(0)
+            .redirects(MAX_REDIRECTS)
             .build()
             .get(url)
             .call()
             .map_err(|error| format!("Managed artifact download failed: {error}"))?;
+        refuse_unless_https_landing(response.get_url())?;
         if response.status() != 200 {
             return Err(format!("Managed artifact download returned HTTP {}.", response.status()));
         }
@@ -1101,6 +1110,20 @@ fn file_name_from_url(url: &str, fallback: &str) -> String {
         .to_string()
 }
 
+/// Refuses any download that did not land on HTTPS — including a redirect
+/// downgrade — before a single byte is staged. Pure so the boundary is
+/// unit-tested without network; the staged bytes are additionally size- and
+/// SHA-256-verified by `verify_file`, so a redirect target cannot substitute
+/// content undetected either.
+fn refuse_unless_https_landing(final_url: &str) -> Result<(), String> {
+    if final_url.len() > "https://".len()
+        && final_url[..8].eq_ignore_ascii_case("https://")
+    {
+        return Ok(());
+    }
+    Err("Managed artifact download left HTTPS; nothing was staged.".into())
+}
+
 fn verify_file(path: &Path, expected_bytes: u64, expected_sha256: &str) -> Result<(), String> {
     let bytes = fs::read(path)
         .map_err(|error| format!("Could not read a staged managed artifact: {error}"))?;
@@ -1315,19 +1338,72 @@ mod tests {
     }
 
     #[test]
-    fn shipped_catalog_is_fail_closed_and_status_creates_nothing() {
+    fn shipped_catalog_qualifies_only_the_measured_lightweight_tier() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("managed");
         let manager = ManagedAi::new(root.clone());
         let status = manager.catalog_status().unwrap();
-        assert!(!status.runtime.qualified);
-        assert!(status.models.iter().all(|model| !model.installable));
-        assert!(!root.exists());
+        assert!(status.runtime.qualified, "the measured runtime ships qualified");
+        let lite = status
+            .models
+            .iter()
+            .find(|model| model.id == "lightweight-candidate")
+            .expect("the lightweight tier ships");
+        assert!(lite.installable, "the measured tier is installable");
+        assert!(!lite.installed, "status never installs anything");
+        assert_eq!(
+            lite.revision.as_deref(),
+            Some("f86cb2c1fa58255f8052cc32aeede1b7482d4361"),
+            "the pinned revision rides along"
+        );
+        assert!(lite.sha256.is_some() && lite.download_size_bytes.is_some());
+        for model in &status.models {
+            if model.id != "lightweight-candidate" {
+                assert!(!model.installable, "{} stays non-installable", model.id);
+            }
+        }
+        assert!(!root.exists(), "status creates no install state");
     }
 
     #[test]
     fn sha256_matches_the_standard_vector() {
         assert_eq!(sha256_hex(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    }
+
+    #[test]
+    fn https_landing_check_blocks_downgrades() {
+        for landing in [
+            "https://cdn.example/model.gguf",
+            "https://127.0.0.1:9/file?sig=abc",
+            "HTTPS://EXAMPLE/UPPER",
+        ] {
+            assert!(refuse_unless_https_landing(landing).is_ok(), "{landing} stays");
+        }
+        for landing in [
+            "http://cdn.example/model.gguf",
+            "https://",
+            "https:/typo.example/file",
+            "",
+            "file:///etc/model.gguf",
+        ] {
+            assert!(
+                refuse_unless_https_landing(landing).is_err(),
+                "{landing} must not stage"
+            );
+        }
+    }
+
+    #[test]
+    fn non_https_initial_url_is_refused_before_touching_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("never-created.bin");
+        let downloader = HttpDownloader;
+        let cancelled = AtomicBool::new(false);
+        let error = downloader
+            .fetch("http://127.0.0.1:9/model.gguf", &target, 3, &cancelled)
+            .expect_err("plain HTTP must fail before any request");
+        assert!(error.contains("HTTPS"), "actionable, got {error}");
+        assert!(!target.exists(), "refused downloads stage nothing");
     }
 
     #[test]

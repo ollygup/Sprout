@@ -21,6 +21,7 @@ mod import_export;
  mod logs;
  mod ordered_list;
  mod plan;
+mod presence;
 mod quick_actions;
 mod quick_window;
 mod run;
@@ -3215,6 +3216,9 @@ pub fn run() {
             // background thread, single `update-available` event on a newer
             // release, silent on every failure.
             update::start_background_check(app.handle().clone());
+            // The offline static Discord presence (ADR-0033): one background
+            // loop that never blocks this setup — Discord absent just logs.
+            presence::start();
             // The auto-start reconciliation (ADR-0013, ticket 75): one sync
             // per launch on a background thread — the Run key ends up
             // matching the persisted preference (default: registered).
@@ -3411,6 +3415,9 @@ pub fn run() {
                     if let Some(state) = app.try_state::<AppState>() {
                         state.managed_ai.shutdown();
                     }
+                    // Actual exit clears the Discord activity (ADR-0033);
+                    // main-window close-to-tray never reaches this event.
+                    presence::shutdown();
                     let _ = quick_window::release_dock(app);
                 }
                 _ => {}
