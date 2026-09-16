@@ -3631,6 +3631,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "sprout-mac-desktop"
+version = "0.1.0"
+
+[[package]]
 name = "sprout-windows-desktop"
 version = "1.0.4"
 dependencies = [

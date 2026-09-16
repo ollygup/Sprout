@@ -13,10 +13,11 @@ Sprout runs inside a Virtual Machine, but its source lives in two homes:
   happens. It deliberately contains **no git**.
 
 **Git and releases are handled by me.** Commits are made manually on the
-host, and a version release happens by tagging that commit (`vX.Y.Z`,
-matching the `version` in `src-tauri/Cargo.toml`) — pushing the tag triggers
+host, and a version release happens by tagging that commit (`win-vA.B.C` for
+Windows matching the `version` in `src-tauri/Cargo.toml`, `mac-vX.Y.Z` for
+Mac matching `src-tauri/mac/Cargo.toml`) — pushing the tag triggers
 CI, which builds the installer and publishes the GitHub Release; installed
-apps then update themselves from it.
+apps then update themselves from it (their own train only).
 
 Whenever a task is finished in the VM, the changed files are synced up to
 the shared folder with a guarded sync script (`tools/sync.ps1`), which
@@ -42,7 +43,7 @@ App data (SQLite database + logs) is created lazily on first launch under `%LOCA
 
 ## Release
 
-Releases are GitHub Releases built by CI — never hand-built installers. The full flow lives in `docs/release/release-process.md`: bump `version` in `src-tauri/Cargo.toml` (the single source of truth), commit, tag the commit `vX.Y.Z`, and push with tags. CI refuses to publish unless the tag equals the Cargo.toml version, then builds and publishes `Sprout_<version>_x64-setup.exe`; installed apps check Releases at startup and apply updates passively (`docs/adr/0012-github-release-self-update.md`).
+Releases are GitHub Releases built by CI — never hand-built installers. The full flow lives in `docs/release/release-process.md`: bump `version` in the releasing train's Cargo.toml (Windows: `src-tauri/Cargo.toml`; Mac: `src-tauri/mac/Cargo.toml` — each train's single source of truth), commit, tag the commit (`win-v*` / `mac-v*`), and push with tags. CI refuses to publish unless the tag equals its train's version, then builds and publishes the platform installer (`Sprout_*_x64-setup.exe` / `Sprout_*_aarch64.dmg`); installed apps check Releases at startup and apply their own train's updates passively (`docs/adr/0012-github-release-self-update.md`).
 
 The installer installs per-user to `%LOCALAPPDATA%\Programs\Sprout`, registers the `.sprout.json` file association (double-click a preset to import it), and uninstalling without the "delete app data" checkbox keeps `%LOCALAPPDATA%\Sprout` intact. It uses a vendored NSIS template (`src-tauri/nsis/installer.nsi`, re-diff against upstream on Tauri upgrades — ADR-0006).
 

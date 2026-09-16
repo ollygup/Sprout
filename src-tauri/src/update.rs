@@ -1,9 +1,15 @@
-//! Self-update from GitHub Releases (ADR-0012): ask the repo's Releases API
-//! for the latest tag, compare it against the Cargo.toml version, and — when
-//! newer and the user confirms — download the NSIS setup exe to %TEMP% and
+//! Self-update from GitHub Releases (ADR-0012, dual trains per 2026-09-16
+//! amendment): ask the repo's Releases list for this platform's train, compare
+//! the newest matching tag against the train's Cargo.toml version, and — when
+//! newer and the user confirms — download the platform installer to %TEMP% and
 //! run its passive `/UPDATE /P /R` path, exiting so the installer replaces
 //! the exe in place. All networking lives here in Rust (ureq on rustls), so
 //! the CSP stays untouched.
+//!
+//! Trains: Windows follows `win-v*` tags with `Sprout_*_x64-setup.exe`
+//! assets; Mac follows `mac-v*` tags with `Sprout_*.dmg` assets. Each side
+//! ignores the other's tags and assets, and bare `v*` tags (retired in 207)
+//! are ignored by both.
 //!
 //! The silent-failure contract: offline, private-repo 403/404 (rate-limit
 //! responses look the same), and malformed payloads all count as "up to
@@ -27,7 +33,26 @@ use tauri::{AppHandle, Emitter};
 
 /// The repo origin (ADR-0012). Inert while the repo is private — the API
 /// answers 404 and the silent-failure contract swallows it.
-const RELEASES_LATEST_URL: &str = "https://api.github.com/repos/ollygup/Sprout/releases/latest";
+///
+/// The list endpoint (not `/releases/latest`): with two trains sharing one
+/// repo, "latest overall" may belong to the other platform, so each side
+/// lists recent releases and picks the newest of its own train instead.
+const RELEASES_LIST_URL: &str =
+    "https://api.github.com/repos/ollygup/Sprout/releases?per_page=100";
+
+/// Release-train tag prefixes (spec 206, ticket 207): Windows ships
+/// `win-vA.B.C`, Mac ships `mac-vX.Y.Z`. Bare `v*` is retired — matched by
+/// neither train and ignored by both updaters.
+pub const WIN_TAG_PREFIX: &str = "win-v";
+pub const MAC_TAG_PREFIX: &str = "mac-v";
+
+/// This build's train, selected at compile time so each binary only ever
+/// follows its own releases. Windows-only today; the Mac adapter (tickets
+/// 208–215) compiles this same module with `target_os = "macos"`.
+#[cfg(target_os = "macos")]
+pub const UPDATE_TAG_PREFIX: &str = MAC_TAG_PREFIX;
+#[cfg(not(target_os = "macos"))]
+pub const UPDATE_TAG_PREFIX: &str = WIN_TAG_PREFIX;
 
 /// GitHub's API rejects requests without a User-Agent.
 const USER_AGENT: &str = concat!("Sprout/", env!("CARGO_PKG_VERSION"));
@@ -36,10 +61,16 @@ const USER_AGENT: &str = concat!("Sprout/", env!("CARGO_PKG_VERSION"));
 /// release exists — payload `{version, url}`.
 pub const UPDATE_AVAILABLE_EVENT: &str = "update-available";
 
-/// The installer asset name pattern release CI publishes (`release.yml`);
-/// both the update pick and the download target must match it exactly.
+/// The installer asset name patterns release CI publishes (`release.yml`);
+/// both the update pick and the download target must match the running
+/// platform's pattern exactly. Windows keeps `Sprout_*_x64-setup.exe`; the
+/// Mac train publishes `Sprout_*.dmg` (Tauri `dmg` bundle, e.g.
+/// `Sprout_0.1.0_aarch64.dmg`). Signature sidecars (`*.sig`) never match —
+/// they ride beside the asset and are fetched as `<url>.sig`.
 const SETUP_ASSET_PREFIX: &str = "Sprout_";
 const SETUP_ASSET_SUFFIX: &str = "_x64-setup.exe";
+const MAC_ASSET_PREFIX: &str = "Sprout_";
+const MAC_ASSET_SUFFIX: &str = ".dmg";
 
 /// CI's update-signing public key (ADR-0012 scheme B): the second line of
 /// the `<key>.pub` file produced by `tauri signer generate` — the base64
@@ -56,11 +87,19 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(15);
 /// a large file's total transfer time.
 const DOWNLOAD_READ_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// The installed build's version — Cargo.toml is the single source of truth,
-/// and `release.yml` refuses to publish unless the pushed tag equals it,
-/// which is what makes the comparison below sound (ADR-0012).
+/// The installed build's version — its train's Cargo.toml is the single
+/// source of truth (`src-tauri/Cargo.toml` for `win-v*`,
+/// `src-tauri/mac/Cargo.toml` for `mac-v*`), and `release.yml` refuses to
+/// publish unless the pushed namespaced tag equals it, which is what makes
+/// the comparison below sound (ADR-0012 as amended 2026-09-16).
 pub fn current_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
+}
+
+/// This build's train prefix — [`UPDATE_TAG_PREFIX`], exposed for the feed
+/// filter and its tests.
+pub fn update_train() -> &'static str {
+    UPDATE_TAG_PREFIX
 }
 
 /// A newer release worth telling the UI about: the display version (tag
@@ -118,7 +157,9 @@ struct AssetJson {
 
 /// Parses one `/releases/latest` JSON payload into [`ParsedRelease`].
 /// `None` for anything malformed — an unreadable payload reads as "no
-/// update", never as an error (the silent-failure contract).
+/// update", never as an error (the silent-failure contract). Single-release
+/// unit seam for the table tests (production consumes the list path).
+#[allow(dead_code)]
 pub fn parse_release(payload: &str) -> Option<ParsedRelease> {
     let json: ReleaseJson = serde_json::from_str(payload).ok()?;
     let assets = json
@@ -138,11 +179,46 @@ pub fn parse_release(payload: &str) -> Option<ParsedRelease> {
     })
 }
 
-/// Parses a release tag into its `X.Y.Z` triple after stripping the `v`.
-/// Prerelease-suffixed tags (`v0.5.0-rc.1`) and anything else unparseable
+/// Parses one `/releases` list payload (a JSON array of release objects)
+/// into its releases, skipping array entries that do not parse. `None` for
+/// anything malformed at the top level — an unreadable payload reads as "no
+/// update", never as an error (the silent-failure contract).
+pub fn parse_releases(payload: &str) -> Option<Vec<ParsedRelease>> {
+    let json: Vec<ReleaseJson> = serde_json::from_str(payload).ok()?;
+    let releases = json
+        .into_iter()
+        .filter_map(|entry| {
+            let assets = entry
+                .assets
+                .into_iter()
+                .filter_map(|a| match (a.name, a.browser_download_url) {
+                    (Some(name), Some(url)) if !name.is_empty() && !url.is_empty() => {
+                        Some(ReleaseAsset { name, url })
+                    }
+                    _ => None,
+                })
+                .collect();
+            Some(ParsedRelease {
+                tag: entry.tag_name.unwrap_or_default(),
+                notes: entry.body.unwrap_or_default(),
+                assets,
+            })
+        })
+        .collect();
+    Some(releases)
+}
+
+/// Parses a release tag into its `X.Y.Z` triple after stripping the train
+/// prefix (`win-v` / `mac-v`) or the retired bare `v`.
+/// Prerelease-suffixed tags (`win-v0.5.0-rc.1`) and anything else unparseable
 /// are rejected — a tag we cannot read cleanly must never read as "newer".
 fn parse_semver(tag: &str) -> Option<(u64, u64, u64)> {
-    let core = tag.trim().strip_prefix('v').unwrap_or(tag.trim());
+    let trimmed = tag.trim();
+    let core = trimmed
+        .strip_prefix(WIN_TAG_PREFIX)
+        .or_else(|| trimmed.strip_prefix(MAC_TAG_PREFIX))
+        .or_else(|| trimmed.strip_prefix('v'))
+        .unwrap_or(trimmed);
     if core.is_empty() || core.contains('-') || core.contains('+') {
         return None;
     }
@@ -157,7 +233,10 @@ fn parse_semver(tag: &str) -> Option<(u64, u64, u64)> {
 }
 
 /// Whether `candidate_tag` is strictly newer than `current_version` —
-/// semver-triple comparison over tags with their optional `v` stripped.
+/// semver-triple comparison over tags with their train prefix (or retired
+/// bare `v`) stripped. Semver unit seam for the table tests; the list
+/// decision compares triples directly.
+#[allow(dead_code)]
 fn is_newer(candidate_tag: &str, current_version: &str) -> bool {
     match (
         parse_semver(candidate_tag),
@@ -168,33 +247,143 @@ fn is_newer(candidate_tag: &str, current_version: &str) -> bool {
     }
 }
 
-/// Whether `name` is the installer asset pattern release CI publishes
-/// (`Sprout_*_x64-setup.exe`).
+/// Whether `tag` belongs to the `train_prefix` train (`win-v` / `mac-v`).
+/// Bare `v*` tags belong to neither — both updaters ignore them.
+fn is_train_tag(tag: &str, train_prefix: &str) -> bool {
+    tag.trim().starts_with(train_prefix)
+}
+
+/// Whether `name` is the Windows installer asset pattern release CI
+/// publishes (`Sprout_*_x64-setup.exe`).
 fn is_setup_asset_name(name: &str) -> bool {
     name.starts_with(SETUP_ASSET_PREFIX) && name.ends_with(SETUP_ASSET_SUFFIX)
 }
 
-/// Picks the installer asset among a release's assets: the first whose name
-/// matches the pattern. `None` when the release has no usable installer —
-/// which also reads as "no update".
-fn pick_setup_asset<'a>(assets: &'a [ReleaseAsset]) -> Option<&'a ReleaseAsset> {
-    assets.iter().find(|a| is_setup_asset_name(&a.name))
+/// Whether `name` is the Mac installer asset pattern release CI publishes
+/// (`Sprout_*.dmg`). The `.sig` sidecar (`*.dmg.sig`) never matches — it is
+/// fetched as `<url>.sig` after the pick.
+fn is_mac_asset_name(name: &str) -> bool {
+    name.starts_with(MAC_ASSET_PREFIX) && name.ends_with(MAC_ASSET_SUFFIX)
 }
 
-/// The full update decision over raw API JSON: parse, compare against the
-/// running version, pick the installer asset. `Some` only for a genuinely
-/// newer release with a downloadable Sprout installer; every other outcome
-/// is `None` ("up to date").
-pub fn evaluate(payload: &str, current_version: &str) -> Option<AvailableUpdate> {
-    let release = parse_release(payload)?;
-    if !is_newer(&release.tag, current_version) {
-        return None;
+/// Whether `name` is this build's installer asset pattern.
+fn is_update_asset_name(name: &str) -> bool {
+    is_train_asset_name(name, update_train())
+}
+
+/// Whether `name` matches the `train_prefix` train's asset pattern.
+/// Table-test seam for the cross-platform rule: each train ignores the
+/// other's assets regardless of which OS the test host runs.
+fn is_train_asset_name(name: &str, train_prefix: &str) -> bool {
+    if train_prefix == MAC_TAG_PREFIX {
+        is_mac_asset_name(name)
+    } else {
+        is_setup_asset_name(name)
     }
-    let asset = pick_setup_asset(&release.assets)?;
-    Some(AvailableUpdate {
-        version: release.tag.trim().strip_prefix('v').unwrap_or(release.tag.trim()).to_string(),
-        url: asset.url.clone(),
-    })
+}
+
+/// Picks the installer asset among a release's assets for the
+/// `train_prefix` train: the first whose name matches the pattern. `None`
+/// when the release has no usable installer — which also reads as "no
+/// update".
+fn pick_train_asset<'a>(
+    assets: &'a [ReleaseAsset],
+    train_prefix: &str,
+) -> Option<&'a ReleaseAsset> {
+    assets
+        .iter()
+        .find(|a| is_train_asset_name(&a.name, train_prefix))
+}
+
+/// Picks the installer asset among a release's assets: the first whose name
+/// matches this build's pattern. `None` when the release has no usable
+/// installer — which also reads as "no update".
+#[allow(dead_code)]
+fn pick_setup_asset<'a>(assets: &'a [ReleaseAsset]) -> Option<&'a ReleaseAsset> {
+    pick_train_asset(assets, update_train())
+}
+
+/// Strips the `train_prefix` train prefix (falling back to the retired bare
+/// `v`) for display versions.
+fn strip_train_prefix<'a>(tag: &'a str, train_prefix: &str) -> &'a str {
+    let trimmed = tag.trim();
+    trimmed
+        .strip_prefix(train_prefix)
+        .or_else(|| trimmed.strip_prefix('v'))
+        .unwrap_or(trimmed)
+}
+
+/// The full update decision over one raw single-release API JSON payload for
+/// the `train_prefix` train: parse, require the train's tag, compare against
+/// the running version, pick the train's installer asset. `Some` only for a
+/// genuinely newer same-train release with a downloadable installer; every
+/// other outcome is `None` ("up to date"). Single-release unit seam for the
+/// table tests (production consumes the list path); covers both trains on
+/// any host, production calls it with [`UPDATE_TAG_PREFIX`] via [`evaluate`].
+#[allow(dead_code)]
+pub fn evaluate_in_train(
+    payload: &str,
+    current_version: &str,
+    train_prefix: &str,
+) -> Option<AvailableUpdate> {
+    let release = parse_release(payload)?;
+    select_update_in_train(std::slice::from_ref(&release), current_version, train_prefix)
+}
+
+/// The full update decision over raw single-release API JSON: parse, require
+/// this build's train tag, compare against the running version, pick the
+/// installer asset. `Some` only for a genuinely newer same-train release
+/// with a downloadable Sprout installer; every other outcome is `None`
+/// ("up to date"). Single-release unit seam (see [`evaluate_in_train`]).
+#[allow(dead_code)]
+pub fn evaluate(payload: &str, current_version: &str) -> Option<AvailableUpdate> {
+    evaluate_in_train(payload, current_version, update_train())
+}
+
+/// The update decision over a parsed release list for the `train_prefix`
+/// train: keep same-train releases newer than `current_version` with a usable
+/// installer asset, offer the highest version. Cross-train tags, bare `v*`
+/// tags, and releases without a usable asset never surface.
+pub fn select_update_in_train(
+    releases: &[ParsedRelease],
+    current_version: &str,
+    train_prefix: &str,
+) -> Option<AvailableUpdate> {
+    let current = parse_semver(current_version)?;
+    releases
+        .iter()
+        .filter(|release| is_train_tag(&release.tag, train_prefix))
+        .filter_map(|release| {
+            let candidate = parse_semver(&release.tag)?;
+            if candidate <= current {
+                return None;
+            }
+            let asset = pick_train_asset(&release.assets, train_prefix)?;
+            Some((candidate, release, asset))
+        })
+        .max_by(|left, right| left.0.cmp(&right.0))
+        .map(|(_, release, asset)| AvailableUpdate {
+            version: strip_train_prefix(&release.tag, train_prefix).to_string(),
+            url: asset.url.clone(),
+        })
+}
+
+/// The update decision over a raw `/releases` list payload for the
+/// `train_prefix` train. `None` for malformed payloads and for lists with no
+/// newer same-train release carrying a usable installer.
+pub fn evaluate_list_in_train(
+    payload: &str,
+    current_version: &str,
+    train_prefix: &str,
+) -> Option<AvailableUpdate> {
+    let releases = parse_releases(payload)?;
+    select_update_in_train(&releases, current_version, train_prefix)
+}
+
+/// The update decision over a raw `/releases` list payload for this build's
+/// train.
+pub fn evaluate_list(payload: &str, current_version: &str) -> Option<AvailableUpdate> {
+    evaluate_list_in_train(payload, current_version, update_train())
 }
 
 // ---------------------------------------------------------------------------
@@ -216,9 +405,11 @@ fn download_agent() -> ureq::Agent {
 /// One update check under the silent-failure contract: any transport error,
 /// non-success status, or unreadable payload yields `None` —
 /// indistinguishable from up-to-date, never an error surface (ADR-0012).
+/// Lists recent releases and offers only this build's train: the other
+/// train's tags and bare `v*` tags never surface, no matter how new.
 pub fn check_for_update_silent() -> Option<AvailableUpdate> {
     let response = check_agent()
-        .get(RELEASES_LATEST_URL)
+        .get(RELEASES_LIST_URL)
         .set("User-Agent", USER_AGENT)
         .set("Accept", "application/vnd.github+json")
         .call();
@@ -228,7 +419,7 @@ pub fn check_for_update_silent() -> Option<AvailableUpdate> {
         // land here together.
         Err(_) => return None,
     };
-    evaluate(&payload, current_version())
+    evaluate_list(&payload, current_version())
 }
 
 /// The once-per-launch background check: runs off the setup path and emits
@@ -346,7 +537,7 @@ fn verify_installer_signature(
 /// for this action explicitly.
 pub fn apply_update(app: &AppHandle, url: &str) -> Result<(), String> {
     let name = url.rsplit('/').next().unwrap_or("");
-    if !is_setup_asset_name(name) {
+    if !is_update_asset_name(name) {
         return Err("That download is not a Sprout installer — refusing to run it.".into());
     }
     let target = std::env::temp_dir().join(name);
@@ -372,8 +563,10 @@ pub fn apply_update(app: &AppHandle, url: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    /// A recorded `/releases/latest` response for v0.5.0 carrying the setup
-    /// exe plus an unrelated asset, in GitHub's field order and shape.
+    /// A recorded pre-dual-train `/releases/latest` response for v0.5.0
+    /// carrying the setup exe plus an unrelated asset, in GitHub's field
+    /// order and shape. Bare `v*` tags are retired in 207 — kept as the
+    /// "other/bare tags are ignored" control.
     const RELEASE_V050: &str =
         include_str!("update/fixtures/release-v050.json");
     /// A prerelease-tagged response — `/releases/latest` never returns one,
@@ -386,7 +579,7 @@ mod tests {
     const RELEASE_V042_NULL_BODY: &str =
         include_str!("update/fixtures/release-v042-null-body.json");
 
-    // -- strip-v semver comparison --------------------------------------
+    // -- train-prefixed semver comparison ---------------------------------
 
     #[test]
     fn strictly_newer_tags_are_newer() {
@@ -394,6 +587,11 @@ mod tests {
         assert!(is_newer("0.5.0", "0.4.9"));
         assert!(is_newer("v1.0.0", "0.99.99"));
         assert!(is_newer("0.4.2", "0.4.1"));
+        // Namespaced trains strip their prefix before comparing.
+        assert!(is_newer("win-v1.0.5", "1.0.4"));
+        assert!(is_newer("mac-v0.2.0", "0.1.0"));
+        assert!(is_newer("win-v1.0.5", "win-v1.0.4"));
+        assert!(is_newer("mac-v0.1.1", "mac-v0.1.0"));
     }
 
     #[test]
@@ -402,6 +600,9 @@ mod tests {
         assert!(!is_newer("0.5.0", "v0.5.0"));
         assert!(!is_newer("v0.3.9", "0.4.1"));
         assert!(!is_newer("v0.4.0", "0.4.1"));
+        assert!(!is_newer("win-v1.0.4", "1.0.4"));
+        assert!(!is_newer("mac-v0.1.0", "0.1.0"));
+        assert!(!is_newer("win-v1.0.3", "1.0.4"));
     }
 
     #[test]
@@ -417,6 +618,9 @@ mod tests {
         assert!(!is_newer("v0.5", "0.4.1"));
         assert!(!is_newer("v0.5.0.1", "0.4.1"));
         assert!(!is_newer("vx.y.z", "0.4.1"));
+        assert!(!is_newer("win-v1.0", "1.0.4"));
+        assert!(!is_newer("mac-v0.1.0.1", "0.1.0"));
+        assert!(!is_newer("win-vx.y.z", "1.0.4"));
     }
 
     #[test]
@@ -425,6 +629,8 @@ mod tests {
         assert!(!is_newer("v0.6.0-rc.1", "0.4.1"));
         assert!(!is_newer("0.6.0-beta", "0.4.1"));
         assert!(!is_newer("v0.5.0-rc.1+build.7", "0.4.1"));
+        assert!(!is_newer("win-v1.0.6-rc.1", "1.0.4"));
+        assert!(!is_newer("mac-v0.2.0-beta", "0.1.0"));
     }
 
     // -- release-JSON parsing -------------------------------------------
@@ -515,50 +721,213 @@ mod tests {
         assert!(!is_setup_asset_name("Sprout_0.5.0_x86-setup.exe"));
         assert!(!is_setup_asset_name("Sprout_0.5.0_x64-setup.exe.bak"));
         assert!(!is_setup_asset_name("MyApp_0.5.0_x64-setup.exe"));
+        // The Windows matcher never claims Mac assets and vice versa.
+        assert!(!is_setup_asset_name("Sprout_0.1.0_aarch64.dmg"));
+        assert!(!is_mac_asset_name("Sprout_0.5.0_x64-setup.exe"));
+    }
+
+    #[test]
+    fn mac_asset_pattern_matches_dmgs_only() {
+        assert!(is_mac_asset_name("Sprout_0.1.0_aarch64.dmg"));
+        assert!(is_mac_asset_name("Sprout_0.2.0_x86_64.dmg"));
+        assert!(!is_mac_asset_name("Sprout_0.1.0_aarch64.dmg.sig"));
+        assert!(!is_mac_asset_name("sprout_0.1.0_aarch64.dmg"));
+        assert!(!is_mac_asset_name("MyApp_0.1.0_aarch64.dmg"));
+        assert!(!is_mac_asset_name("Sprout_0.1.0_aarch64.zip"));
+    }
+
+    #[test]
+    fn train_asset_routing_ignores_the_other_platform() {
+        assert!(is_train_asset_name("Sprout_1.0.5_x64-setup.exe", WIN_TAG_PREFIX));
+        assert!(!is_train_asset_name("Sprout_0.1.0_aarch64.dmg", WIN_TAG_PREFIX));
+        assert!(is_train_asset_name("Sprout_0.1.0_aarch64.dmg", MAC_TAG_PREFIX));
+        assert!(!is_train_asset_name("Sprout_1.0.5_x64-setup.exe", MAC_TAG_PREFIX));
     }
 
     // -- the full decision ------------------------------------------------
 
-    #[test]
-    fn recorded_fixture_reads_as_an_update_for_an_older_build() {
-        // Pinned to a fixed older build so the fixture keeps working after
-        // v0.5.0 actually becomes the running version.
-        let update = evaluate(RELEASE_V050, "0.4.1").expect("update available");
-        assert_eq!(update.version, "0.5.0");
-        assert_eq!(update.url, "https://github.com/ollygup/Sprout/releases/download/v0.5.0/Sprout_0.5.0_x64-setup.exe");
+    /// One single-release payload for the Windows train.
+    fn win_release(tag: &str, asset: &str) -> String {
+        format!(
+            r#"{{"tag_name": "{tag}", "body": "", "assets": [{{"name": "{asset}", "browser_download_url": "https://example.com/{asset}"}}]}}"#
+        )
+    }
+
+    /// One single-release payload for the Mac train.
+    fn mac_release(tag: &str, asset: &str) -> String {
+        format!(
+            r#"{{"tag_name": "{tag}", "body": "", "assets": [{{"name": "{asset}", "browser_download_url": "https://example.com/{asset}"}}]}}"#
+        )
     }
 
     #[test]
-    fn null_body_release_reads_as_an_update_for_an_older_build() {
-        let update = evaluate(RELEASE_V042_NULL_BODY, "0.4.1").expect("update available");
-        assert_eq!(update.version, "0.4.2");
-        assert_eq!(
-            update.url,
-            "https://github.com/ollygup/Sprout/releases/download/v0.4.2/Sprout_0.4.2_x64-setup.exe"
-        );
+    fn win_train_release_reads_as_an_update_for_an_older_build() {
+        let payload = win_release("win-v1.0.5", "Sprout_1.0.5_x64-setup.exe");
+        let update =
+            evaluate_in_train(&payload, "1.0.4", WIN_TAG_PREFIX).expect("update available");
+        assert_eq!(update.version, "1.0.5");
+        assert_eq!(update.url, "https://example.com/Sprout_1.0.5_x64-setup.exe");
+    }
+
+    #[test]
+    fn mac_train_release_reads_as_an_update_for_an_older_build() {
+        let payload = mac_release("mac-v0.1.1", "Sprout_0.1.1_aarch64.dmg");
+        let update =
+            evaluate_in_train(&payload, "0.1.0", MAC_TAG_PREFIX).expect("update available");
+        assert_eq!(update.version, "0.1.1");
+        assert_eq!(update.url, "https://example.com/Sprout_0.1.1_aarch64.dmg");
+    }
+
+    #[test]
+    fn retired_bare_tags_are_ignored_by_both_trains() {
+        // The pre-dual-train fixtures carry bare `v*` tags: retired in 207,
+        // they must never surface as updates on either train.
+        assert!(evaluate_in_train(RELEASE_V050, "0.4.1", WIN_TAG_PREFIX).is_none());
+        assert!(evaluate_in_train(RELEASE_V050, "0.4.1", MAC_TAG_PREFIX).is_none());
+        assert!(evaluate_in_train(RELEASE_V042_NULL_BODY, "0.4.1", WIN_TAG_PREFIX).is_none());
+        assert!(evaluate_in_train(RELEASE_V042_NULL_BODY, "0.4.1", MAC_TAG_PREFIX).is_none());
+        // Production entry point follows this build's train — bare tags read
+        // as up to date there too.
+        assert!(evaluate(RELEASE_V050, "0.4.1").is_none());
+    }
+
+    #[test]
+    fn each_train_ignores_the_other_trains_tags() {
+        let win_payload = win_release("win-v9.0.0", "Sprout_9.0.0_x64-setup.exe");
+        let mac_payload = mac_release("mac-v9.0.0", "Sprout_9.0.0_aarch64.dmg");
+        assert!(evaluate_in_train(&win_payload, "0.1.0", MAC_TAG_PREFIX).is_none());
+        assert!(evaluate_in_train(&mac_payload, "1.0.4", WIN_TAG_PREFIX).is_none());
+        // Even a much larger version on the wrong train never wins.
+        assert!(evaluate_in_train(&mac_payload, "0.0.1", WIN_TAG_PREFIX).is_none());
+    }
+
+    #[test]
+    fn each_train_ignores_the_other_trains_assets() {
+        // Right tag, wrong asset: a dmg riding a win-v release (and vice
+        // versa) is not a usable installer for that train.
+        let win_tag_mac_asset = win_release("win-v1.0.5", "Sprout_1.0.5_aarch64.dmg");
+        let mac_tag_win_asset = mac_release("mac-v0.1.1", "Sprout_0.1.1_x64-setup.exe");
+        assert!(evaluate_in_train(&win_tag_mac_asset, "1.0.4", WIN_TAG_PREFIX).is_none());
+        assert!(evaluate_in_train(&mac_tag_win_asset, "0.1.0", MAC_TAG_PREFIX).is_none());
     }
 
     #[test]
     fn same_version_and_prerelease_fixtures_read_as_up_to_date() {
-        // The fixture's v0.4.1 matches this working copy's Cargo.toml while
-        // the round is in flight; equal versions are not updates.
-        assert!(evaluate(RELEASE_V050, "0.5.0").is_none());
-        assert!(evaluate(RELEASE_V050, "0.6.0").is_none());
+        // Equal versions are not updates, on either train.
+        let win_same = win_release("win-v1.0.4", "Sprout_1.0.4_x64-setup.exe");
+        assert!(evaluate_in_train(&win_same, "1.0.4", WIN_TAG_PREFIX).is_none());
+        let win_older = win_release("win-v1.0.5", "Sprout_1.0.5_x64-setup.exe");
+        assert!(evaluate_in_train(&win_older, "1.0.6", WIN_TAG_PREFIX).is_none());
         // Prerelease-looking tag: ignored even though 0.6 > 0.4.
         assert!(evaluate(RELEASE_V060_RC1, "0.4.1").is_none());
+        let win_rc = win_release("win-v1.0.6-rc.1", "Sprout_1.0.6-rc.1_x64-setup.exe");
+        assert!(evaluate_in_train(&win_rc, "1.0.4", WIN_TAG_PREFIX).is_none());
     }
 
     #[test]
     fn a_release_without_a_usable_installer_is_not_an_update() {
         let payload = r#"{
-            "tag_name": "v9.0.0",
+            "tag_name": "win-v9.0.0",
             "body": "",
             "assets": [
                 {"name": "latest.json",
                  "browser_download_url": "https://example.com/latest.json"}
             ]
         }"#;
-        assert!(evaluate(payload, "0.4.1").is_none());
+        assert!(evaluate_in_train(payload, "1.0.4", WIN_TAG_PREFIX).is_none());
+        assert!(evaluate(payload, "1.0.4").is_none());
+    }
+
+    // -- release-list feed filter (dual trains, no network) ---------------
+
+    /// One `/releases` list entry.
+    fn list_entry(tag: &str, asset: &str) -> String {
+        format!(
+            r#"{{"tag_name": "{tag}", "body": "", "assets": [{{"name": "{asset}", "browser_download_url": "https://example.com/{asset}"}}]}}"#
+        )
+    }
+
+    #[test]
+    fn release_lists_parse_into_releases() {
+        let payload = format!(
+            "[{}, {}]",
+            list_entry("win-v1.0.5", "Sprout_1.0.5_x64-setup.exe"),
+            list_entry("mac-v0.1.1", "Sprout_0.1.1_aarch64.dmg"),
+        );
+        let releases = parse_releases(&payload).expect("list parses");
+        assert_eq!(releases.len(), 2);
+        assert_eq!(releases[0].tag, "win-v1.0.5");
+        assert_eq!(releases[1].tag, "mac-v0.1.1");
+    }
+
+    #[test]
+    fn malformed_list_payloads_yield_none() {
+        assert!(parse_releases("").is_none());
+        assert!(parse_releases("<html>rate limited</html>").is_none());
+        assert!(parse_releases(r#"{"tag_name": "win-v1.0.5"}"#).is_none());
+        assert!(evaluate_list("not json", "1.0.4").is_none());
+        assert!(evaluate_list("[]", "1.0.4").is_none());
+    }
+
+    #[test]
+    fn list_picks_the_newest_same_train_release() {
+        // Newest-first (GitHub order) with both trains interleaved plus a
+        // retired bare tag: Windows must land on win-v1.0.6, Mac on
+        // mac-v0.1.1, and neither may surface the other's newer release.
+        let payload = format!(
+            "[{}, {}, {}, {}, {}]",
+            list_entry("mac-v0.2.0", "Sprout_0.2.0_aarch64.dmg"),
+            list_entry("win-v1.0.6", "Sprout_1.0.6_x64-setup.exe"),
+            list_entry("v9.9.9", "Sprout_9.9.9_x64-setup.exe"),
+            list_entry("win-v1.0.5", "Sprout_1.0.5_x64-setup.exe"),
+            list_entry("mac-v0.1.1", "Sprout_0.1.1_aarch64.dmg"),
+        );
+        let win = evaluate_list_in_train(&payload, "1.0.4", WIN_TAG_PREFIX)
+            .expect("win update available");
+        assert_eq!(win.version, "1.0.6");
+        let mac = evaluate_list_in_train(&payload, "0.1.0", MAC_TAG_PREFIX)
+            .expect("mac update available");
+        assert_eq!(mac.version, "0.2.0");
+    }
+
+    #[test]
+    fn list_ignores_newer_other_train_releases() {
+        // The other train is far ahead, this train has nothing new: up to
+        // date, not a cross-train "update".
+        let payload = format!(
+            "[{}]",
+            list_entry("mac-v9.0.0", "Sprout_9.0.0_aarch64.dmg"),
+        );
+        assert!(evaluate_list_in_train(&payload, "1.0.4", WIN_TAG_PREFIX).is_none());
+        let payload = format!(
+            "[{}]",
+            list_entry("win-v9.0.0", "Sprout_9.0.0_x64-setup.exe"),
+        );
+        assert!(evaluate_list_in_train(&payload, "0.1.0", MAC_TAG_PREFIX).is_none());
+    }
+
+    #[test]
+    fn list_skips_same_train_releases_without_a_usable_asset() {
+        // win-v1.0.7 carries no installer; the older win-v1.0.6 with one
+        // still surfaces.
+        let payload = format!(
+            "[{}, {}]",
+            r#"{"tag_name": "win-v1.0.7", "body": "", "assets": [{"name": "notes.txt", "browser_download_url": "https://example.com/notes.txt"}]}"#,
+            list_entry("win-v1.0.6", "Sprout_1.0.6_x64-setup.exe"),
+        );
+        let update = evaluate_list_in_train(&payload, "1.0.4", WIN_TAG_PREFIX)
+            .expect("falls back to the older usable release");
+        assert_eq!(update.version, "1.0.6");
+    }
+
+    #[test]
+    fn list_with_no_usable_same_train_release_is_not_an_update() {
+        let payload = format!(
+            "[{}, {}]",
+            list_entry("mac-v0.1.1", "Sprout_0.1.1_aarch64.dmg"),
+            r#"{"tag_name": "v9.0.0", "body": "", "assets": [{"name": "Sprout_9.0.0_x64-setup.exe", "browser_download_url": "https://example.com/a.exe"}]}"#,
+        );
+        assert!(evaluate_list_in_train(&payload, "1.0.4", WIN_TAG_PREFIX).is_none());
     }
 
     // -- signature verification -------------------------------------------

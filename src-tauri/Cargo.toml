@@ -12,6 +12,13 @@ edition = "2021"
 name = "sprout_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# Dual-train versions (spec 206, ticket 207): this package owns the Windows
+# `win-v*` line; `mac/` owns the Mac `mac-v*` `0.x` line. Either bumps without
+# touching the other. Release tags `win-vA.B.C` must equal this version.
+[workspace]
+members = ["mac"]
+default-members = [".", "mac"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

@@ -1,0 +1,15 @@
+[package]
+name = "sprout-mac-desktop"
+# Mac train version (spec 206, ticket 207). Independent line from the Windows
+# package in `src-tauri/Cargo.toml`: bump this without touching the Windows
+# version for Mac-only fixes, and vice versa. Release tags `mac-vX.Y.Z` must
+# equal this version. Bundle wiring (tauri targets, frontend flag) lands in
+# tickets 215/218 — this crate owns the version line and the train contract.
+version = "0.1.0"
+description = "Sprout Mac Quick-access desktop app (Quick Launch, Quick Actions, Clips, Companion + dock only)"
+authors = ["Sprout contributors"]
+edition = "2021"
+
+[lib]
+name = "sprout_mac"
+crate-type = ["staticlib", "cdylib", "rlib"]
