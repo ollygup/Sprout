@@ -177,6 +177,68 @@ pub const MAIN_WINDOW_HEIGHT: f64 = 800.0;
 pub const MAIN_WINDOW_MIN_WIDTH: f64 = 900.0;
 pub const MAIN_WINDOW_MIN_HEIGHT: f64 = 620.0;
 
+/// The clip viewer's preferred inner size: the default is the
+/// smaller of this and 80% of the invoking monitor's work area.
+pub const CLIP_VIEWER_DEFAULT_WIDTH: u32 = 960;
+pub const CLIP_VIEWER_DEFAULT_HEIGHT: u32 = 720;
+
+/// The clip viewer's minimum inner size: a remembered size never
+/// collapses below this unless the work area itself is smaller.
+pub const CLIP_VIEWER_MIN_WIDTH: u32 = 480;
+pub const CLIP_VIEWER_MIN_HEIGHT: u32 = 360;
+
+/// The share of the work area the clip viewer's default size may take.
+pub const CLIP_VIEWER_WORK_AREA_PCT: u32 = 80;
+
+/// The clip viewer's default size in physical pixels for a monitor work area
+/// `work_width_px` × `work_height_px`: `min(960×720, 80% of the work area)`,
+/// floored at 480×360 — unless the work area is smaller than that floor, which
+/// always wins so the window still fits on screen. Pure — the single default
+/// derivation the viewer's open path uses. A degenerate work area falls back
+/// to the preferred size.
+pub fn clip_viewer_default_size(work_width_px: i32, work_height_px: i32) -> (u32, u32) {
+    if work_width_px <= 0 || work_height_px <= 0 {
+        return (CLIP_VIEWER_DEFAULT_WIDTH, CLIP_VIEWER_DEFAULT_HEIGHT);
+    }
+    let share = |work: i32| -> u32 {
+        ((work as u64 * CLIP_VIEWER_WORK_AREA_PCT as u64) / 100) as u32
+    };
+    let fit = |work: i32, preferred: u32, minimum: u32| -> u32 {
+        share(work)
+            .min(preferred)
+            .max(minimum)
+            .min(work as u32)
+    };
+    (
+        fit(work_width_px, CLIP_VIEWER_DEFAULT_WIDTH, CLIP_VIEWER_MIN_WIDTH),
+        fit(work_height_px, CLIP_VIEWER_DEFAULT_HEIGHT, CLIP_VIEWER_MIN_HEIGHT),
+    )
+}
+
+/// Clamps a remembered clip-viewer size into the current work area: never
+/// below 480×360 and never larger than the work area, with the
+/// work area winning when it is itself smaller than the floor. A broken
+/// (zero, negative) stored pair falls back to the default derivation. Pure.
+pub fn clip_viewer_clamp_size(
+    width: i64,
+    height: i64,
+    work_width_px: i32,
+    work_height_px: i32,
+) -> (u32, u32) {
+    if width <= 0 || height <= 0 || work_width_px <= 0 || work_height_px <= 0 {
+        return clip_viewer_default_size(work_width_px, work_height_px);
+    }
+    let clamp = |value: i64, work: i32, minimum: u32| -> u32 {
+        (value.min(work as i64).max(0) as u32)
+            .max(minimum)
+            .min(work as u32)
+    };
+    (
+        clamp(width, work_width_px, CLIP_VIEWER_MIN_WIDTH),
+        clamp(height, work_height_px, CLIP_VIEWER_MIN_HEIGHT),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,5 +323,43 @@ mod tests {
         assert_eq!(bezel_tab_y_px(0, 1080, 130, f64::NAN), 475);
         // A tab taller than the monitor parks at the top instead of underflowing.
         assert_eq!(bezel_tab_y_px(0, 100, 160, 0.5), 0);
+    }
+
+    #[test]
+    fn clip_viewer_default_is_smaller_of_preferred_and_80pct() {
+        // A roomy work area keeps the preferred 960×720.
+        assert_eq!(clip_viewer_default_size(1920, 1040), (960, 720));
+        assert_eq!(clip_viewer_default_size(2560, 1400), (960, 720));
+        assert_eq!(clip_viewer_default_size(5120, 2160), (960, 720));
+        // A smaller work area takes 80% of each axis.
+        assert_eq!(clip_viewer_default_size(1024, 768), (819, 614));
+        assert_eq!(clip_viewer_default_size(1280, 960), (960, 720));
+        assert_eq!(clip_viewer_default_size(1600, 900), (960, 720));
+    }
+
+    #[test]
+    fn clip_viewer_default_respects_floor_and_tiny_work_areas() {
+        // The 480×360 floor wins over 80% of a small work area…
+        assert_eq!(clip_viewer_default_size(600, 400), (480, 360));
+        // …but the work area itself wins when it is smaller than the floor.
+        assert_eq!(clip_viewer_default_size(400, 300), (400, 300));
+        // A degenerate probe falls back to the preferred size, never zero.
+        assert_eq!(clip_viewer_default_size(0, 0), (960, 720));
+        assert_eq!(clip_viewer_default_size(-10, 800), (960, 720));
+    }
+
+    #[test]
+    fn clip_viewer_remembered_size_clamps_to_floor_and_work_area() {
+        // A size that fits is kept exactly.
+        assert_eq!(clip_viewer_clamp_size(1200, 900, 1920, 1040), (1200, 900));
+        // Below the floor grows to 480×360.
+        assert_eq!(clip_viewer_clamp_size(200, 100, 1920, 1040), (480, 360));
+        // Larger than the work area shrinks to it.
+        assert_eq!(clip_viewer_clamp_size(4000, 3000, 1920, 1040), (1920, 1040));
+        // A broken stored pair reads as the default.
+        assert_eq!(clip_viewer_clamp_size(0, 0, 1920, 1040), (960, 720));
+        assert_eq!(clip_viewer_clamp_size(-4, 900, 1920, 1040), (960, 720));
+        // The work area wins when it is smaller than the floor.
+        assert_eq!(clip_viewer_clamp_size(800, 600, 400, 300), (400, 300));
     }
 }

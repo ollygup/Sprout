@@ -13,6 +13,7 @@
     getSettings,
     listClips,
     moveClip,
+    openClipViewer,
     updateClip,
     updateClipImage,
   } from "$lib/api";
@@ -37,6 +38,7 @@
   import TextInput from "$lib/components/TextInput.svelte";
   import InfoTip from "$lib/components/InfoTip.svelte";
   import GroupNameDialog from "$lib/components/GroupNameDialog.svelte";
+  import GroupColorDialog from "$lib/components/GroupColorDialog.svelte";
   import GroupAccordion from "$lib/components/GroupAccordion.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import IconButton from "$lib/components/IconButton.svelte";
@@ -415,14 +417,45 @@
     return clips.filter((c) => c.group_id === clip.group_id);
   }
 
+  /** Opens the one clip viewer for an image Clip — the row's
+   *  right-click verb and its menu's first item. Only the id travels; the
+   *  viewer reads the Clip itself. */
+  function openViewer(clip: Clip) {
+    openClipViewer(clip.id, "main").catch((e) => {
+      console.error(e);
+      error = String(e);
+    });
+  }
+
+  /** Right-click on a row: an image Clip opens the viewer;
+   *  text Clips keep their existing behavior. The mouse button is the
+   *  discriminator — a right-click carries `button === 2`, while a
+   *  keyboard-triggered contextmenu (Shift+F10 / Menu key) has no button and
+   *  no cursor position, so it always opens the row menu and never the
+   *  viewer. (`detail` is 0 for both paths in Chromium, so it cannot tell
+   *  them apart.) */
+  function openRowContextMenu(e: MouseEvent, clip: Clip) {
+    if (e.button !== 2) {
+      const target = (e.target as Element | null)?.closest<HTMLElement>("button");
+      if (!target) return;
+      e.preventDefault();
+      openRowMenu(clip, target, true);
+      return;
+    }
+    if (!clip.image) return;
+    e.preventDefault();
+    openViewer(clip);
+  }
+
   /** One ⋯ menu per clip row, on the round's ordering standard (ticket
    *  106): Edit first (the row's primary verb), then the Move to group
    *  flyout while Groups is on, the dock visibility toggle, Move up /
    *  Move down over the visible slice, Remove danger-last behind a
-   *  separator. */
+   *  separator. "Open image" sits ahead of Edit for image Clips —
+   *  the menu is the keyboard path to the viewer. */
   function openRowMenu(
     clip: Clip,
-    anchor: HTMLButtonElement,
+    anchor: HTMLElement,
     viaKeyboard: boolean
   ) {
     if (menu?.clipId === clip.id) {
@@ -432,13 +465,19 @@
     const title = clipName(clip);
     const slice = moveSlice(clip);
     const index = slice.indexOf(clip);
-    const items: ContextMenuItem[] = [
-      {
-        label: t("common.edit"),
-        icon: "pencil",
-        onselect: () => (clip.image ? openImgEdit(clip) : openEdit(clip)),
-      },
-    ];
+    const items: ContextMenuItem[] = [];
+    if (clip.image) {
+      items.push({
+        label: t("menu.openImage"),
+        icon: "image",
+        onselect: () => openViewer(clip),
+      });
+    }
+    items.push({
+      label: t("common.edit"),
+      icon: "pencil",
+      onselect: () => (clip.image ? openImgEdit(clip) : openEdit(clip)),
+    });
     if (groups.enabled) {
       items.push({
         label: t("menu.moveToGroup"),
@@ -554,7 +593,7 @@
 
 {#snippet clipRow(clip: Clip)}
   {@const title = clipName(clip)}
-  <li class="rack__row">
+  <li class="rack__row" oncontextmenu={(e) => openRowContextMenu(e, clip)}>
     <button
       type="button"
       class="rack__main"
@@ -715,6 +754,7 @@
         controls={`clip-group-${section.group.id}`}
         name={section.group.name}
         count={countMembers(clips, section.group.id)}
+        color={section.group.color}
         onToggle={() => groups.collapse.toggle(section.group.id)}
       >
         {#snippet actions()}
@@ -793,6 +833,18 @@
   ondraft={(v) => (groups.nameDraft = v)}
   onsubmit={() => groups.submitName()}
   onclose={() => groups.cancelNaming()}
+/>
+
+<GroupColorDialog
+  group={groups.coloring}
+  draft={groups.colorDraft}
+  error={groups.colorError}
+  saving={groups.savingColor}
+  inputId="clip-group-color"
+  onpick={(color) => groups.applyColor(color)}
+  ondraft={(v) => (groups.colorDraft = v)}
+  onsubmit={() => groups.applyColor(groups.colorDraft)}
+  onclose={() => groups.cancelColor()}
 />
 
 <ClipFormDialog
@@ -980,9 +1032,21 @@
     gap: var(--space-2);
     padding: calc(var(--space-3) - 2px) var(--space-3)
       calc(var(--space-3) - 2px) var(--space-4);
-    background: var(--bg-card);
+    /* The card carries its group's tint; a neutral group publishes none, so a
+       neutral row falls back to the page surface (ticket 240). */
+    background: var(--group-row-bg, transparent);
     border: 1px solid var(--border);
     border-radius: var(--radius);
+    --row-text: var(--text-muted);
+    transition: background-color var(--dur-fast) var(--ease-out);
+  }
+
+  /* A colored group publishes its hover surface and hover text (ticket 240,
+     research 0028); neutral groups and ungrouped rows fall back to the
+     neutral tokens. */
+  .rack__row:hover {
+    background: var(--group-row-hover, var(--bg-hover));
+    --row-text: var(--group-row-hover-text, var(--text-muted));
   }
 
   .rack__main {
@@ -1044,7 +1108,7 @@
     white-space: nowrap;
     font-family: var(--font-mono);
     font-size: var(--text-xs);
-    color: var(--text-muted);
+    color: var(--row-text);
   }
 
   .rack__copied {

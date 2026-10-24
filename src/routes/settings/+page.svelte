@@ -2465,7 +2465,7 @@
       </article>
 
       {#if displays.length > 1 && knobVisible("per-monitor")}
-        <!-- Per-monitor: flat knobs per display (flattened to reuse .knob, 0005 rule 5). No nested card. Global defaults above stay fallback. -->
+        <!-- Per-monitor: flat knobs per display (flattened to reuse .knob, 0005 rule 5). No nested card. Global defaults above stay fallback. Each display row stacks vertically — the row layout squeezes the label, both selects, and two sliders past the column edge at narrow widths, so it reuses the same stack variant as the managed-list knobs instead of a second card pattern. -->
         <div class="per-monitor" aria-labelledby="per-monitor-title">
           <div class="per-monitor__header">
             <span class="knob__label" id="per-monitor-title">{t("settings.per-monitor.label")}</span>
@@ -2483,7 +2483,7 @@
             {@const perMode = displayModes[d.device_name] ?? dockMode}
             {@const widthPct = clampWidthPctForMode(displayWidths[d.device_name] ?? dockWidthPct, perMode)}
             {@const bezelYPct = Math.round(clampBezelYRatio(displayBezelY[d.device_name] ?? 0.5) * 100)}
-            <article class="knob" hidden={!knobVisible("per-monitor")}>
+            <article class="knob knob--stack" hidden={!knobVisible("per-monitor")}>
               <div class="knob__body">
                 <span class="knob__label">{d.label} · {d.resolution}</span>
                 {#if hasSeam}

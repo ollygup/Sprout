@@ -408,6 +408,8 @@ export interface Group {
   id: number;
   collection: GroupsCollection;
   name: string;
+  /** `#rrggbb` or null for neutral — decorative, local-only (ticket 225). */
+  color: string | null;
 }
 
 /** What a Launch entry starts: a picked app (shortcut or exe) or a command

@@ -622,6 +622,33 @@ export function copyClipImage(
   return invoke<void>("copy_clip_image", { id, rgbaBase64, width, height });
 }
 
+// ------------------- Clip viewer (ticket 226) ------------------------------
+
+/** Fetches one Clip by id for the viewer. `null` means it no longer exists —
+ *  the viewer's friendly empty state, never a blank window. */
+export function getClip(id: number): Promise<Clip | null> {
+  return invoke<Clip | null>("get_clip", { id });
+}
+
+/** Opens the single clip viewer for one image Clip, or retargets the viewer
+ *  already open. Only the id travels — never image bytes. `source` names the
+ *  invoking window ("main" or "quick-launch") so placement follows its
+ *  monitor; unknown values fall back to the main window. */
+export function openClipViewer(id: number, source: "main" | "quick-launch"): Promise<void> {
+  return invoke<void>("open_clip_viewer", { id, source });
+}
+
+/** Consumes the pending viewer request once (the create → mount race). */
+export function takeClipViewerRequest(): Promise<number | null> {
+  return invoke<number | null>("take_clip_viewer_request");
+}
+
+/** Closes the viewer: remembers its size and returns focus to the window that
+ *  invoked it. */
+export function closeClipViewer(): Promise<void> {
+  return invoke<void>("close_clip_viewer");
+}
+
 /** Renders one stored image as a same-document data URL for `<img>` —
  *  thumbnails and details decode nothing themselves. */
 export function clipImageUrl(image: ClipImage): string {
@@ -707,6 +734,11 @@ export function createGroup(
 
 export function renameGroup(id: number, name: string): Promise<void> {
   return invoke<void>("rename_group", { id, name });
+}
+
+/** Sets one group's decorative color (`#rrggbb`) or clears it with null. */
+export function setGroupColor(id: number, color: string | null): Promise<void> {
+  return invoke<void>("set_group_color", { id, color });
 }
 
 /** Deleting a group returns its members to ungrouped — never deletes them. */

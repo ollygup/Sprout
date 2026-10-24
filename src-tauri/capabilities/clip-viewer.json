@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "clip-viewer",
+  "description": "Capability for the clip viewer window",
+  "windows": ["clip-viewer"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-set-theme",
+    "core:event:default",
+    "core:event:allow-listen"
+  ]
+}

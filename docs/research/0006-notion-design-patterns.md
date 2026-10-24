@@ -38,6 +38,14 @@ widely-learned interface that solves the same problems.
   per-item icons and `Move to` as an organizational submenu whose flyout ends
   in create-and-place destinations.
 
+## Color
+
+Notion's colour behaviour (whole-block background, the ten-name palette with
+no hex or alpha, and the neutral outline on `Default`) is covered in
+[0028 — Colouring a collection](0028-collection-color-systems.md), together
+with how hover should behave inside a coloured section. This note stays about
+structure and disclosure; colour decisions and their sources live there.
+
 ## The patterns
 
 1. **Visibility on-surface, configuration elsewhere.** Controls that show/hide

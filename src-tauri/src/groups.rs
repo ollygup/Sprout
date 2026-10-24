@@ -68,17 +68,20 @@ impl Collection {
     }
 }
 
-/// A Group as stored: its collection namespace plus its name. Position is
-/// internal (order within the collection) and never part of the payload —
-/// reorders go through `move_group`.
+/// A Group as stored: its collection namespace, its name, and its optional
+/// decorative color. Position is internal (order within the collection) and
+/// never part of the payload — reorders go through `move_group`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Group {
     pub id: i64,
     pub collection: Collection,
     pub name: String,
+    /// `#rrggbb`, normalized lowercase, or `None` for neutral. Decorative
+    /// only: never identity, ordering, dissolve, or backup (ADR-0026).
+    pub color: Option<String>,
 }
 
-const SELECT_GROUP_SQL: &str = "SELECT id, collection, name FROM groups";
+const SELECT_GROUP_SQL: &str = "SELECT id, collection, name, color FROM groups";
 
 fn group_from_row(row: &rusqlite::Row) -> Result<Group> {
     let collection: String = row.get(1)?;
@@ -94,6 +97,7 @@ fn group_from_row(row: &rusqlite::Row) -> Result<Group> {
             )
         })?,
         name: row.get(2)?,
+        color: row.get(3)?,
     })
 }
 
@@ -118,12 +122,12 @@ fn get_group(conn: &Connection, id: i64) -> Result<Option<Group>> {
 /// [`get_group`] plus its internal position — delete/reorder need it.
 fn get_group_at(conn: &Connection, id: i64) -> Result<Option<(Group, i64)>> {
     conn.query_row(
-        "SELECT id, collection, name, position FROM groups WHERE id = ?1",
+        "SELECT id, collection, name, color, position FROM groups WHERE id = ?1",
         params![id],
         |row| {
             Ok((
                 group_from_row(row)?,
-                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
             ))
         },
     )
@@ -221,6 +225,44 @@ pub fn rename_group(conn: &Connection, id: i64, name: &str) -> std::result::Resu
     )
     .map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())
+}
+
+/// Accepts only a `#RRGGBB` value (no alpha, shorthand, or named/rgb/hsl
+/// forms) and normalizes it to lowercase. The UI palette is just a set of
+/// valid hex values, so adding a hue later needs no migration.
+pub fn validate_group_color(color: &str) -> std::result::Result<String, String> {
+    let trimmed = color.trim();
+    let is_hex = trimmed.len() == 7
+        && trimmed.starts_with('#')
+        && trimmed[1..].chars().all(|c| c.is_ascii_hexdigit());
+    if !is_hex {
+        return Err("Group color must be a #RRGGBB hex value, like #1a7f64.".into());
+    }
+    Ok(trimmed.to_ascii_lowercase())
+}
+
+/// Writes one group's decorative color; `None` returns it to neutral. The
+/// value never touches identity, order, membership, or dissolve — only the
+/// stored presentation field.
+pub fn set_group_color(
+    conn: &Connection,
+    id: i64,
+    color: Option<&str>,
+) -> std::result::Result<(), String> {
+    let normalized = match color {
+        Some(value) => Some(validate_group_color(value)?),
+        None => None,
+    };
+    let changed = conn
+        .execute(
+            "UPDATE groups SET color = ?1 WHERE id = ?2",
+            params![normalized, id],
+        )
+        .map_err(|e| e.to_string())?;
+    if changed == 0 {
+        return Err("This group no longer exists — refresh and try again.".into());
+    }
+    Ok(())
 }
 
 /// Dissolves every group across all three collections that no item belongs
@@ -624,7 +666,7 @@ mod tests {
 
     #[test]
     fn order_by_group_keeps_every_group_and_treats_unknown_refs_as_ungrouped() {
-        let g1 = Group { id: 7, collection: Collection::Launch, name: "Solo".into() };
+        let g1 = Group { id: 7, collection: Collection::Launch, name: "Solo".into(), color: None };
         // No items at all: the empty group is still handed back, user order trivially.
         let sections = order_by_group(Vec::<i32>::new(), vec![g1.clone()], |_| None);
         assert!(sections.ungrouped.is_empty());
@@ -756,5 +798,63 @@ mod tests {
             vec!["C keep"]
         );
         let _ = (drop_l, drop_a, drop_c);
+    }
+
+    #[test]
+    fn group_color_accepts_hex_normalizes_and_clears() {
+        let conn = conn();
+        let group = create_group(&conn, Collection::Action, "Colored").unwrap();
+        let item = quick_actions::create_quick_action(&conn, &action("Deploy")).unwrap();
+        assign_item(&conn, Collection::Action, item.id, group.id).unwrap();
+
+        set_group_color(&conn, group.id, Some("#AABBCC")).unwrap();
+        assert_eq!(
+            list_groups(&conn, Collection::Action).unwrap()[0].color.as_deref(),
+            Some("#aabbcc")
+        );
+
+        for invalid in ["#abc", "#aabbccdd", "aabbcc", "red", "rgb(1, 2, 3)", "#gggggg"] {
+            assert!(
+                set_group_color(&conn, group.id, Some(invalid)).is_err(),
+                "{invalid} must be refused"
+            );
+        }
+        // A refused value never overwrites the stored color.
+        assert_eq!(
+            list_groups(&conn, Collection::Action).unwrap()[0].color.as_deref(),
+            Some("#aabbcc")
+        );
+
+        set_group_color(&conn, group.id, None).unwrap();
+        assert_eq!(list_groups(&conn, Collection::Action).unwrap()[0].color, None);
+        assert!(set_group_color(&conn, 99_999, Some("#112233")).is_err());
+    }
+
+    #[test]
+    fn colors_survive_rename_and_reorder_and_stay_per_group() {
+        let conn = conn();
+        let first = create_group(&conn, Collection::Action, "First").unwrap();
+        let one = quick_actions::create_quick_action(&conn, &action("a")).unwrap();
+        assign_item(&conn, Collection::Action, one.id, first.id).unwrap();
+        let second = create_group(&conn, Collection::Action, "Second").unwrap();
+        let two = quick_actions::create_quick_action(&conn, &action("b")).unwrap();
+        assign_item(&conn, Collection::Action, two.id, second.id).unwrap();
+        let neutral = create_group(&conn, Collection::Action, "Neutral").unwrap();
+        let three = quick_actions::create_quick_action(&conn, &action("c")).unwrap();
+        assign_item(&conn, Collection::Action, three.id, neutral.id).unwrap();
+
+        set_group_color(&conn, first.id, Some("#112233")).unwrap();
+        set_group_color(&conn, second.id, Some("#445566")).unwrap();
+        rename_group(&conn, first.id, "Renamed").unwrap();
+        move_group(&conn, first.id, 2).unwrap();
+
+        let groups = list_groups(&conn, Collection::Action).unwrap();
+        assert_eq!(
+            groups.iter().map(|g| g.id).collect::<Vec<_>>(),
+            vec![second.id, neutral.id, first.id]
+        );
+        assert_eq!(groups[0].color.as_deref(), Some("#445566"));
+        assert_eq!(groups[1].color, None, "no color inheritance or spillover");
+        assert_eq!(groups[2].color.as_deref(), Some("#112233"));
     }
 }

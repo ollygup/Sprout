@@ -8,6 +8,7 @@
     tipId,
     tipName,
     tipBody,
+    oncontextmenu,
     children,
     trailing,
   }: {
@@ -29,6 +30,10 @@
      *  93's contract), rendered by the shell so anchoring never drifts. */
     tipName?: string;
     tipBody?: string;
+    /** Right-click over the whole card: the Clips tab opens the
+     *  image viewer here. Omitted for collections with no context verb — the
+     *  browser default stays untouched. */
+    oncontextmenu?: (e: MouseEvent) => void;
     /** Main-button content: badge + name + meta, collection-owned and styled
      *  at the call site (badge tones, note glyph and excerpts differ per
      *  collection and stay there per research 0006:14). */
@@ -45,7 +50,7 @@
      variants slot content). Launch/Actions/Clips are thin adapters; deleting
      this re-scatters card CSS + tip anchoring + split/full rules across three
      snippets that must stay pixel-identical at three densities. -->
-<li class="dock-row" class:dock-row--disabled={disabled}>
+<li class="dock-row" class:dock-row--disabled={disabled} {oncontextmenu}>
   <button
     type="button"
     class="dock-row__main"
@@ -77,15 +82,25 @@
     display: flex;
     align-items: stretch;
     padding: 0;
-    background: var(--bg-card);
+    /* The card carries its group's tint (ticket 241); a neutral group publishes
+       none, so a neutral row falls back to the page surface. */
+    background: var(--group-row-bg, transparent);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    transition: border-color var(--dur-fast) var(--ease-out);
+    --dock-row-text: var(--text-muted);
+    transition: border-color var(--dur-fast) var(--ease-out),
+      background-color var(--dur-fast) var(--ease-out);
   }
 
+  /* A coloured group publishes its hue hover and hover text (ticket 241,
+     research 0028); neutral and ungrouped rows keep the strip's clear card.
+     Secondary text promotes with the tinted surface because --text-muted
+     falls below AA on it (0028 addendum). */
   .dock-row:not(.dock-row--disabled):hover,
   .dock-row:focus-within {
     border-color: var(--accent-tint-border);
+    background: var(--group-row-hover, transparent);
+    --dock-row-text: var(--group-row-hover-text, var(--text-muted));
   }
 
   /* The row's verb — a real <button>, keyboard/touch/screen-reader operable

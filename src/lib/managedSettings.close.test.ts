@@ -491,7 +491,7 @@ describe("Active managed model radio (ticket 191)", () => {
     // Installed lives in the Active options; Available holds the rest only.
     expect(host.querySelectorAll(".managed__option").length).toBe(1);
     expect(host.querySelectorAll(".managed__choice").length).toBe(1);
-    expect(host.textContent).toContain("Available to install");
+    expect(host.textContent).toContain("Available models");
     expect(host.textContent).toContain("Stronger — 7B Q4");
     expect(button(host, "Review & install…")).toBeDefined();
     // Neither artifact clutters the list — both prove identity in Details.

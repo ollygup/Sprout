@@ -21,6 +21,10 @@
      *  defined → the row announces as `menuitemradio` with `aria-checked`,
      *  and true draws the check glyph even without an explicit icon. */
     checked?: boolean;
+    /** A color dot in the icon slot (ticket 225). A hex value paints the
+     *  dot; `null` draws a hollow neutral ring; `undefined` leaves the slot
+     *  to `icon`/`checked`. */
+    swatch?: string | null;
     onselect?: () => void;
   }
 
@@ -341,12 +345,14 @@
    *  eyes scan straight down one edge). Lists with neither render exactly
    *  as before — no empty gutter appears. */
   function needsGutter(
-    list: { separator?: boolean; icon?: string; checked?: boolean }[],
+    list: { separator?: boolean; icon?: string; checked?: boolean; swatch?: string | null }[],
   ): boolean {
     return list.some(
       (item) =>
         !item.separator &&
-        (item.icon !== undefined || item.checked !== undefined),
+        (item.icon !== undefined ||
+          item.checked !== undefined ||
+          item.swatch !== undefined),
     );
   }
 </script>
@@ -406,7 +412,13 @@
         >
           {#if ctx.items && needsGutter(ctx.items)}
             <span class="ctx-item__icon" aria-hidden="true">
-              {#if item.icon || item.checked}
+              {#if item.swatch !== undefined}
+                <span
+                  class="ctx-item__swatch"
+                  class:ctx-item__swatch--none={item.swatch === null}
+                  style:--swatch-color={item.swatch ?? undefined}
+                ></span>
+              {:else if item.icon || item.checked}
                 <Icon name={item.icon ?? "check"} size={14} />
               {/if}
             </span>
@@ -449,7 +461,13 @@
                 >
                   {#if item.children && needsGutter(item.children)}
                     <span class="ctx-item__icon" aria-hidden="true">
-                      {#if child.icon || child.checked}
+                      {#if child.swatch !== undefined}
+                        <span
+                          class="ctx-item__swatch"
+                          class:ctx-item__swatch--none={child.swatch === null}
+                          style:--swatch-color={child.swatch ?? undefined}
+                        ></span>
+                      {:else if child.icon || child.checked}
                         <Icon name={child.icon ?? "check"} size={14} />
                       {/if}
                     </span>
@@ -535,6 +553,20 @@
     display: inline-flex;
     margin-left: auto;
     color: var(--text-muted);
+  }
+
+  /* A group color dot in the reserved icon slot; neutral is a hollow ring
+     so "no color" reads without inventing a token color (ticket 225). */
+  .ctx-item__swatch {
+    width: 10px;
+    height: 10px;
+    border-radius: var(--radius-pill);
+    background: var(--swatch-color);
+  }
+
+  .ctx-item__swatch--none {
+    background: transparent;
+    box-shadow: inset 0 0 0 1px var(--border-strong);
   }
 
   .ctx-sep {

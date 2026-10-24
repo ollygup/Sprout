@@ -37,32 +37,6 @@ pub fn contains_files_placeholder(command: &str) -> bool {
     find_placeholder(command).is_some()
 }
 
-/// Shell-quotes an absolute staged path. PowerShell takes a single-quoted
-/// literal (`''` escapes a quote); CMD takes a double-quoted string; Python
-/// takes a double-quoted literal with its backslashes doubled, since a bare
-/// Windows path would otherwise smuggle escapes (`\n`, `\t`) into the script —
-/// the three shells quote differently, which is why the expansion lives with
-/// the execution owner instead of the caller (ADR-0029).
-pub fn quote_staged_path(shell: &str, path: &Path) -> Result<String, String> {
-    match shell {
-        "powershell" => Ok(format!(
-            "'{}'",
-            path.to_string_lossy().replace('\'', "''")
-        )),
-        "cmd" => {
-            let text = path.to_string_lossy();
-            if text.contains('"') || text.contains('\n') || text.contains('\r') {
-                return Err("the staged files path cannot be quoted for cmd".to_string());
-            }
-            Ok(format!("\"{text}\""))
-        }
-        "python3" => quote_python_literal(&path.to_string_lossy()),
-        other => Err(format!(
-            "'{other}' is not a supported Quick Action shell — expected 'powershell', 'cmd', or 'python3'"
-        )),
-    }
-}
-
 /// A `\name` or `/name` suffix stays one shell argument only when quoted with
 /// its folder: PowerShell reads `'folder'\name` as two arguments, and CMD
 /// splits `"folder"\name with spaces` the same way. Matching runs against the
@@ -202,9 +176,9 @@ pub fn expand_files_dir(
 
 /// Quotes one already-joined `prefix + staged absolute path` for the shell.
 /// PowerShell takes a single-quoted literal (`''` escapes a quote); CMD takes
-/// a double-quoted string; Python takes its own literal (see below). Split
-/// from [`quote_staged_path`] so the prefix joins inside the same pair instead
-/// of gluing onto its opening quote.
+/// a double-quoted string; Python takes its own literal (see below). The whole
+/// joined string sits inside one pair, so a prefix never glues onto the opening
+/// quote as a separate argument.
 fn quote_full_path(shell: &str, full: &str) -> Result<String, String> {
     match shell {
         "powershell" => Ok(format!("'{}'", full.replace('\'', "''"))),
@@ -370,11 +344,11 @@ mod tests {
     #[test]
     fn powershell_quotes_with_single_quotes_and_doubles_embedded_ones() {
         assert_eq!(
-            quote_staged_path("powershell", Path::new(r"C:\Temp\my files")).unwrap(),
+            quote_full_path("powershell", r"C:\Temp\my files").unwrap(),
             r"'C:\Temp\my files'"
         );
         assert_eq!(
-            quote_staged_path("powershell", Path::new(r"C:\Temp\o'brien")).unwrap(),
+            quote_full_path("powershell", r"C:\Temp\o'brien").unwrap(),
             r"'C:\Temp\o''brien'"
         );
     }
@@ -382,7 +356,7 @@ mod tests {
     #[test]
     fn cmd_quotes_with_double_quotes() {
         assert_eq!(
-            quote_staged_path("cmd", Path::new(r"C:\Temp\my files")).unwrap(),
+            quote_full_path("cmd", r"C:\Temp\my files").unwrap(),
             r#""C:\Temp\my files""#
         );
     }
@@ -390,14 +364,14 @@ mod tests {
     #[test]
     fn python_quotes_with_doubled_backslashes() {
         assert_eq!(
-            quote_staged_path("python3", Path::new(r"C:\Temp\my files")).unwrap(),
+            quote_full_path("python3", r"C:\Temp\my files").unwrap(),
             r#""C:\\Temp\\my files""#
         );
     }
 
     #[test]
     fn unknown_shell_fails_instead_of_guessing() {
-        assert!(quote_staged_path("bash", Path::new(r"C:\Temp\x")).is_err());
+        assert!(quote_full_path("bash", r"C:\Temp\x").is_err());
     }
 
     #[test]

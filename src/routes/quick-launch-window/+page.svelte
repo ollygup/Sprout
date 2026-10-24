@@ -33,6 +33,7 @@
     listQuickActions,
     openCompanionExternal,
     openCompanionManager,
+    openClipViewer,
     openSprout,
     openVolumeMixer,
     runQuickAction,
@@ -2550,6 +2551,19 @@
       : clipTitle(clip.name, clip.content);
   }
 
+  /** Right-click on an image Clip row opens the clip viewer (ticket 226).
+   *  The dock has no row menu, so a keyboard-triggered contextmenu (no right
+   *  button) does nothing — it must never open the viewer. Text Clips keep
+   *  their existing right-click behavior. */
+  function openClipContextMenu(e: MouseEvent, clip: Clip) {
+    if (e.button !== 2 || !clip.image) return;
+    e.preventDefault();
+    openClipViewer(clip.id, "quick-launch").catch((err) => {
+      console.error(err);
+      error = String(err);
+    });
+  }
+
   function close() {
     invoke("close_quick_launch_window").catch((e) => console.error(e));
   }
@@ -2822,6 +2836,7 @@
       tipName={title}
       tipBody={clip.image ? clipImageMeta(clip.image) : clip.content}
       onmain={() => copy(clip)}
+      oncontextmenu={(e) => openClipContextMenu(e, clip)}
     >
       <span class="qlw__clip-badge" aria-hidden="true">
         <Icon name={copiedId === clip.id ? "check" : "copy"} size={14} />
@@ -2911,6 +2926,7 @@
                       controls={`qlw-group-${section.group.id}`}
                       name={section.group.name}
                       count={section.rows.length}
+                      color={section.group.color}
                       onToggle={() => launchCollapse.toggle(section.group.id)}
                     >
                       <ul class="qlw__entries">
@@ -2962,6 +2978,7 @@
                     controls={`qlw-actions-group-${section.group.id}`}
                     name={section.group.name}
                     count={section.rows.length}
+                    color={section.group.color}
                     onToggle={() => actionCollapse.toggle(section.group.id)}
                   >
                     <ul class="qlw__actions">
@@ -3001,6 +3018,7 @@
                     controls={`qlw-clips-group-${section.group.id}`}
                     name={section.group.name}
                     count={section.rows.length}
+                    color={section.group.color}
                     onToggle={() => clipCollapse.toggle(section.group.id)}
                   >
                     <ul class="qlw__clips">
@@ -3624,7 +3642,7 @@
     font-family: var(--font-mono);
     font-size: var(--qlw-meta);
     letter-spacing: var(--tracking-mono);
-    color: var(--text-muted);
+    color: var(--dock-row-text, var(--text-muted));
   }
 
   .qlw__actions {
@@ -3706,7 +3724,7 @@
     white-space: nowrap;
     font-family: var(--font-mono);
     font-size: var(--qlw-meta);
-    color: var(--text-muted);
+    color: var(--dock-row-text, var(--text-muted));
   }
 
   .qlw__clip-copied {

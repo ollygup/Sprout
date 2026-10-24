@@ -33,18 +33,19 @@
 
   let { children }: { children: Snippet } = $props();
 
-  // The Quick Launch window (ticket 52) is a second webview pointed at its
-  // own route: it gets the shared tokens, fonts, and theme — but none of the
-  // main window's chrome (NavRail, run banner) or import/run-awareness
-  // plumbing, which are meaningless in a miniature read-only surface.
-  const isQuickLaunchWindow = $derived(
-    page.route.id === "/quick-launch-window"
+  // The Quick Launch window (ticket 52) and the clip viewer (ticket 226) are
+  // separate webviews pointed at their own routes: they get the shared tokens,
+  // fonts, and theme — but none of the main window's chrome (NavRail, run
+  // banner) or import/run-awareness plumbing, which are meaningless in a
+  // miniature surface.
+  const isMiniWindow = $derived(
+    page.route.id === "/quick-launch-window" || page.route.id === "/clip-viewer"
   );
 
   // WebView2 can paint its native window before this shell exists. Rust keeps
   // only the main window transparent until this mounted acknowledgement.
   onMount(() => {
-    if (isQuickLaunchWindow) return;
+    if (isMiniWindow) return;
     mainWindowReady().catch((error) => console.error(error));
   });
 
@@ -64,19 +65,19 @@
   // page-local polling never had a vote. The Quick Launch window has no
   // banner; its Start button listens for `launch-run-done` itself.
   $effect(() => {
-    if (isQuickLaunchWindow) return;
+    if (isMiniWindow) return;
     startRunAwareness();
   });
 
   // The self-update watcher (ticket 74) feeds the rail pill and the Settings
   // row from one store; the Quick Launch window renders neither.
   $effect(() => {
-    if (isQuickLaunchWindow) return;
+    if (isMiniWindow) return;
     watchUpdates();
   });
 
   $effect(() => {
-    if (isQuickLaunchWindow) return;
+    if (isMiniWindow) return;
     takePendingImport()
       .then((path) => {
         if (path) {
@@ -103,7 +104,7 @@
   // translates: wording-locked fixed text only, session clock untouched.
   let lastPresenceState = "";
   $effect(() => {
-    if (isQuickLaunchWindow) return;
+    if (isMiniWindow) return;
     const state =
       SECTION_LABEL_BY_ROUTE[page.route.id ?? "/"] ??
       englishCopy["presence.state.presets"];
@@ -148,7 +149,7 @@
     }
   }
   $effect(() => {
-    if (isQuickLaunchWindow) return;
+    if (isMiniWindow) return;
     void refreshMaximized();
     const onFocus = () => {
       void refreshMaximized();
@@ -161,7 +162,7 @@
   // an event from the single-instance hook (ticket 10) — route it to the same
   // import flow as a first-launch argument.
   $effect(() => {
-    if (isQuickLaunchWindow) return;
+    if (isMiniWindow) return;
     let unlistenImport: (() => void) | undefined;
     let unlistenRoute: (() => void) | undefined;
     listen<string>("pending-import", (event) => {
@@ -180,7 +181,7 @@
   });
 </script>
 
-{#if isQuickLaunchWindow}
+{#if isMiniWindow}
   <div class="mini">
     {@render children()}
   </div>

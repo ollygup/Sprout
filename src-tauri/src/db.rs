@@ -103,6 +103,7 @@ fn migrate(conn: &Connection) -> Result<()> {
              id         INTEGER PRIMARY KEY AUTOINCREMENT,
              collection TEXT NOT NULL CHECK (collection IN ('launch', 'action', 'clip')),
              name       TEXT NOT NULL,
+             color      TEXT,
              position   INTEGER NOT NULL DEFAULT 0
          );
          CREATE TABLE IF NOT EXISTS launch_entries (
@@ -166,6 +167,7 @@ fn migrate(conn: &Connection) -> Result<()> {
     ensure_show_in_dock_columns(conn)?;
     ensure_clip_images_table(conn)?;
     ensure_item_group_columns(conn)?;
+    ensure_group_color(conn)?;
     ensure_quick_action_files(conn)?;
     ensure_ai_approved_roots(conn)
 }
@@ -221,6 +223,7 @@ fn ensure_item_group_columns(conn: &Connection) -> Result<()> {
              id         INTEGER PRIMARY KEY AUTOINCREMENT,
              collection TEXT NOT NULL CHECK (collection IN ('launch', 'action', 'clip')),
              name       TEXT NOT NULL,
+             color      TEXT,
              position   INTEGER NOT NULL DEFAULT 0
          );",
     )?;
@@ -240,6 +243,21 @@ fn ensure_item_group_columns(conn: &Connection) -> Result<()> {
                  REFERENCES groups(id) ON DELETE SET NULL"
             ))?;
         }
+    }
+    Ok(())
+}
+
+/// Upgrades databases created before group colors existed: adds the nullable
+/// `color` column so every existing group stays neutral. Fresh databases
+/// already have it. Idempotent — re-runs change nothing.
+fn ensure_group_color(conn: &Connection) -> Result<()> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('groups') WHERE name = 'color')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        conn.execute_batch("ALTER TABLE groups ADD COLUMN color TEXT")?;
     }
     Ok(())
 }
@@ -1268,7 +1286,7 @@ pub fn load_bezel_y_ratio_identified(
         .or_else(|| load_bezel_y_ratio(conn, device_name))
 }
 
-fn read_meta(conn: &Connection, key: &str) -> Option<String> {
+pub(crate) fn read_meta(conn: &Connection, key: &str) -> Option<String> {
     conn.query_row(
         "SELECT value FROM meta WHERE key = ?1",
         params![key],

@@ -14,10 +14,12 @@ import {
   listGroups,
   moveGroup,
   renameGroup,
+  setGroupColor,
   unassignFromGroup,
   updateGroupsEnabled,
 } from "./api";
 import { createGroupCollapse } from "./groupCollapse.svelte";
+import { normalizeGroupColor } from "./groupColor";
 import type {
   ContextMenuItem,
   ContextMenuState,
@@ -78,6 +80,13 @@ export function createCollectionGroups(options: {
   // Set only while the remove confirmation is up; nulled before the delete
   // round-trips so a slow double-confirm cannot fire twice.
   let removing = $state<Group | null>(null);
+
+  // The color dialog's subject and field state (ticket 225). Swatch and
+  // "No color" picks apply immediately; the custom field applies on submit.
+  let coloring = $state<Group | null>(null);
+  let colorDraft = $state("");
+  let colorError = $state("");
+  let savingColor = $state(false);
 
   async function guarded(run: () => Promise<void>) {
     host.begin();
@@ -176,6 +185,66 @@ export function createCollectionGroups(options: {
 
     cancelNaming() {
       naming = null;
+    },
+
+    get coloring() {
+      return coloring;
+    },
+    get colorDraft() {
+      return colorDraft;
+    },
+    set colorDraft(value: string) {
+      colorDraft = value;
+    },
+    get colorError() {
+      return colorError;
+    },
+    get savingColor() {
+      return savingColor;
+    },
+
+    openColor(group: Group) {
+      colorDraft = group.color ?? "";
+      colorError = "";
+      coloring = group;
+    },
+
+    cancelColor() {
+      coloring = null;
+    },
+
+    /** Applies one color (or clears it) and reloads. A custom value is
+     *  validated here first so an invalid hex never reaches the backend and
+     *  the field keeps its inline error. */
+    async applyColor(value: string | null) {
+      if (!coloring) return;
+      const group = coloring;
+      let normalized: string | null = null;
+      if (value !== null) {
+        normalized = normalizeGroupColor(value);
+        if (!normalized) {
+          colorError = t("groups.colorInvalid");
+          return;
+        }
+      }
+      savingColor = true;
+      colorError = "";
+      try {
+        await setGroupColor(group.id, normalized);
+        coloring = null;
+        host.flash(
+          (normalized ? t("groups.colorSet") : t("groups.colorClear")).replace(
+            "{name}",
+            group.name,
+          ),
+        );
+        await host.reload();
+      } catch (e) {
+        console.error(e);
+        colorError = String(e);
+      } finally {
+        savingColor = false;
+      }
     },
 
     /** Create/rename share one dialog contract: an empty name is refused
@@ -322,6 +391,11 @@ export function createCollectionGroups(options: {
             label: t("common.rename"),
             icon: "pencil",
             onselect: () => this.openRename(group),
+          },
+          {
+            label: t("groups.colorMenu"),
+            swatch: group.color,
+            onselect: () => this.openColor(group),
           },
           {
             label: t("menu.moveUp"),

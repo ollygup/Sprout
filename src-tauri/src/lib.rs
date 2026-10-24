@@ -7,6 +7,7 @@
  mod autostart;
  mod backup;
   mod clips;
+  mod clip_viewer;
   mod companion_audio;
   mod companion_history;
   mod constants;
@@ -1801,6 +1802,46 @@ fn copy_clip_image(
         .map_err(|e| format!("Could not reach the clipboard: {e}"))
 }
 
+// ------------------- Clip viewer (ticket 226) ------------------------------
+
+/// Fetches one Clip by id — the viewer's read seam. The image bytes ride the
+/// ordinary command response, never a URL or event, and `None` lets the
+/// viewer show its missing-Clip state after a deletion.
+#[tauri::command]
+fn get_clip(state: State<'_, AppState>, id: i64) -> Result<Option<clips::Clip>, String> {
+    let conn = lock(&state)?;
+    clips::get_clip(&conn, id).map_err(|e| e.to_string())
+}
+
+/// Opens the single clip viewer, or retargets the one already open: the
+/// command resolves the Clip by id and places a fresh window centered on the
+/// invoking window's monitor (`source` is "main" or "quick-launch").
+///
+/// The build runs off this command's event thread: WebView2 creation completes
+/// through the main thread's message pump, so building inline deadlocks it and
+/// leaves the new window blank at `about:blank` (the same seam
+/// `request_open_main_window` uses).
+#[tauri::command]
+async fn open_clip_viewer(app: AppHandle, id: i64, source: Option<String>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || clip_viewer::open(&app, id, source.as_deref()))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Consumes the pending clip-viewer request once, covering the create → mount
+/// race without putting image bytes in an event.
+#[tauri::command]
+fn take_clip_viewer_request() -> Option<i64> {
+    clip_viewer::take_pending()
+}
+
+/// Closes the viewer (Esc / close control): remembers the size, destroys the
+/// window, and returns focus to the invoking window.
+#[tauri::command]
+fn close_clip_viewer(app: AppHandle) -> Result<(), String> {
+    clip_viewer::close(&app)
+}
+
 // ------------------- Groups (ticket 89) ------------------------------------
 
 /// Lists one collection's Groups in user order (ticket 89).
@@ -1835,6 +1876,23 @@ fn create_group(
 fn rename_group(app: AppHandle, state: State<'_, AppState>, id: i64, name: String) -> Result<(), String> {
     let conn = lock(&state)?;
     groups::rename_group(&conn, id, &name)?;
+    drop(conn);
+    emit_quick_launch_changed(&app);
+    Ok(())
+}
+
+/// Sets or clears one Group's decorative color; invalid hex is refused with
+/// a readable message and never stored. Color is presentation only and stays
+/// out of every export/backup (ADR-0026).
+#[tauri::command]
+fn set_group_color(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: i64,
+    color: Option<String>,
+) -> Result<(), String> {
+    let conn = lock(&state)?;
+    groups::set_group_color(&conn, id, color.as_deref())?;
     drop(conn);
     emit_quick_launch_changed(&app);
     Ok(())
@@ -3696,6 +3754,16 @@ pub fn run() {
             Some(vec!["--autostart"]),
         ))
         .on_window_event(|window, event| {
+            // Ticket 226: the clip viewer is a disposable floating window —
+            // its close request remembers the size, destroys it, and returns
+            // focus to the invoking window. It is never hidden to the tray.
+            if window.label() == clip_viewer::CLIP_VIEWER_WINDOW {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = clip_viewer::close(window.app_handle());
+                }
+                return;
+            }
             // Ticket 43: closing the main window (× or Alt+F4) destroys it —
             // the webview goes away and the lean Rust backend stays resident
             // in the tray. Open Sprout (or a second launch) recreates the
@@ -3982,9 +4050,14 @@ pub fn run() {
             create_clip_image,
             update_clip_image,
             copy_clip_image,
+            get_clip,
+            open_clip_viewer,
+            take_clip_viewer_request,
+            close_clip_viewer,
             list_groups,
             create_group,
             rename_group,
+            set_group_color,
             delete_group,
             move_group,
             assign_to_group,

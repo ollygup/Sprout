@@ -40,6 +40,7 @@
   import { open } from "@tauri-apps/plugin-dialog";
   import Button from "$lib/components/Button.svelte";
   import GroupNameDialog from "$lib/components/GroupNameDialog.svelte";
+  import GroupColorDialog from "$lib/components/GroupColorDialog.svelte";
   import GroupAccordion from "$lib/components/GroupAccordion.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import IconButton from "$lib/components/IconButton.svelte";
@@ -985,6 +986,7 @@
         controls={`ql-group-${section.group.id}`}
         name={section.group.name}
         count={countMembers(entries, section.group.id)}
+        color={section.group.color}
         onToggle={() => groups.collapse.toggle(section.group.id)}
       >
         {#snippet actions()}
@@ -1058,6 +1060,18 @@
   ondraft={(v) => (groups.nameDraft = v)}
   onsubmit={() => groups.submitName()}
   onclose={() => groups.cancelNaming()}
+/>
+
+<GroupColorDialog
+  group={groups.coloring}
+  draft={groups.colorDraft}
+  error={groups.colorError}
+  saving={groups.savingColor}
+  inputId="launch-group-color"
+  onpick={(color) => groups.applyColor(color)}
+  ondraft={(v) => (groups.colorDraft = v)}
+  onsubmit={() => groups.applyColor(groups.colorDraft)}
+  onclose={() => groups.cancelColor()}
 />
 
 <CommandFormDialog
@@ -1319,7 +1333,10 @@
     align-items: center;
     gap: var(--space-3);
     padding: var(--space-3) var(--space-4);
-    background: var(--bg-card);
+    /* Display-only rows: no hover state, so the list never implies a click
+       that does not exist (240). The card carries its group's tint; a neutral
+       group publishes none, so the row falls back to the page surface. */
+    background: var(--group-row-bg, transparent);
     border: 1px solid var(--border);
     border-radius: var(--radius);
   }

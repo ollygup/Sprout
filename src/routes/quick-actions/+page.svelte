@@ -39,6 +39,7 @@
   import Button from "$lib/components/Button.svelte";
   import Dialog from "$lib/components/Dialog.svelte";
   import GroupNameDialog from "$lib/components/GroupNameDialog.svelte";
+  import GroupColorDialog from "$lib/components/GroupColorDialog.svelte";
   import GroupAccordion from "$lib/components/GroupAccordion.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import IconButton from "$lib/components/IconButton.svelte";
@@ -820,6 +821,7 @@
         controls={`qa-group-${section.group.id}`}
         name={section.group.name}
         count={countMembers(quickActions, section.group.id)}
+        color={section.group.color}
         onToggle={() => groups.collapse.toggle(section.group.id)}
       >
         {#snippet actions()}
@@ -953,6 +955,18 @@
   ondraft={(v) => (groups.nameDraft = v)}
   onsubmit={() => groups.submitName()}
   onclose={() => groups.cancelNaming()}
+/>
+
+<GroupColorDialog
+  group={groups.coloring}
+  draft={groups.colorDraft}
+  error={groups.colorError}
+  saving={groups.savingColor}
+  inputId="qa-group-color"
+  onpick={(color) => groups.applyColor(color)}
+  ondraft={(v) => (groups.colorDraft = v)}
+  onsubmit={() => groups.applyColor(groups.colorDraft)}
+  onclose={() => groups.cancelColor()}
 />
 
 <QuickActionFormDialog
@@ -1100,15 +1114,24 @@
     align-items: center;
     gap: var(--space-3);
     padding: var(--space-3) var(--space-4);
-    background: var(--bg-card);
+    /* The card carries its group's tint; a neutral group publishes none, so a
+       neutral row falls back to the page surface (ticket 240). */
+    background: var(--group-row-bg, transparent);
     border: 1px solid var(--border);
     border-radius: var(--radius);
     cursor: pointer;
-    transition: border-color var(--dur-fast) var(--ease-out);
+    --row-text: var(--text-muted);
+    transition: background-color var(--dur-fast) var(--ease-out),
+      border-color var(--dur-fast) var(--ease-out);
   }
 
+  /* A colored group publishes its hover surface and hover text (ticket 240,
+     research 0028); neutral groups and ungrouped rows fall back to the
+     neutral tokens. */
   .rack__row:hover {
+    background: var(--group-row-hover, var(--bg-hover));
     border-color: var(--border-strong);
+    --row-text: var(--group-row-hover-text, var(--text-muted));
   }
 
   .rack__row:focus-visible {
@@ -1120,7 +1143,7 @@
   .rack__note {
     display: inline-flex;
     flex-shrink: 0;
-    color: var(--text-muted);
+    color: var(--row-text);
   }
 
   .rack__controls,
@@ -1158,7 +1181,7 @@
     white-space: nowrap;
     font-family: var(--font-mono);
     font-size: var(--text-xs);
-    color: var(--text-muted);
+    color: var(--row-text);
   }
 
   /* The dock-hidden annotation: a quiet muted pill in the same language as

@@ -1005,6 +1005,7 @@ mod tests {
     use crate::domain::{
         EnvAction, EnvWiring, Requirement, Step, VersionPolicy,
     };
+    use crate::groups;
     use crate::run::{RequirementOutcome, RunOutcome, RunRecord, RunStatus};
 
     fn conn() -> Connection {
@@ -1437,6 +1438,8 @@ mod tests {
         .unwrap();
         db::save_dock_edge(&source, "MONITOR-1", "right").unwrap();
         db::save_dock_mode(&source, "MONITOR-1", "fixed").unwrap();
+        // …and the clip viewer's remembered size.
+        crate::clip_viewer::save_size(&source, 1111, 777).unwrap();
 
         let dir = tempfile::tempdir().unwrap().into_path();
         let file = write_file(&dir, "backup.json", "");
@@ -1450,6 +1453,7 @@ mod tests {
         assert_eq!(crate::settings::load(&target), crate::settings::Settings::default());
         assert_eq!(db::load_dock_edge(&target, "MONITOR-1"), None);
         assert_eq!(db::load_dock_mode(&target, "MONITOR-1"), None);
+        assert_eq!(crate::clip_viewer::load_size(&target), None);
     }
 
     #[test]
@@ -1496,6 +1500,29 @@ mod tests {
         assert_eq!(summary.inserted, BackupCounts::default());
         assert_eq!(summary.skipped, BackupCounts::default());
         assert_eq!(inspect_backup(&file).unwrap(), BackupCounts::default());
+    }
+
+    #[test]
+    fn backup_document_never_carries_group_color() {
+        let source = conn();
+        let group = groups::create_group(&source, groups::Collection::Action, "Colored").unwrap();
+        let owned = quick_actions::create_quick_action(&source, &action("Build")).unwrap();
+        groups::assign_item(&source, groups::Collection::Action, owned.id, group.id).unwrap();
+        groups::set_group_color(&source, group.id, Some("#123ABC")).unwrap();
+
+        let dir = tempfile::tempdir().unwrap().into_path();
+        let file = write_file(&dir, "colored.json", "");
+        export_backup(&source, &file, &BackupSelection::all()).unwrap();
+
+        let document = fs::read_to_string(&file).unwrap();
+        assert!(
+            !document.contains("\"color\""),
+            "a group color must never enter the backup document: {document}"
+        );
+        assert!(
+            !document.contains("#123abc"),
+            "the stored color value must stay on this machine: {document}"
+        );
     }
 
     #[test]
