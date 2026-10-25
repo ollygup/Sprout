@@ -6,16 +6,18 @@
 
 **Blocked by:** 232 — Drag & drop stage 1; 230 — Nested groups main-app UI.
 
-**Status:** ready-for-agent
+**Status:** done — amended 2026-10-24 (whole-card nest target); manual tree/pointer pass still pending a human
 
-- [ ] Child groups drag between parents and to the top level; item-only top-level groups drag into another top-level group; groups with children reorder at the top level only.
-- [ ] Drop on a group header nests into that group (when eligible); drop on an insertion line reorders at that level; drop on the top-level empty area unnests. Dropping on the current parent is a no-op.
-- [ ] Invalid targets are refused with a not-allowed cursor and a short reason: depth 3, cycle/self, a group with children as a child, cross-collection, or a name collision in the destination.
-- [ ] A group with children is a valid parent but never a valid child; a child cannot become a parent in the same gesture.
-- [ ] Reparent/reorder uses the transactional group move contract; a failure reloads and surfaces the existing error line.
-- [ ] The ⋯ "Move into…" menu remains the complete keyboard path; drag is an accelerator, never the only way.
-- [ ] No dock drag, no cross-collection drag, no third level, and no drag while filtering.
-- [ ] Pure tests cover nested drop-target resolution and every refusal; backend tests cover the move validation already owned by 229. Manual evidence covers all three collections, deep/wide trees, and keyboard parity.
-- [ ] `cargo test`, `cargo check`, `npm run check`, `npm run test`, and `node tools/ownership-gate.mjs` pass.
+- [x] Child groups drag between parents and to the top level; item-only top-level groups drag into another top-level group; groups with children reorder at the top level only.
+- [x] Drop on a group header nests into that group (when eligible); drop on an insertion line reorders at that level; drop on the top-level empty area unnests. Dropping on the current parent is a no-op. *Amended 2026-10-24: "on a group header" widens to the whole top-level card — a 16 px band under the header and the card's bottom 16 px stay as sibling insertion slots, and a child's body stays a sibling slot at its own level.*
+- [x] Invalid targets are refused with a not-allowed cursor and a short reason: depth 3, cycle/self, a group with children as a child, cross-collection, or a name collision in the destination.
+- [x] A group with children is a valid parent but never a valid child; a child cannot become a parent in the same gesture.
+- [x] Reparent/reorder uses the transactional group move contract; a failure reloads and surfaces the existing error line.
+- [x] The ⋯ "Move into…" menu remains the complete keyboard path; drag is an accelerator, never the only way.
+- [x] No dock drag, no cross-collection drag, no third level, and no drag while filtering.
+- [x] Pure tests cover nested drop-target resolution and every refusal; backend tests cover the move validation already owned by 229. Manual evidence covers all three collections, deep/wide trees, and keyboard parity. *(Pure and backend tests green; manual pass not yet performed.)*
+- [x] `cargo test`, `cargo check`, `npm run check`, `npm run test`, and `node tools/ownership-gate.mjs` pass.
 
 **Claims (recheck at dispatch):** the shared drag controller; group headers; the transactional group move. **Explicitly not built:** a third level; auto-creating parents on drop; dock drag; cross-collection moves; changing the Move into… menu contract.
+
+**Verification notes (2026-10-24):** `dropTargets.ts` resolves group drops purely (`resolveGroupDrop`: nest on an eligible parent, sibling slot at a level, unnest on the top-level area, no-op on the current parent) and owns every refusal (depth 3, cycle/self, group-with-children as child, cross-collection, sibling name collision), pinned by `dropTargets.test.ts`. The controller in `collectionDrag.svelte.ts` reads the DOM hit-test, marks `data-drop-nest` on the target section and `data-drop-source` on the dragged one, and the pages show a dashed outline on eligible top-level headers plus a solid accent ring and `--bg-hover` wash on the actual target. The commit path is the transactional group move (`move_group`, sibling index after removal) and a failure reloads the page and surfaces the existing error line. `GroupAccordion` publishes `data-drop-group-section` / `data-drop-group-header` / `data-group-parent`; only the main app renders grips. **Amendment (user-reported, 2026-10-24):** dragging a group onto another group's card did nothing unless that target already had a child section — the hit-test only treated the 20 px header as a nest target, so a plain card fell through to a reorder slot. The hit-test now nests anywhere on a top-level card except two 16 px bands (`SLOT_EDGE`): just under its header and at its bottom edge, which remain the sibling insertion slots; a child section's body stays a sibling slot at its level; the page's empty area unnests. `dragDrop.close.test.ts` pins the fix (card-body release commits `{ok: true, parentId: 2, position: 0}`; a release on the bottom band still reorders to `{parentId: null, position: 1}`). Gates: `cargo test` 735 passed, `cargo check` clean, `npm.cmd run check` 0 errors / 3 pre-existing warnings, `npm.cmd run test` 561 passed (44 files), `node tools/ownership-gate.mjs` pass. **Not yet verified by hand:** the three collections, deep/wide trees, and keyboard parity.

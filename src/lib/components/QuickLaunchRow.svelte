@@ -9,6 +9,7 @@
     tipName,
     tipBody,
     oncontextmenu,
+    groupColor,
     children,
     trailing,
   }: {
@@ -34,6 +35,12 @@
      *  image viewer here. Omitted for collections with no context verb — the
      *  browser default stays untouched. */
     oncontextmenu?: (e: MouseEvent) => void;
+    /** The row's own group colour. Undefined leaves the row on its section's
+     *  inherited tint (the dock's ungrouped lists); a colour makes the card
+     *  wear that hue even when the dock flattens the tree under a different
+     *  parent, and `null` clears an inherited tint for a neutral group
+     *  (ticket 231 amendment). */
+    groupColor?: string | null;
     /** Main-button content: badge + name + meta, collection-owned and styled
      *  at the call site (badge tones, note glyph and excerpts differ per
      *  collection and stay there per research 0006:14). */
@@ -50,7 +57,14 @@
      variants slot content). Launch/Actions/Clips are thin adapters; deleting
      this re-scatters card CSS + tip anchoring + split/full rules across three
      snippets that must stay pixel-identical at three densities. -->
-<li class="dock-row" class:dock-row--disabled={disabled} {oncontextmenu}>
+<li
+  class="dock-row"
+  class:dock-row--disabled={disabled}
+  class:group-tint={groupColor != null}
+  class:dock-row--neutral={groupColor === null}
+  style:--group-color={groupColor ?? undefined}
+  {oncontextmenu}
+>
   <button
     type="button"
     class="dock-row__main"
@@ -90,6 +104,15 @@
     --dock-row-text: var(--text-muted);
     transition: border-color var(--dur-fast) var(--ease-out),
       background-color var(--dur-fast) var(--ease-out);
+  }
+
+  /* A card whose own group is neutral stays neutral even when it renders
+     inside a coloured parent (the dock's flat mode): the tint is the card's
+     group identity, not a wash inherited from the section it sits in. */
+  .dock-row--neutral {
+    --group-row-bg: initial;
+    --group-row-hover: initial;
+    --group-row-hover-text: initial;
   }
 
   /* A coloured group publishes its hue hover and hover text (ticket 241,

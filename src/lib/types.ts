@@ -403,13 +403,16 @@ export interface CompanionHistoryState {
 export type GroupsCollection = "launch" | "action" | "clip";
 
 /** A user-named bucket within exactly one collection (ticket 89). Items hold
- *  at most one group; deleting a group returns members to ungrouped. */
+ *  at most one group; deleting a group returns members to ungrouped. Groups
+ *  nest two levels: `parent_id` null is top level, a child holds only items. */
 export interface Group {
   id: number;
   collection: GroupsCollection;
   name: string;
   /** `#rrggbb` or null for neutral — decorative, local-only (ticket 225). */
   color: string | null;
+  /** The top-level group this one nests under; null at the top level. */
+  parent_id: number | null;
 }
 
 /** What a Launch entry starts: a picked app (shortcut or exe) or a command

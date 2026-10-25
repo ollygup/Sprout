@@ -98,8 +98,21 @@ impl OrderedList {
     /// one transaction is the obviously-correct approach.
     pub(crate) fn move_to(&self, conn: &Connection, id: i64, to_position: i64) -> Result<()> {
         let tx = conn.unchecked_transaction()?;
+        self.place_at(&tx, id, to_position)?;
+        tx.commit()
+    }
+
+    /// [`Self::move_to`]'s core without its own transaction — for callers
+    /// that must assign and reposition in ONE transaction (drag & drop's
+    /// `place_item`, ticket 232). A missing id is a no-op.
+    pub(crate) fn place_at(
+        &self,
+        conn: &Connection,
+        id: i64,
+        to_position: i64,
+    ) -> Result<()> {
         let mut ids: Vec<i64> = {
-            let mut stmt = tx.prepare(&format!(
+            let mut stmt = conn.prepare(&format!(
                 "SELECT id FROM {} ORDER BY position, id",
                 self.table
             ))?;
@@ -114,11 +127,11 @@ impl OrderedList {
         let clamped = to_position.clamp(0, ids.len() as i64) as usize;
         ids.insert(clamped, id);
         for (index, row_id) in ids.iter().enumerate() {
-            tx.execute(
+            conn.execute(
                 &format!("UPDATE {} SET position = ?1 WHERE id = ?2", self.table),
                 params![index as i64, row_id],
             )?;
         }
-        tx.commit()
+        Ok(())
     }
 }

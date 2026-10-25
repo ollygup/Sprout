@@ -104,6 +104,7 @@ fn migrate(conn: &Connection) -> Result<()> {
              collection TEXT NOT NULL CHECK (collection IN ('launch', 'action', 'clip')),
              name       TEXT NOT NULL,
              color      TEXT,
+             parent_id  INTEGER REFERENCES groups(id) ON DELETE CASCADE,
              position   INTEGER NOT NULL DEFAULT 0
          );
          CREATE TABLE IF NOT EXISTS launch_entries (
@@ -168,6 +169,7 @@ fn migrate(conn: &Connection) -> Result<()> {
     ensure_clip_images_table(conn)?;
     ensure_item_group_columns(conn)?;
     ensure_group_color(conn)?;
+    ensure_group_parent(conn)?;
     ensure_quick_action_files(conn)?;
     ensure_ai_approved_roots(conn)
 }
@@ -224,6 +226,7 @@ fn ensure_item_group_columns(conn: &Connection) -> Result<()> {
              collection TEXT NOT NULL CHECK (collection IN ('launch', 'action', 'clip')),
              name       TEXT NOT NULL,
              color      TEXT,
+             parent_id  INTEGER REFERENCES groups(id) ON DELETE CASCADE,
              position   INTEGER NOT NULL DEFAULT 0
          );",
     )?;
@@ -258,6 +261,26 @@ fn ensure_group_color(conn: &Connection) -> Result<()> {
     )?;
     if !exists {
         conn.execute_batch("ALTER TABLE groups ADD COLUMN color TEXT")?;
+    }
+    Ok(())
+}
+
+/// Upgrades databases created before groups nested: adds the nullable
+/// self-reference; every existing group stays top level. Fresh databases
+/// already have it. Idempotent — re-runs change nothing.
+fn ensure_group_parent(conn: &Connection) -> Result<()> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('groups') WHERE name = 'parent_id')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        // SQLite allows a REFERENCES clause on ADD COLUMN only with a NULL
+        // default, which is exactly the nullable self-reference we need.
+        conn.execute_batch(
+            "ALTER TABLE groups ADD COLUMN parent_id INTEGER
+             REFERENCES groups(id) ON DELETE CASCADE",
+        )?;
     }
     Ok(())
 }
@@ -3018,5 +3041,46 @@ mod groups_migration_tests {
         let conn = init_at(&dir).unwrap();
         let entries = crate::launch::list_launch_entries(&conn).unwrap();
         assert_eq!(entries[0].group_id, Some(group.id));
+    }
+
+    #[test]
+    fn migrates_databases_created_before_group_nesting() {
+        // A database from the colors round has a groups table without the
+        // nullable self-reference; every stored group must become top level.
+        let dir = tempfile::tempdir().unwrap().into_path();
+        std::fs::create_dir_all(&dir).unwrap();
+        {
+            let conn = Connection::open(dir.join("sprout.db")).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE groups (
+                     id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                     collection TEXT NOT NULL CHECK (collection IN ('launch', 'action', 'clip')),
+                     name       TEXT NOT NULL,
+                     color      TEXT,
+                     position   INTEGER NOT NULL DEFAULT 0
+                 );
+                 INSERT INTO groups (collection, name, position)
+                 VALUES ('launch', 'Legacy', 0);",
+            )
+            .unwrap();
+        }
+        let conn = init_at(&dir).unwrap();
+
+        let groups = crate::groups::list_groups(&conn, crate::groups::Collection::Launch).unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].parent_id, None, "existing groups stay top level");
+
+        // The new link works end to end on the migrated table.
+        let child = crate::groups::create_group(&conn, crate::groups::Collection::Launch, "Child")
+            .unwrap();
+        crate::groups::move_group(&conn, child.id, Some(groups[0].id), 0).unwrap();
+        let nested = crate::groups::list_groups(&conn, crate::groups::Collection::Launch).unwrap();
+        assert_eq!(nested[1].parent_id, Some(groups[0].id));
+
+        // The migration is idempotent — re-running init changes nothing.
+        drop(conn);
+        let conn = init_at(&dir).unwrap();
+        let again = crate::groups::list_groups(&conn, crate::groups::Collection::Launch).unwrap();
+        assert_eq!(again[1].parent_id, Some(groups[0].id));
     }
 }

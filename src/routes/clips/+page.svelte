@@ -14,14 +14,18 @@
     listClips,
     moveClip,
     openClipViewer,
+    placeItem,
     updateClip,
     updateClipImage,
   } from "$lib/api";
   import {
-    countMembers,
     createCollectionGroups,
-    groupView,
   } from "$lib/collectionGroups.svelte";
+  import {
+    collectionTree,
+    countMembers,
+    subtreeCount,
+  } from "$lib/collectionTree";
   import {
     isDockVisible,
     isFilterActive,
@@ -31,6 +35,12 @@
     shouldShowDockFilter,
     type DockVisibility,
   } from "$lib/dockVisibility";
+  import { createCollectionDrag } from "$lib/collectionDrag.svelte";
+  import {
+    resolveGroupDrop,
+    resolveItemDrop,
+    type ItemDropSuccess,
+  } from "$lib/dropTargets";
   import { clipTitle, formatBytes } from "$lib/format";
   import Button from "$lib/components/Button.svelte";
   import Checkbox from "$lib/components/Checkbox.svelte";
@@ -40,6 +50,8 @@
   import GroupNameDialog from "$lib/components/GroupNameDialog.svelte";
   import GroupColorDialog from "$lib/components/GroupColorDialog.svelte";
   import GroupAccordion from "$lib/components/GroupAccordion.svelte";
+  import DragGrip from "$lib/components/DragGrip.svelte";
+  import DragOverlay from "$lib/components/DragOverlay.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import IconButton from "$lib/components/IconButton.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
@@ -116,6 +128,47 @@
       reload: () => load(),
     },
   });
+
+  // Drag & drop (tickets 232–233): the shared controller, one per page.
+  const drag = createCollectionDrag({
+    enabled: () => !reorderBlocked,
+    resolveItem: (dragId, target) =>
+      resolveItemDrop({
+        dragId,
+        order: clips.map((clip) => clip.id),
+        filtering: reorderBlocked,
+        overRow: target.overRow,
+        hasAppendTarget: target.hasAppendTarget,
+        appendGroupId: target.appendGroupId,
+      }),
+    resolveGroup: (dragId, target) =>
+      resolveGroupDrop({
+        dragId,
+        groups: groups.groups,
+        filtering: reorderBlocked,
+        overHeaderId: target.overHeaderId,
+        overSlot: target.overSlot,
+        overTopLevelArea: target.overTopLevelArea,
+      }),
+    commitItem: (dragId, drop) => void placeClip(dragId, drop),
+    commitGroup: (dragId, drop) =>
+      void groups.reorderGroup(dragId, drop.parentId, drop.position),
+  });
+
+  /** One transactional clip drop; a refusal reloads the stored list. */
+  async function placeClip(itemId: number, drop: ItemDropSuccess) {
+    busy = true;
+    error = "";
+    try {
+      await placeItem("clip", itemId, drop.groupId, drop.position);
+    } catch (e) {
+      console.error(e);
+      error = String(e);
+    } finally {
+      await load();
+      busy = false;
+    }
+  }
 
   // One menu serves clip rows and group headers; which kind it belongs to
   // rides on whichever id is set.
@@ -538,11 +591,14 @@
     }
     const groupMenu = groups.groupMenu(group, anchor, viaKeyboard);
     // Group order is order too: refuse it under filters like clip moves.
+    // Reparenting changes sibling order, so "Move into…" pauses with them.
     menu = reorderBlocked
       ? {
           ...groupMenu,
           items: groupMenu.items.map((item) =>
-            item.label === t("menu.moveUp") || item.label === t("menu.moveDown")
+            item.label === t("menu.moveUp") ||
+            item.label === t("menu.moveDown") ||
+            item.label === t("menu.moveInto")
               ? { ...item, disabled: true }
               : item
           ),
@@ -582,8 +638,8 @@
     dockVisibility = "all";
   }
 
-  const listView = $derived(
-    groupView(groups.groups, clips, matchesBoth, isFiltering)
+  const tree = $derived(
+    collectionTree(groups.groups, clips, matchesBoth, isFiltering)
   );
 </script>
 
@@ -591,9 +647,37 @@
   <title>{t("nav.clips")} — Sprout</title>
 </svelte:head>
 
+{#snippet groupActions(group: Group)}
+  <IconButton
+    icon="dots"
+    label={t("groups.menuLabel").replace("{name}", group.name)}
+    quiet
+    data-ctx-trigger
+    onclick={(e) =>
+      openGroupMenu(
+        group,
+        e.currentTarget as HTMLButtonElement,
+        e.detail === 0
+      )}
+  />
+{/snippet}
+
 {#snippet clipRow(clip: Clip)}
   {@const title = clipName(clip)}
-  <li class="rack__row" oncontextmenu={(e) => openRowContextMenu(e, clip)}>
+  <li
+    class="rack__row"
+    data-drop-row={clip.id}
+    data-drop-group={clip.group_id ?? ""}
+    oncontextmenu={(e) => openRowContextMenu(e, clip)}
+  >
+    <DragGrip
+      label={t("drag.grip").replace("{name}", title)}
+      disabled={reorderBlocked}
+      onstart={(event) =>
+        drag.start(event, { kind: "item", id: clip.id, label: title })}
+      onmenu={(event) =>
+        openRowMenu(clip, event.currentTarget as HTMLButtonElement, true)}
+    />
     <button
       type="button"
       class="rack__main"
@@ -740,57 +824,120 @@
         </Button>
       </div>
     </EmptyState>
-  {:else if grouped}
-    {#if listView.ungrouped.length > 0}
-      <ul class="rack">
-        {#each listView.ungrouped as clip (clip.id)}
-          {@render clipRow(clip)}
+  {:else}
+    <div class="rack-area" data-drop-top-level>
+      {#if grouped}
+        {#if tree.ungrouped.length > 0}
+          <ul class="rack">
+            {#each tree.ungrouped as clip (clip.id)}
+              {@render clipRow(clip)}
+            {/each}
+          </ul>
+        {/if}
+        {#each tree.sections as section (section.group.id)}
+          {#snippet grip()}
+            <DragGrip
+              label={t("drag.grip").replace("{name}", section.group.name)}
+              disabled={reorderBlocked}
+              onstart={(event) =>
+                drag.start(event, {
+                  kind: "group",
+                  id: section.group.id,
+                  label: section.group.name,
+                })}
+              onmenu={(event) =>
+                openGroupMenu(
+                  section.group,
+                  event.currentTarget as HTMLButtonElement,
+                  true,
+                )}
+            />
+          {/snippet}
+          <GroupAccordion
+            grip={grip}
+            open={sectionOpen(section.group.id)}
+            controls={`clip-group-${section.group.id}`}
+            name={section.group.name}
+            count={subtreeCount(clips, groups.groups, section.group.id)}
+            color={section.group.color}
+            groupId={section.group.id}
+            onToggle={() => groups.collapse.toggle(section.group.id)}
+          >
+            {#snippet actions()}
+              {@render groupActions(section.group)}
+            {/snippet}
+            {#if section.rows.length > 0 || section.children.length === 0}
+              <ul class="rack">
+                {#each section.rows as clip (clip.id)}
+                  {@render clipRow(clip)}
+                {/each}
+                {#if section.rows.length === 0}
+                  <li class="rack__hint" data-drop-empty-group={section.group.id}>
+                    {t("clips.emptyGroupHint")}
+                  </li>
+                {/if}
+              </ul>
+            {/if}
+            {#each section.children as child (child.group.id)}
+              {#snippet grip()}
+                <DragGrip
+                  label={t("drag.grip").replace("{name}", child.group.name)}
+                  disabled={reorderBlocked}
+                  onstart={(event) =>
+                    drag.start(event, {
+                      kind: "group",
+                      id: child.group.id,
+                      label: child.group.name,
+                    })}
+                  onmenu={(event) =>
+                    openGroupMenu(
+                      child.group,
+                      event.currentTarget as HTMLButtonElement,
+                      true,
+                    )}
+                />
+              {/snippet}
+              <GroupAccordion
+                grip={grip}
+                nested
+                open={sectionOpen(child.group.id)}
+                controls={`clip-group-${child.group.id}`}
+                name={child.group.name}
+                count={countMembers(clips, child.group.id)}
+                color={child.group.color}
+                groupId={child.group.id}
+                parentId={section.group.id}
+                onToggle={() => groups.collapse.toggle(child.group.id)}
+              >
+                {#snippet actions()}
+                  {@render groupActions(child.group)}
+                {/snippet}
+                <ul class="rack">
+                  {#each child.rows as clip (clip.id)}
+                    {@render clipRow(clip)}
+                  {/each}
+                  {#if child.rows.length === 0}
+                    <li class="rack__hint" data-drop-empty-group={child.group.id}>
+                      {t("clips.emptyGroupHint")}
+                    </li>
+                  {/if}
+                </ul>
+              </GroupAccordion>
+            {/each}
+          </GroupAccordion>
         {/each}
-      </ul>
-    {/if}
-    {#each listView.sections as section (section.group.id)}
-      <GroupAccordion
-        open={sectionOpen(section.group.id)}
-        controls={`clip-group-${section.group.id}`}
-        name={section.group.name}
-        count={countMembers(clips, section.group.id)}
-        color={section.group.color}
-        onToggle={() => groups.collapse.toggle(section.group.id)}
-      >
-        {#snippet actions()}
-          <IconButton
-            icon="dots"
-            label={t("groups.menuLabel").replace("{name}", section.group.name)}
-            quiet
-            data-ctx-trigger
-            onclick={(e) =>
-              openGroupMenu(
-                section.group,
-                e.currentTarget as HTMLButtonElement,
-                e.detail === 0
-              )}
-          />
-        {/snippet}
+      {:else}
         <ul class="rack">
-          {#each section.rows as clip (clip.id)}
+          {#each matchingClips as clip (clip.id)}
             {@render clipRow(clip)}
           {/each}
-          {#if section.rows.length === 0}
-            <li class="rack__hint">
-              {t("clips.emptyGroupHint")}
-            </li>
-          {/if}
         </ul>
-      </GroupAccordion>
-    {/each}
-  {:else}
-    <ul class="rack">
-      {#each matchingClips as clip (clip.id)}
-        {@render clipRow(clip)}
-      {/each}
-    </ul>
+      {/if}
+    </div>
   {/if}
 </section>
+
+<DragOverlay drag={drag.drag} message={drag.message} />
 
 <div class="sr-only" role="status" aria-live="polite">
   {copiedAnnouncement}
@@ -819,7 +966,9 @@
   oncancel={() => groups.cancelRemove()}
 >
   <p>
-    <strong>{groups.removing?.name}</strong>{t("dialog.removeGroupBody").replace("{noun}", t("collection.clips.many"))}
+    <strong>{groups.removing?.name}</strong>{groups.removingHasChildren
+      ? t("dialog.removeParentBody")
+      : t("dialog.removeChildBody")}
   </p>
 </ConfirmDialog>
 
@@ -1026,7 +1175,14 @@
     gap: var(--space-2);
   }
 
+  /* Room below the tree for the top-level drop target (ticket 233). */
+  .rack-area {
+    min-height: 96px;
+    padding-bottom: var(--space-6);
+  }
+
   .rack__row {
+    position: relative;
     display: flex;
     align-items: center;
     gap: var(--space-2);
@@ -1047,6 +1203,15 @@
   .rack__row:hover {
     background: var(--group-row-hover, var(--bg-hover));
     --row-text: var(--group-row-hover-text, var(--text-muted));
+  }
+
+  /* The card's drag grip fades in from its leading gutter (ticket 232). The
+     grip's strip is a descendant of the row, so hovering the strip keeps this
+     `:hover` alive: the card stays lit while the pointer travels to the
+     handle, and the handle stays visible. */
+  .rack__row:hover,
+  .rack__row:focus-within {
+    --grip-opacity: 1;
   }
 
   .rack__main {

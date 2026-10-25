@@ -9,17 +9,25 @@
 //! group accepts only Quick Actions, and likewise for Clips and Launch
 //! entries (spec decision, ticket 85). Items hold a nullable `group_id`
 //! column — at most one group per item — and deleting a group returns its
-//! members to ungrouped instead of deleting them. Names are exclusive
-//! within their collection, and a group exists only while at least one
-//! member belongs to it: the last member leaving dissolves it (ticket 106).
+//! members to ungrouped instead of deleting them.
+//!
+//! Groups nest exactly two levels (spec 221 §C): a top-level row may hold
+//! items and child groups, a child may hold only items. Names are exclusive
+//! among siblings — `(collection, parent_id)` — so two parents may reuse a
+//! child name. A group exists while it has a direct item or a child group;
+//! the last one leaving dissolves it bottom-up. Deleting a parent ungroups
+//! every item in its subtree and deletes only the structure.
 //!
 //! Groups are machine-local structure like desktop assignments (ticket 88):
-//! never part of Presets, Plan, Run, or exports.
+//! never part of Presets, Plan, Run, or exports. `parent_id` is structural,
+//! so it would ride along when groups enter the backup document (ADR-0026).
 
 use std::collections::HashMap;
 
 use rusqlite::{params, Connection, OptionalExtension, Result};
 use serde::{Deserialize, Serialize};
+
+use crate::ordered_list::OrderedList;
 
 /// Which collection a Group lives in — the discriminator that keeps the
 /// three namespaces apart at the data layer.
@@ -66,11 +74,20 @@ impl Collection {
             _ => None,
         }
     }
+
+    /// The position discipline this collection's rows share.
+    fn ordered_list(self) -> OrderedList {
+        match self {
+            Collection::Launch => OrderedList::LAUNCH_ENTRIES,
+            Collection::Action => OrderedList::QUICK_ACTIONS,
+            Collection::Clip => OrderedList::CLIPS,
+        }
+    }
 }
 
-/// A Group as stored: its collection namespace, its name, and its optional
-/// decorative color. Position is internal (order within the collection) and
-/// never part of the payload — reorders go through `move_group`.
+/// A Group as stored: its collection namespace, its name, its optional
+/// decorative color, and its parent. Position is sibling-scoped and internal
+/// (never part of the payload) — reorders go through `move_group`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Group {
     pub id: i64,
@@ -79,9 +96,12 @@ pub struct Group {
     /// `#rrggbb`, normalized lowercase, or `None` for neutral. Decorative
     /// only: never identity, ordering, dissolve, or backup (ADR-0026).
     pub color: Option<String>,
+    /// The top-level group this one nests under; `None` = top level. A child
+    /// never has children — the backend enforces depth 2 on every write.
+    pub parent_id: Option<i64>,
 }
 
-const SELECT_GROUP_SQL: &str = "SELECT id, collection, name, color FROM groups";
+const SELECT_GROUP_SQL: &str = "SELECT id, collection, name, color, parent_id FROM groups";
 
 fn group_from_row(row: &rusqlite::Row) -> Result<Group> {
     let collection: String = row.get(1)?;
@@ -98,14 +118,24 @@ fn group_from_row(row: &rusqlite::Row) -> Result<Group> {
         })?,
         name: row.get(2)?,
         color: row.get(3)?,
+        parent_id: row.get(4)?,
     })
 }
 
-/// Every Group of one collection, in user order.
+/// Every Group of one collection as a flat tree: each top-level group in
+/// sibling order, immediately followed by its own children in their sibling
+/// order. The frontend rebuilds the two levels from `parent_id`.
 pub fn list_groups(conn: &Connection, collection: Collection) -> Result<Vec<Group>> {
-    let mut stmt = conn.prepare(&format!(
-        "{SELECT_GROUP_SQL} WHERE collection = ?1 ORDER BY position, id"
-    ))?;
+    let mut stmt = conn.prepare(
+        "SELECT g.id, g.collection, g.name, g.color, g.parent_id
+         FROM groups g
+         LEFT JOIN groups parent ON parent.id = g.parent_id
+         WHERE g.collection = ?1
+         ORDER BY COALESCE(parent.position, g.position),
+                  (g.parent_id IS NOT NULL),
+                  g.position,
+                  g.id",
+    )?;
     let rows = stmt.query_map(params![collection.as_str()], group_from_row)?;
     rows.collect()
 }
@@ -122,14 +152,9 @@ fn get_group(conn: &Connection, id: i64) -> Result<Option<Group>> {
 /// [`get_group`] plus its internal position — delete/reorder need it.
 fn get_group_at(conn: &Connection, id: i64) -> Result<Option<(Group, i64)>> {
     conn.query_row(
-        "SELECT id, collection, name, color, position FROM groups WHERE id = ?1",
+        "SELECT id, collection, name, color, parent_id, position FROM groups WHERE id = ?1",
         params![id],
-        |row| {
-            Ok((
-                group_from_row(row)?,
-                row.get::<_, i64>(4)?,
-            ))
-        },
+        |row| Ok((group_from_row(row)?, row.get::<_, i64>(5)?)),
     )
     .optional()
 }
@@ -142,21 +167,23 @@ pub fn validate_group_name(name: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
-/// Whether a sibling in the same collection already carries this name,
-/// compared trimmed and case-insensitively (ticket 106). `except_id` excludes
-/// the group being renamed. Uniqueness binds to live rows only — a deleted or
-/// dissolved group frees its name immediately.
+/// Whether a sibling — same collection and same parent — already carries this
+/// name, compared trimmed and case-insensitively. `except_id` excludes the
+/// group being renamed or moved. Uniqueness binds to live rows only, so a
+/// deleted or dissolved group frees its name immediately. `parent_id IS ?2`
+/// matches NULL as NULL, keeping top-level names in their own set.
 fn colliding_group(
     conn: &Connection,
     collection: Collection,
+    parent_id: Option<i64>,
     name: &str,
     except_id: Option<i64>,
 ) -> Result<bool> {
     let needle = name.trim().to_lowercase();
     let mut stmt = conn.prepare(&format!(
-        "{SELECT_GROUP_SQL} WHERE collection = ?1"
+        "{SELECT_GROUP_SQL} WHERE collection = ?1 AND parent_id IS ?2"
     ))?;
-    let rows = stmt.query_map(params![collection.as_str()], group_from_row)?;
+    let rows = stmt.query_map(params![collection.as_str(), parent_id], group_from_row)?;
     for sibling in rows {
         let sibling = sibling?;
         if Some(sibling.id) != except_id && sibling.name.trim().to_lowercase() == needle {
@@ -166,18 +193,25 @@ fn colliding_group(
     Ok(false)
 }
 
-fn collision_error(collection: Collection, name: &str) -> String {
-    format!(
-        "A group named '{}' already exists in {} — pick another name.",
-        name.trim(),
-        collection.label()
-    )
+fn collision_error(collection: Collection, name: &str, parent_id: Option<i64>) -> String {
+    if parent_id.is_some() {
+        format!(
+            "A subgroup named '{}' already exists there — pick another name.",
+            name.trim()
+        )
+    } else {
+        format!(
+            "A group named '{}' already exists in {} — pick another name.",
+            name.trim(),
+            collection.label()
+        )
+    }
 }
 
-/// Appends a Group at the end of its collection's order (the next free
-/// position among that collection's groups only — namespaces never share an
-/// ordering). The trimmed name must be unique within the collection,
-/// case-insensitively (ticket 106).
+/// Appends a top-level Group at the end of its collection's order (the next
+/// free position among that collection's top-level groups — namespaces never
+/// share an ordering). The trimmed name must be unique among top-level
+/// siblings, case-insensitively. Children are only created by `move_group`.
 pub fn create_group(
     conn: &Connection,
     collection: Collection,
@@ -185,12 +219,13 @@ pub fn create_group(
 ) -> std::result::Result<Group, String> {
     validate_group_name(name)?;
     let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
-    if colliding_group(&tx, collection, name, None).map_err(|e| e.to_string())? {
-        return Err(collision_error(collection, name));
+    if colliding_group(&tx, collection, None, name, None).map_err(|e| e.to_string())? {
+        return Err(collision_error(collection, name, None));
     }
     let position: i64 = tx
         .query_row(
-            "SELECT COALESCE(MAX(position), -1) + 1 FROM groups WHERE collection = ?1",
+            "SELECT COALESCE(MAX(position), -1) + 1 FROM groups
+              WHERE collection = ?1 AND parent_id IS NULL",
             params![collection.as_str()],
             |row| row.get(0),
         )
@@ -207,17 +242,19 @@ pub fn create_group(
         .expect("just inserted"))
 }
 
-/// Renames a Group in place; position and membership are untouched. The
-/// trimmed name must stay unique within the collection, case-insensitively,
-/// excluding the group itself (ticket 106).
+/// Renames a Group in place; position, parent, and membership are untouched.
+/// The trimmed name must stay unique among siblings — the same collection and
+/// parent — case-insensitively, excluding the group itself.
 pub fn rename_group(conn: &Connection, id: i64, name: &str) -> std::result::Result<(), String> {
     validate_group_name(name)?;
     let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
     let group = get_group(&tx, id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "This group no longer exists — refresh and try again.".to_string())?;
-    if colliding_group(&tx, group.collection, name, Some(id)).map_err(|e| e.to_string())? {
-        return Err(collision_error(group.collection, name));
+    if colliding_group(&tx, group.collection, group.parent_id, name, Some(id))
+        .map_err(|e| e.to_string())?
+    {
+        return Err(collision_error(group.collection, name, group.parent_id));
     }
     tx.execute(
         "UPDATE groups SET name = ?1 WHERE id = ?2",
@@ -265,80 +302,180 @@ pub fn set_group_color(
     Ok(())
 }
 
-/// Dissolves every group across all three collections that no item belongs
-/// to anymore (ticket 106): a group exists only while it has members. Runs
-/// inside the caller's transaction; survivor positions are untouched, so the
-/// user's order is preserved (gaps are harmless — lists order by position).
+/// Dissolves every group across all three collections that has no direct item
+/// and no child group. Runs inside the caller's transaction; survivor
+/// positions are untouched, so the user's order is preserved (gaps are
+/// harmless — lists order by position).
+///
+/// Bottom-up in one transaction: empty leaves go first, then any parent left
+/// with no direct items and no remaining children. Two passes cover the
+/// two-level limit, so naturally emptying a subgroup cascades to its parent.
 /// Explicitly created empty groups dissolve on the next unassign/delete
 /// transaction, never mid-create.
 pub(crate) fn sweep_empty_groups(conn: &Connection) -> Result<usize> {
-    conn.execute(
-        "DELETE FROM groups WHERE NOT EXISTS (
+    let memberless = "NOT EXISTS (
             SELECT 1 FROM launch_entries WHERE launch_entries.group_id = groups.id
          ) AND NOT EXISTS (
             SELECT 1 FROM quick_actions WHERE quick_actions.group_id = groups.id
          ) AND NOT EXISTS (
             SELECT 1 FROM clips WHERE clips.group_id = groups.id
-         )",
+         )";
+    let mut removed = conn.execute(
+        &format!("DELETE FROM groups WHERE parent_id IS NOT NULL AND {memberless}"),
         [],
-    )
+    )?;
+    removed += conn.execute(
+        &format!(
+            "DELETE FROM groups WHERE parent_id IS NULL AND {memberless}
+             AND NOT EXISTS (SELECT 1 FROM groups child WHERE child.parent_id = groups.id)"
+        ),
+        [],
+    )?;
+    Ok(removed)
 }
 
-/// Removes a Group: its members go back to ungrouped (their `group_id` is
-/// nulled — the items themselves are never touched) and the collection's
-/// remaining groups close ranks so positions stay gapless. A missing id is
-/// an error, matching the other collections' deletes.
+/// Every sibling id of one level in user order.
+fn sibling_ids(
+    conn: &Connection,
+    collection: Collection,
+    parent_id: Option<i64>,
+) -> Result<Vec<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT id FROM groups
+          WHERE collection = ?1 AND parent_id IS ?2
+          ORDER BY position, id",
+    )?;
+    let rows = stmt.query_map(params![collection.as_str(), parent_id], |row| {
+        row.get::<_, i64>(0)
+    })?;
+    rows.collect()
+}
+
+/// Removes a Group and returns every item it held to ungrouped — items are
+/// never deleted. Deleting a child removes only that child; deleting a parent
+/// removes its whole subtree (child groups are structure) after ungrouping
+/// every direct and descendant item. Sibling positions compact at the
+/// deleted group's own level. A missing id is an error, matching the other
+/// collections' deletes.
 pub fn delete_group(conn: &Connection, id: i64) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
     let (group, position) =
         get_group_at(&tx, id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+    let children: Vec<i64> = {
+        let mut stmt = tx.prepare("SELECT id FROM groups WHERE parent_id = ?1")?;
+        let rows = stmt.query_map(params![id], |row| row.get::<_, i64>(0))?;
+        rows.collect::<Result<Vec<_>>>()?
+    };
+    let table = group.collection.table();
     // Explicit null-out beside the schema's ON DELETE SET NULL: the rule
     // holds even where the foreign-keys pragma isn't enforcing.
-    tx.execute(
-        &format!(
-            "UPDATE {} SET group_id = NULL WHERE group_id = ?1",
-            group.collection.table()
-        ),
-        params![id],
-    )?;
+    let mut subtree = vec![id];
+    subtree.extend_from_slice(&children);
+    for member in &subtree {
+        tx.execute(
+            &format!("UPDATE {table} SET group_id = NULL WHERE group_id = ?1"),
+            params![member],
+        )?;
+    }
+    // Children first so no row outlives its parent even without cascades.
+    for child in &children {
+        tx.execute("DELETE FROM groups WHERE id = ?1", params![child])?;
+    }
     tx.execute("DELETE FROM groups WHERE id = ?1", params![id])?;
+    // Compact the deleted group's own level: top-level siblings for a parent,
+    // the parent's other children for a child. The deleted children's own
+    // levels disappear with them, so no second compaction applies.
     tx.execute(
         "UPDATE groups SET position = position - 1
-         WHERE collection = ?1 AND position > ?2",
-        params![group.collection.as_str(), position],
+         WHERE collection = ?1 AND parent_id IS ?2 AND position > ?3",
+        params![group.collection.as_str(), group.parent_id, position],
     )?;
     sweep_empty_groups(&tx)?;
     tx.commit()
 }
 
-/// Moves a Group to `to_position` within its own collection's order
-/// (clamped), renumbering the rest — mirroring the item lists' reorder.
-pub fn move_group(conn: &Connection, id: i64, to_position: i64) -> Result<()> {
-    let tx = conn.unchecked_transaction()?;
-    let collection = get_group(&tx, id)?
-        .ok_or(rusqlite::Error::QueryReturnedNoRows)?
-        .collection;
-    let mut ids: Vec<i64> = {
-        let mut stmt = tx.prepare(
-            "SELECT id FROM groups WHERE collection = ?1 ORDER BY position, id",
-        )?;
-        let rows = stmt.query_map(params![collection.as_str()], |row| row.get::<_, i64>(0))?;
-        rows.collect::<Result<Vec<_>>>()?
-    };
-    let from = match ids.iter().position(|&candidate| candidate == id) {
-        Some(index) => index,
-        None => return Ok(()),
-    };
-    ids.remove(from);
-    let clamped = to_position.clamp(0, ids.len() as i64) as usize;
-    ids.insert(clamped, id);
-    for (index, group_id) in ids.iter().enumerate() {
-        tx.execute(
-            "UPDATE groups SET position = ?1 WHERE id = ?2",
-            params![index as i64, group_id],
-        )?;
+/// The one reparent/reorder contract: moves `id` under `parent_id` (or to the
+/// top level with `None`) at `to_position` (clamped), renumbering the old and
+/// new sibling sets in one transaction. Moving within the same parent is a
+/// reorder; `None` unnests.
+///
+/// Depth 2 is enforced here, not just in the UI: a parent must exist in the
+/// same collection and be top level, and a group that has children can only
+/// stay at the top level. Destination name collisions are refused before any
+/// row is written, naming the colliding name.
+pub fn move_group(
+    conn: &Connection,
+    id: i64,
+    parent_id: Option<i64>,
+    to_position: i64,
+) -> std::result::Result<(), String> {
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    let (group, _) = get_group_at(&tx, id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "This group no longer exists — refresh and try again.".to_string())?;
+
+    if parent_id == Some(id) {
+        return Err("A group can't be moved into itself.".into());
     }
-    tx.commit()
+    if let Some(destination) = parent_id {
+        let parent = get_group(&tx, destination)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "That group no longer exists — refresh and try again.".to_string())?;
+        if parent.collection != group.collection {
+            return Err(format!(
+                "A {} group can't move inside {} — groups never cross collections.",
+                group.collection.label(),
+                parent.collection.label()
+            ));
+        }
+        if parent.parent_id.is_some() {
+            return Err(
+                "Groups only nest two levels deep — pick a top-level group.".into(),
+            );
+        }
+        let child_count: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM groups WHERE parent_id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if child_count > 0 {
+            return Err(
+                "This group has subgroups of its own — it can only stay at the top level.".into(),
+            );
+        }
+    }
+    if colliding_group(&tx, group.collection, parent_id, &group.name, Some(id))
+        .map_err(|e| e.to_string())?
+    {
+        return Err(collision_error(group.collection, &group.name, parent_id));
+    }
+
+    let old_parent = group.parent_id;
+    let mut destination = sibling_ids(&tx, group.collection, parent_id).map_err(|e| e.to_string())?;
+    destination.retain(|&sibling| sibling != id);
+    let index = to_position.clamp(0, destination.len() as i64) as usize;
+    destination.insert(index, id);
+    for (index, sibling) in destination.iter().enumerate() {
+        tx.execute(
+            "UPDATE groups SET parent_id = ?1, position = ?2 WHERE id = ?3",
+            params![parent_id, index as i64, sibling],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    if old_parent != parent_id {
+        let old_siblings =
+            sibling_ids(&tx, group.collection, old_parent).map_err(|e| e.to_string())?;
+        for (index, sibling) in old_siblings.iter().enumerate() {
+            tx.execute(
+                "UPDATE groups SET position = ?1 WHERE id = ?2",
+                params![index as i64, sibling],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    tx.commit().map_err(|e| e.to_string())
 }
 
 /// Why an assignment could not be applied: the data-layer isolation rule
@@ -431,6 +568,54 @@ pub fn unassign_item(
     sweep_empty_groups(&tx)?;
     tx.commit()?;
     Ok(())
+}
+
+/// The drag & drop drop contract (ticket 232): assigns one item to a group
+/// (or ungrouped) and moves it to a global list position in ONE transaction.
+/// `to_position` is the item's index in the full collection after it is
+/// removed — the same index `OrderedList::place_at` expects — so the item's
+/// order inside its target group and Start-all's global order stay one
+/// contract (spec 221 D.5).
+///
+/// Everything is validated before the first write: a missing item or group,
+/// or a group of another collection, leaves the row and the list untouched.
+/// Any failure after the writes rolls the whole transaction back, so a drop
+/// can never half-apply. The item's old group, if left empty, dissolves in
+/// the same transaction.
+pub fn place_item(
+    conn: &Connection,
+    collection: Collection,
+    item_id: i64,
+    group_id: Option<i64>,
+    to_position: i64,
+) -> std::result::Result<(), String> {
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    if let Some(target) = group_id {
+        let group = get_group(&tx, target)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "This group no longer exists — refresh and try again.".to_string())?;
+        if group.collection != collection {
+            return Err(format!(
+                "That group belongs to {} — a group only holds items of its own collection.",
+                group.collection.label()
+            ));
+        }
+    }
+    let changed = tx
+        .execute(
+            &format!("UPDATE {} SET group_id = ?1 WHERE id = ?2", collection.table()),
+            params![group_id, item_id],
+        )
+        .map_err(|e| e.to_string())?;
+    if changed == 0 {
+        return Err("This item no longer exists — refresh and try again.".into());
+    }
+    collection
+        .ordered_list()
+        .place_at(&tx, item_id, to_position)
+        .map_err(|e| e.to_string())?;
+    sweep_empty_groups(&tx).map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())
 }
 
 /// One collection's items laid out for rendering: everything ungrouped
@@ -547,8 +732,8 @@ mod tests {
         let a_launch = create_group(&conn, Collection::Launch, "L1").unwrap();
         let an_action = create_group(&conn, Collection::Action, "A1").unwrap();
         let another_launch = create_group(&conn, Collection::Launch, "L2").unwrap();
-        move_group(&conn, another_launch.id, 0).unwrap();
-        move_group(&conn, an_action.id, 5).unwrap(); // clamped within its own namespace
+        move_group(&conn, another_launch.id, None, 0).unwrap();
+        move_group(&conn, an_action.id, None, 5).unwrap(); // clamped within its own namespace
 
         let launches = list_groups(&conn, Collection::Launch).unwrap();
         assert_eq!(launches.iter().map(|g| g.id).collect::<Vec<_>>(), vec![another_launch.id, a_launch.id]);
@@ -629,7 +814,7 @@ mod tests {
         // The remaining group closed ranks.
         let remaining = list_groups(&conn, Collection::Clip).unwrap();
         assert_eq!(remaining.iter().map(|g| g.id).collect::<Vec<_>>(), vec![g2.id]);
-        move_group(&conn, remaining[0].id, 3).unwrap(); // still reorderable
+        move_group(&conn, remaining[0].id, None, 3).unwrap(); // still reorderable
 
         delete_group(&conn, 99_999).unwrap_err(); // missing id is an error
     }
@@ -647,7 +832,7 @@ mod tests {
         let free = quick_actions::create_quick_action(&conn, &action("b")).unwrap();
 
         // Reorder: Second now comes before First.
-        move_group(&conn, g2.id, 0).unwrap();
+        move_group(&conn, g2.id, None, 0).unwrap();
         let groups = list_groups(&conn, Collection::Action).unwrap();
 
         let items = quick_actions::list_quick_actions(&conn).unwrap();
@@ -666,7 +851,13 @@ mod tests {
 
     #[test]
     fn order_by_group_keeps_every_group_and_treats_unknown_refs_as_ungrouped() {
-        let g1 = Group { id: 7, collection: Collection::Launch, name: "Solo".into(), color: None };
+        let g1 = Group {
+            id: 7,
+            collection: Collection::Launch,
+            name: "Solo".into(),
+            color: None,
+            parent_id: None,
+        };
         // No items at all: the empty group is still handed back, user order trivially.
         let sections = order_by_group(Vec::<i32>::new(), vec![g1.clone()], |_| None);
         assert!(sections.ungrouped.is_empty());
@@ -846,7 +1037,7 @@ mod tests {
         set_group_color(&conn, first.id, Some("#112233")).unwrap();
         set_group_color(&conn, second.id, Some("#445566")).unwrap();
         rename_group(&conn, first.id, "Renamed").unwrap();
-        move_group(&conn, first.id, 2).unwrap();
+        move_group(&conn, first.id, None, 2).unwrap();
 
         let groups = list_groups(&conn, Collection::Action).unwrap();
         assert_eq!(
@@ -856,5 +1047,339 @@ mod tests {
         assert_eq!(groups[0].color.as_deref(), Some("#445566"));
         assert_eq!(groups[1].color, None, "no color inheritance or spillover");
         assert_eq!(groups[2].color.as_deref(), Some("#112233"));
+    }
+
+    fn position_of(conn: &Connection, id: i64) -> i64 {
+        conn.query_row(
+            "SELECT position FROM groups WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    fn ids(groups: &[Group]) -> Vec<i64> {
+        groups.iter().map(|g| g.id).collect()
+    }
+
+    #[test]
+    fn list_groups_returns_the_flat_tree_in_sibling_order() {
+        let conn = conn();
+        let first = create_group(&conn, Collection::Action, "First").unwrap();
+        let child_a = create_group(&conn, Collection::Action, "Child A").unwrap();
+        let child_b = create_group(&conn, Collection::Action, "Child B").unwrap();
+        let second = create_group(&conn, Collection::Action, "Second").unwrap();
+
+        move_group(&conn, child_b.id, Some(first.id), 0).unwrap();
+        move_group(&conn, child_a.id, Some(first.id), 1).unwrap();
+
+        let listed = list_groups(&conn, Collection::Action).unwrap();
+        assert_eq!(
+            ids(&listed),
+            vec![first.id, child_b.id, child_a.id, second.id],
+            "a parent immediately precedes its children; each level keeps its own order"
+        );
+        assert_eq!(listed[0].parent_id, None);
+        assert_eq!(listed[1].parent_id, Some(first.id));
+        assert_eq!(listed[2].parent_id, Some(first.id));
+        assert_eq!(listed[3].parent_id, None);
+    }
+
+    #[test]
+    fn child_names_are_sibling_scoped_and_two_parents_may_reuse_a_name() {
+        let conn = conn();
+        let clients = create_group(&conn, Collection::Action, "Clients").unwrap();
+        let personal = create_group(&conn, Collection::Action, "Personal").unwrap();
+
+        let work_a = create_group(&conn, Collection::Action, "Work").unwrap();
+        move_group(&conn, work_a.id, Some(clients.id), 0).unwrap();
+        // The name is free at the top level again: uniqueness is sibling-only.
+        let work_b = create_group(&conn, Collection::Action, "Work").unwrap();
+        move_group(&conn, work_b.id, Some(personal.id), 0).unwrap();
+        assert_eq!(
+            list_groups(&conn, Collection::Action)
+                .unwrap()
+                .iter()
+                .filter(|g| g.name == "Work")
+                .count(),
+            2,
+            "two parents may use the same child name"
+        );
+
+        // A third "Work" under Clients collides with work_a — and the message
+        // names the colliding name.
+        let work_c = create_group(&conn, Collection::Action, "Work").unwrap();
+        let err = move_group(&conn, work_c.id, Some(clients.id), 0).unwrap_err();
+        assert!(err.contains("'Work'"), "got: {err}");
+
+        // Rename is checked against the group's own sibling set.
+        let design = create_group(&conn, Collection::Action, "Design").unwrap();
+        move_group(&conn, design.id, Some(clients.id), 1).unwrap();
+        let err = rename_group(&conn, design.id, "work").unwrap_err();
+        assert!(err.contains("already exists"), "got: {err}");
+        // The same name under another parent is fine.
+        rename_group(&conn, work_b.id, "Design").unwrap();
+        rename_group(&conn, work_a.id, "Work").unwrap();
+    }
+
+    #[test]
+    fn move_reparents_unnests_and_renumbers_both_levels() {
+        let conn = conn();
+        let parent = create_group(&conn, Collection::Action, "Parent").unwrap();
+        let first_child = create_group(&conn, Collection::Action, "First child").unwrap();
+        let second_child = create_group(&conn, Collection::Action, "Second child").unwrap();
+        move_group(&conn, first_child.id, Some(parent.id), 0).unwrap();
+        move_group(&conn, second_child.id, Some(parent.id), 1).unwrap();
+        assert_eq!(position_of(&conn, first_child.id), 0);
+        assert_eq!(position_of(&conn, second_child.id), 1);
+
+        // Same-parent move is a reorder, not a reparent.
+        move_group(&conn, second_child.id, Some(parent.id), 0).unwrap();
+        assert_eq!(position_of(&conn, second_child.id), 0);
+        assert_eq!(position_of(&conn, first_child.id), 1);
+
+        // Unnesting renumbers the old sibling set in the same transaction.
+        let other = create_group(&conn, Collection::Action, "Other").unwrap();
+        move_group(&conn, second_child.id, None, 1).unwrap();
+        assert_eq!(
+            position_of(&conn, first_child.id),
+            0,
+            "the old sibling set closes ranks"
+        );
+        let top: Vec<i64> = list_groups(&conn, Collection::Action)
+            .unwrap()
+            .iter()
+            .filter(|g| g.parent_id.is_none())
+            .map(|g| g.id)
+            .collect();
+        assert_eq!(top, vec![parent.id, second_child.id, other.id]);
+        assert_eq!(position_of(&conn, second_child.id), 1);
+    }
+
+    #[test]
+    fn move_refuses_depth_three_cycles_cross_collection_and_missing_parents() {
+        let conn = conn();
+        let parent = create_group(&conn, Collection::Action, "Parent").unwrap();
+        let child = create_group(&conn, Collection::Action, "Child").unwrap();
+        move_group(&conn, child.id, Some(parent.id), 0).unwrap();
+
+        // Depth 3: a child can never become a parent.
+        let err = move_group(&conn, parent.id, Some(child.id), 0).unwrap_err();
+        assert!(err.contains("two levels"), "got: {err}");
+
+        // Cycles.
+        let err = move_group(&conn, child.id, Some(child.id), 0).unwrap_err();
+        assert!(err.contains("itself"), "got: {err}");
+
+        // A group that has children can only stay at the top level.
+        let host = create_group(&conn, Collection::Action, "Host").unwrap();
+        let err = move_group(&conn, parent.id, Some(host.id), 0).unwrap_err();
+        assert!(err.contains("subgroups"), "got: {err}");
+
+        // Cross-collection parenting.
+        let clip_group = create_group(&conn, Collection::Clip, "Clips").unwrap();
+        let err = move_group(&conn, child.id, Some(clip_group.id), 0).unwrap_err();
+        assert!(err.contains("never cross collections"), "got: {err}");
+
+        // A missing parent leaves everything untouched.
+        let err = move_group(&conn, child.id, Some(99_999), 0).unwrap_err();
+        assert!(err.contains("no longer exists"), "got: {err}");
+        assert_eq!(
+            list_groups(&conn, Collection::Action)
+                .unwrap()
+                .iter()
+                .find(|g| g.id == child.id)
+                .unwrap()
+                .parent_id,
+            Some(parent.id)
+        );
+    }
+
+    #[test]
+    fn sweep_dissolves_empty_subgroups_bottom_up() {
+        let conn = conn();
+        let parent = create_group(&conn, Collection::Action, "Parent").unwrap();
+        let child = create_group(&conn, Collection::Action, "Child").unwrap();
+        move_group(&conn, child.id, Some(parent.id), 0).unwrap();
+        let item = quick_actions::create_quick_action(&conn, &action("a")).unwrap();
+        assign_item(&conn, Collection::Action, item.id, child.id).unwrap();
+        assert_eq!(list_groups(&conn, Collection::Action).unwrap().len(), 2);
+
+        unassign_item(&conn, Collection::Action, item.id).unwrap();
+        assert!(
+            list_groups(&conn, Collection::Action).unwrap().is_empty(),
+            "the emptied child goes first, then the parent left without either"
+        );
+
+        // A parent with its own direct item outlives an emptied subgroup.
+        let parent2 = create_group(&conn, Collection::Action, "Parent 2").unwrap();
+        let child2 = create_group(&conn, Collection::Action, "Child 2").unwrap();
+        move_group(&conn, child2.id, Some(parent2.id), 0).unwrap();
+        let child_item = quick_actions::create_quick_action(&conn, &action("child")).unwrap();
+        assign_item(&conn, Collection::Action, child_item.id, child2.id).unwrap();
+        let direct = quick_actions::create_quick_action(&conn, &action("direct")).unwrap();
+        assign_item(&conn, Collection::Action, direct.id, parent2.id).unwrap();
+
+        unassign_item(&conn, Collection::Action, child_item.id).unwrap();
+        assert_eq!(ids(&list_groups(&conn, Collection::Action).unwrap()), vec![parent2.id]);
+        unassign_item(&conn, Collection::Action, direct.id).unwrap();
+        assert!(list_groups(&conn, Collection::Action).unwrap().is_empty());
+    }
+
+    #[test]
+    fn deleting_a_parent_ungroups_its_whole_subtree_without_deleting_items() {
+        let conn = conn();
+        let parent = create_group(&conn, Collection::Action, "Parent").unwrap();
+        let child = create_group(&conn, Collection::Action, "Child").unwrap();
+        move_group(&conn, child.id, Some(parent.id), 0).unwrap();
+        let nested = quick_actions::create_quick_action(&conn, &action("nested")).unwrap();
+        assign_item(&conn, Collection::Action, nested.id, child.id).unwrap();
+        let direct = quick_actions::create_quick_action(&conn, &action("direct")).unwrap();
+        assign_item(&conn, Collection::Action, direct.id, parent.id).unwrap();
+        let other = create_group(&conn, Collection::Action, "Other").unwrap();
+        let survivor = quick_actions::create_quick_action(&conn, &action("survivor")).unwrap();
+        assign_item(&conn, Collection::Action, survivor.id, other.id).unwrap();
+
+        delete_group(&conn, parent.id).unwrap();
+
+        let stored = quick_actions::list_quick_actions(&conn).unwrap();
+        assert_eq!(stored.len(), 3, "no item is ever deleted");
+        for id in [direct.id, nested.id] {
+            assert_eq!(
+                stored.iter().find(|item| item.id == id).unwrap().group_id,
+                None,
+                "every item in the subtree returns to ungrouped"
+            );
+        }
+        assert_eq!(ids(&list_groups(&conn, Collection::Action).unwrap()), vec![other.id]);
+        assert_eq!(
+            position_of(&conn, other.id),
+            0,
+            "the top-level sibling set closes ranks"
+        );
+    }
+
+    #[test]
+    fn deleting_a_child_ungroups_only_its_items_and_keeps_the_parent() {
+        let conn = conn();
+        let parent = create_group(&conn, Collection::Action, "Parent").unwrap();
+        let child = create_group(&conn, Collection::Action, "Child").unwrap();
+        move_group(&conn, child.id, Some(parent.id), 0).unwrap();
+        let child_item = quick_actions::create_quick_action(&conn, &action("child item")).unwrap();
+        assign_item(&conn, Collection::Action, child_item.id, child.id).unwrap();
+        let parent_item = quick_actions::create_quick_action(&conn, &action("parent item")).unwrap();
+        assign_item(&conn, Collection::Action, parent_item.id, parent.id).unwrap();
+        let sibling = create_group(&conn, Collection::Action, "Sibling").unwrap();
+        move_group(&conn, sibling.id, Some(parent.id), 1).unwrap();
+        let sibling_item = quick_actions::create_quick_action(&conn, &action("sibling item")).unwrap();
+        assign_item(&conn, Collection::Action, sibling_item.id, sibling.id).unwrap();
+
+        delete_group(&conn, child.id).unwrap();
+
+        let listed = list_groups(&conn, Collection::Action).unwrap();
+        assert_eq!(ids(&listed), vec![parent.id, sibling.id]);
+        assert_eq!(listed[0].parent_id, None);
+        assert_eq!(listed[1].parent_id, Some(parent.id));
+        assert_eq!(
+            position_of(&conn, sibling.id),
+            0,
+            "child positions compact under their parent"
+        );
+        let stored = quick_actions::list_quick_actions(&conn).unwrap();
+        assert_eq!(
+            stored.iter().find(|item| item.id == child_item.id).unwrap().group_id,
+            None
+        );
+        assert_eq!(
+            stored.iter().find(|item| item.id == parent_item.id).unwrap().group_id,
+            Some(parent.id),
+            "the parent keeps its own items"
+        );
+    }
+
+    #[test]
+    fn place_item_assigns_and_repositions_in_one_global_order() {
+        let conn = conn();
+        let a = quick_actions::create_quick_action(&conn, &action("a")).unwrap();
+        let b = quick_actions::create_quick_action(&conn, &action("b")).unwrap();
+        let c = quick_actions::create_quick_action(&conn, &action("c")).unwrap();
+        let group = create_group(&conn, Collection::Action, "Drop").unwrap();
+
+        // a (position 0) joins the group and moves to the global end.
+        place_item(&conn, Collection::Action, a.id, Some(group.id), 2).unwrap();
+        let stored = quick_actions::list_quick_actions(&conn).unwrap();
+        assert_eq!(
+            stored.iter().map(|item| item.id).collect::<Vec<_>>(),
+            vec![b.id, c.id, a.id]
+        );
+        assert_eq!(
+            stored.iter().find(|item| item.id == a.id).unwrap().group_id,
+            Some(group.id)
+        );
+
+        // The same command returns it to ungrouped at the front; the emptied
+        // group dissolves in the same transaction.
+        place_item(&conn, Collection::Action, a.id, None, 0).unwrap();
+        let stored = quick_actions::list_quick_actions(&conn).unwrap();
+        assert_eq!(
+            stored.iter().map(|item| item.id).collect::<Vec<_>>(),
+            vec![a.id, b.id, c.id]
+        );
+        assert_eq!(
+            stored.iter().find(|item| item.id == a.id).unwrap().group_id,
+            None
+        );
+        assert!(list_groups(&conn, Collection::Action).unwrap().is_empty());
+    }
+
+    #[test]
+    fn place_item_refuses_invalid_targets_before_writing_anything() {
+        let conn = conn();
+        let a = quick_actions::create_quick_action(&conn, &action("a")).unwrap();
+        let b = quick_actions::create_quick_action(&conn, &action("b")).unwrap();
+        let action_group = create_group(&conn, Collection::Action, "Keep").unwrap();
+        assign_item(&conn, Collection::Action, b.id, action_group.id).unwrap();
+        let clip_group = create_group(&conn, Collection::Clip, "Elsewhere").unwrap();
+        let clip_item = clips::create_clip(&conn, &clip("token")).unwrap();
+        assign_item(&conn, Collection::Clip, clip_item.id, clip_group.id).unwrap();
+
+        let before = quick_actions::list_quick_actions(&conn).unwrap();
+
+        let err = place_item(&conn, Collection::Action, a.id, Some(clip_group.id), 0).unwrap_err();
+        assert!(err.contains("own collection"), "got: {err}");
+        assert!(place_item(&conn, Collection::Action, 99_999, None, 0).is_err());
+        assert!(place_item(&conn, Collection::Action, a.id, Some(99_999), 0).is_err());
+
+        let after = quick_actions::list_quick_actions(&conn).unwrap();
+        assert_eq!(after, before, "a refused drop leaves the list exactly as it was");
+    }
+
+    #[test]
+    fn place_item_can_target_a_child_group_and_keeps_sibling_order() {
+        let conn = conn();
+        let parent = create_group(&conn, Collection::Action, "Parent").unwrap();
+        let child = create_group(&conn, Collection::Action, "Child").unwrap();
+        move_group(&conn, child.id, Some(parent.id), 0).unwrap();
+        let first = quick_actions::create_quick_action(&conn, &action("first")).unwrap();
+        let second = quick_actions::create_quick_action(&conn, &action("second")).unwrap();
+
+        place_item(&conn, Collection::Action, second.id, Some(child.id), 1).unwrap();
+        place_item(&conn, Collection::Action, first.id, Some(child.id), 1).unwrap();
+
+        let stored = quick_actions::list_quick_actions(&conn).unwrap();
+        assert_eq!(
+            stored.iter().map(|item| item.id).collect::<Vec<_>>(),
+            vec![second.id, first.id],
+            "within a group, order follows the one global position"
+        );
+        assert_eq!(
+            stored.iter().find(|item| item.id == first.id).unwrap().group_id,
+            Some(child.id)
+        );
+        assert_eq!(
+            ids(&list_groups(&conn, Collection::Action).unwrap()),
+            vec![parent.id, child.id],
+            "the parent and its child both survive"
+        );
     }
 }

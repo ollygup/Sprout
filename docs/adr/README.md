@@ -22,7 +22,7 @@ Historical events and operational claims were not inferred from source.
 - 0009 Machine-local install directory — `amended 2026-09-05` (per-Product directory travels in local Plan/request; verify failure can erase location note)
 - 0023 Plan: merge-identical, conflict-on-difference, never downgrade — `amended 2026-09-05` (merge equality narrower; pinned version/scope not passed; mixed unresolved entry gap)
 - 0024 RunOutcome dominance + honesty notes — `amended 2026-09-05` (cancellation overrides prior failures; notes and verification trailers are incomplete)
-- 0029 One source of truth per Windows command — `new 2026-09-05` (accepted ownership constraint; implementation candidates under review)
+- 0029 One source of truth per Windows command — `new 2026-09-05`, `amended 2026-10-24` (accepted ownership constraint; implementation candidates under review; clip viewer owns its outside-click mouse hook in `clip_viewer/hook.rs`)
 
 ## Distribution, data, portability
 
@@ -39,12 +39,12 @@ Historical events and operational claims were not inferred from source.
 - 0010 Tray-resident lean backend, cap+queue — `amended 2026-09-05` (tray opens window; basename matching and queue-slot/close semantics clarified)
 - 0011 Quick Launch window + AppBar dock — `amended 2026-09-05` (auto-hide requests zero-width ABM_SETPOS; prior tab and floating corrections hold)
 - 0015 Virtual-desktop assignments activate by use — `accurate`
-- 0016 Groups: isolated namespaces, dissolve, dormant-off — `amended 2026-09-05` (create/assign is not atomic; off hides grouping but lifecycle maintenance continues)
+- 0016 Groups: isolated namespaces, dissolve, dormant-off - `amended 2026-10-24` (create/assign is not atomic; off hides grouping but lifecycle maintenance continues; two-level tree, transactional moves, per-group colour never inherited)
 - 0017 Quick Action execution model — `amended 2026-09-06` (accepted PowerShell/CMD authoring extension; implementation pending; privileges/tracking unchanged)
 - 0018 Launch pipeline: cap+queue, honest outcomes — `amended 2026-09-09` (matching main-app batch scope accepted in 169; earlier execution qualifications retained)
 - 0019 Dock autohide: driver owns motion — `amended 2026-09-05` (driver owns animation, not every geometry write; workspace release is fallible)
 - 0020 Monitor identity + seam eligibility — `amended 2026-09-05` (duplicate native identity probes; opposite-edge migration is not revalidated)
-- 0021 Single size source + dock-width math — `amended 2026-09-05` (Settings duplicates width formula/constants; floor priority and logical/physical units)
+- 0021 Single size source + dock-width math - `amended 2026-10-24` (Settings duplicates width formula/constants; floor priority and logical/physical units; per-mode caps; bezel constants; dock content breakpoint at 420 px is presentation, not a window size)
 - 0022 Companion: one isolated site, docked only — `amended 2026-09-09` (saved-site selector and saved-address lifecycle accepted; implementation pending in 170)
 - 0027 App discovery snapshot; winget authoring-only — `amended 2026-09-05` (backend freshness vs retained picker snapshot; dedup, registry fallback, and icon behavior)
 

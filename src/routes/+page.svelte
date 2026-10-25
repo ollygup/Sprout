@@ -16,15 +16,19 @@
     listLaunchEntries,
     listVirtualDesktops,
     moveLaunchEntry,
+    placeItem,
     startLaunchEntry,
     startQuickLaunch,
     updateLaunchEntry,
   } from "$lib/api";
   import {
-    countMembers,
     createCollectionGroups,
-    groupView,
   } from "$lib/collectionGroups.svelte";
+  import {
+    collectionTree,
+    countMembers,
+    subtreeCount,
+  } from "$lib/collectionTree";
   import {
     isDockVisible,
     isFilterActive,
@@ -34,6 +38,12 @@
     shouldShowDockFilter,
     type DockVisibility,
   } from "$lib/dockVisibility";
+  import { createCollectionDrag } from "$lib/collectionDrag.svelte";
+  import {
+    resolveGroupDrop,
+    resolveItemDrop,
+    type ItemDropSuccess,
+  } from "$lib/dropTargets";
   import { launchReportSummary } from "$lib/format";
   import { appIcons, lazyIcon } from "$lib/lazyIcon.svelte";
   import { listen } from "@tauri-apps/api/event";
@@ -42,6 +52,8 @@
   import GroupNameDialog from "$lib/components/GroupNameDialog.svelte";
   import GroupColorDialog from "$lib/components/GroupColorDialog.svelte";
   import GroupAccordion from "$lib/components/GroupAccordion.svelte";
+  import DragGrip from "$lib/components/DragGrip.svelte";
+  import DragOverlay from "$lib/components/DragOverlay.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import IconButton from "$lib/components/IconButton.svelte";
   import PageHeader from "$lib/components/PageHeader.svelte";
@@ -125,6 +137,52 @@
       reload: () => load(),
     },
   });
+
+  // Drag & drop (tickets 232–233): one controller serves the whole page.
+  // Grips start drags; `reorderBlocked` pauses them under any filter, exactly
+  // like the ⋯ ordering items. A card resolves to a target group plus a global
+  // list position; a group resolves to a sibling slot or parent. The drops
+  // themselves stay transactional in the backend.
+  const drag = createCollectionDrag({
+    enabled: () => !reorderBlocked,
+    resolveItem: (dragId, target) =>
+      resolveItemDrop({
+        dragId,
+        order: entries.map((entry) => entry.id),
+        filtering: reorderBlocked,
+        overRow: target.overRow,
+        hasAppendTarget: target.hasAppendTarget,
+        appendGroupId: target.appendGroupId,
+      }),
+    resolveGroup: (dragId, target) =>
+      resolveGroupDrop({
+        dragId,
+        groups: groups.groups,
+        filtering: reorderBlocked,
+        overHeaderId: target.overHeaderId,
+        overSlot: target.overSlot,
+        overTopLevelArea: target.overTopLevelArea,
+      }),
+    commitItem: (dragId, drop) => void placeEntry(dragId, drop),
+    commitGroup: (dragId, drop) =>
+      void groups.reorderGroup(dragId, drop.parentId, drop.position),
+  });
+
+  /** One transactional card drop; a refusal reloads so the list on screen is
+   *  the stored one, with the error line above it. */
+  async function placeEntry(itemId: number, drop: ItemDropSuccess) {
+    busy = true;
+    error = "";
+    try {
+      await placeItem("launch", itemId, drop.groupId, drop.position);
+    } catch (e) {
+      console.error(e);
+      error = String(e);
+    } finally {
+      await load();
+      busy = false;
+    }
+  }
 
   // One menu serves entry rows and group headers; which kind it belongs to
   // rides on whichever id is set.
@@ -596,11 +654,14 @@
     }
     const groupMenu = groups.groupMenu(group, anchor, viaKeyboard);
     // Group order is order too: refuse it under filters like item moves.
+    // Reparenting changes sibling order, so "Move into…" pauses with them.
     menu = reorderBlocked
       ? {
           ...groupMenu,
           items: groupMenu.items.map((item) =>
-            item.label === t("menu.moveUp") || item.label === t("menu.moveDown")
+            item.label === t("menu.moveUp") ||
+            item.label === t("menu.moveDown") ||
+            item.label === t("menu.moveInto")
               ? { ...item, disabled: true }
               : item
           ),
@@ -608,8 +669,8 @@
       : groupMenu;
   }
 
-  const listView = $derived(
-    groupView(groups.groups, entries, matchesBoth, isFiltering)
+  const tree = $derived(
+    collectionTree(groups.groups, entries, matchesBoth, isFiltering)
   );
 
   async function assignDesktop(entry: LaunchEntry, id: string | null) {
@@ -682,8 +743,36 @@
   <title>{t("nav.launch")} — Sprout</title>
 </svelte:head>
 
+{#snippet groupActions(group: Group)}
+  <IconButton
+    icon="dots"
+    label={t("groups.menuLabel").replace("{name}", group.name)}
+    quiet
+    data-ctx-trigger
+    onclick={(e) =>
+      openGroupMenu(
+        group,
+        e.currentTarget as HTMLButtonElement,
+        e.detail === 0
+      )}
+  />
+{/snippet}
+
 {#snippet entryRow(entry: LaunchEntry)}
-  <li class="rack__row" use:lazyIcon={entry.kind === "app" ? entry.target : ""}>
+  <li
+    class="rack__row"
+    data-drop-row={entry.id}
+    data-drop-group={entry.group_id ?? ""}
+    use:lazyIcon={entry.kind === "app" ? entry.target : ""}
+  >
+    <DragGrip
+      label={t("drag.grip").replace("{name}", entry.name)}
+      disabled={reorderBlocked}
+      onstart={(event) =>
+        drag.start(event, { kind: "item", id: entry.id, label: entry.name })}
+      onmenu={(event) =>
+        openRowMenu(entry, event.currentTarget as HTMLButtonElement, true)}
+    />
     <span class="rack__badge" aria-hidden="true">
       {#if entry.kind === "app" && appIcons[entry.target]}
         <!-- Ticket 97: the app's real icon, extracted lazily from its
@@ -972,57 +1061,123 @@
         </Button>
       </div>
     </EmptyState>
-  {:else if grouped}
-    {#if listView.ungrouped.length > 0}
-      <ul class="rack">
-        {#each listView.ungrouped as entry (entry.id)}
-          {@render entryRow(entry)}
+  {:else}
+    <!-- The list's own area is the top-level drop target (ticket 233): a
+         group dropped on the blank space below the tree unnests, and a card
+         dropped there joins the ungrouped block. -->
+    <div class="rack-area" data-drop-top-level>
+      {#if grouped}
+        {#if tree.ungrouped.length > 0}
+          <ul class="rack">
+            {#each tree.ungrouped as entry (entry.id)}
+              {@render entryRow(entry)}
+            {/each}
+          </ul>
+        {/if}
+        {#each tree.sections as section (section.group.id)}
+          {#snippet grip()}
+            <DragGrip
+              label={t("drag.grip").replace("{name}", section.group.name)}
+              disabled={reorderBlocked}
+              onstart={(event) =>
+                drag.start(event, {
+                  kind: "group",
+                  id: section.group.id,
+                  label: section.group.name,
+                })}
+              onmenu={(event) =>
+                openGroupMenu(
+                  section.group,
+                  event.currentTarget as HTMLButtonElement,
+                  true,
+                )}
+            />
+          {/snippet}
+          <GroupAccordion
+            grip={grip}
+            open={sectionOpen(section.group.id)}
+            controls={`ql-group-${section.group.id}`}
+            name={section.group.name}
+            count={subtreeCount(entries, groups.groups, section.group.id)}
+            color={section.group.color}
+            groupId={section.group.id}
+            onToggle={() => groups.collapse.toggle(section.group.id)}
+          >
+            {#snippet actions()}
+              {@render groupActions(section.group)}
+            {/snippet}
+            {#if section.rows.length > 0 || section.children.length === 0}
+              <ul class="rack">
+                {#each section.rows as entry (entry.id)}
+                  {@render entryRow(entry)}
+                {/each}
+                {#if section.rows.length === 0}
+                  <li class="rack__hint" data-drop-empty-group={section.group.id}>
+                    {t("launch.emptyGroupHint")}
+                  </li>
+                {/if}
+              </ul>
+            {/if}
+            {#each section.children as child (child.group.id)}
+              {#snippet grip()}
+                <DragGrip
+                  label={t("drag.grip").replace("{name}", child.group.name)}
+                  disabled={reorderBlocked}
+                  onstart={(event) =>
+                    drag.start(event, {
+                      kind: "group",
+                      id: child.group.id,
+                      label: child.group.name,
+                    })}
+                  onmenu={(event) =>
+                    openGroupMenu(
+                      child.group,
+                      event.currentTarget as HTMLButtonElement,
+                      true,
+                    )}
+                />
+              {/snippet}
+              <GroupAccordion
+                grip={grip}
+                nested
+                open={sectionOpen(child.group.id)}
+                controls={`ql-group-${child.group.id}`}
+                name={child.group.name}
+                count={countMembers(entries, child.group.id)}
+                color={child.group.color}
+                groupId={child.group.id}
+                parentId={section.group.id}
+                onToggle={() => groups.collapse.toggle(child.group.id)}
+              >
+                {#snippet actions()}
+                  {@render groupActions(child.group)}
+                {/snippet}
+                <ul class="rack">
+                  {#each child.rows as entry (entry.id)}
+                    {@render entryRow(entry)}
+                  {/each}
+                  {#if child.rows.length === 0}
+                    <li class="rack__hint" data-drop-empty-group={child.group.id}>
+                      {t("launch.emptyGroupHint")}
+                    </li>
+                  {/if}
+                </ul>
+              </GroupAccordion>
+            {/each}
+          </GroupAccordion>
         {/each}
-      </ul>
-    {/if}
-    {#each listView.sections as section (section.group.id)}
-      <GroupAccordion
-        open={sectionOpen(section.group.id)}
-        controls={`ql-group-${section.group.id}`}
-        name={section.group.name}
-        count={countMembers(entries, section.group.id)}
-        color={section.group.color}
-        onToggle={() => groups.collapse.toggle(section.group.id)}
-      >
-        {#snippet actions()}
-          <IconButton
-            icon="dots"
-            label={t("groups.menuLabel").replace("{name}", section.group.name)}
-            quiet
-            data-ctx-trigger
-            onclick={(e) =>
-              openGroupMenu(
-                section.group,
-                e.currentTarget as HTMLButtonElement,
-                e.detail === 0
-              )}
-          />
-        {/snippet}
+      {:else}
         <ul class="rack">
-          {#each section.rows as entry (entry.id)}
+          {#each matchingEntries as entry (entry.id)}
             {@render entryRow(entry)}
           {/each}
-          {#if section.rows.length === 0}
-            <li class="rack__hint">
-              {t("launch.emptyGroupHint")}
-            </li>
-          {/if}
         </ul>
-      </GroupAccordion>
-    {/each}
-  {:else}
-    <ul class="rack">
-      {#each matchingEntries as entry (entry.id)}
-        {@render entryRow(entry)}
-      {/each}
-    </ul>
+      {/if}
+    </div>
   {/if}
 </section>
+
+<DragOverlay drag={drag.drag} message={drag.message} />
 
 <ConfirmDialog
   open={deleting !== null}
@@ -1046,7 +1201,9 @@
   oncancel={() => groups.cancelRemove()}
 >
   <p>
-    <strong>{groups.removing?.name}</strong>{t("dialog.removeGroupBody").replace("{noun}", t("groups.noun.entries"))}
+    <strong>{groups.removing?.name}</strong>{groups.removingHasChildren
+      ? t("dialog.removeParentBody")
+      : t("dialog.removeChildBody")}
   </p>
 </ConfirmDialog>
 
@@ -1328,7 +1485,15 @@
     gap: var(--space-2);
   }
 
+  /* The top-level drop area keeps a little room below the tree so a group can
+     be dragged out of a parent without aiming at a specific row (ticket 233). */
+  .rack-area {
+    min-height: 96px;
+    padding-bottom: var(--space-6);
+  }
+
   .rack__row {
+    position: relative;
     display: flex;
     align-items: center;
     gap: var(--space-3);
@@ -1339,6 +1504,15 @@
     background: var(--group-row-bg, transparent);
     border: 1px solid var(--border);
     border-radius: var(--radius);
+  }
+
+  /* The card's drag grip fades in from its leading gutter (ticket 232). The
+     grip's strip is a descendant of the row, so hovering the strip keeps this
+     `:hover` alive: the card stays lit while the pointer travels to the
+     handle, and the handle stays visible. */
+  .rack__row:hover,
+  .rack__row:focus-within {
+    --grip-opacity: 1;
   }
 
   .rack__badge {

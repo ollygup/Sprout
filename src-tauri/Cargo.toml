@@ -3,7 +3,7 @@ name = "sprout-windows-desktop"
 # App version. Single source of truth: this file — tauri.conf.json omits
 # `version` and Tauri v2 auto-inherits it from here into the exe metadata,
 # the window, and the installer. Never restate it elsewhere.
-version = "1.2.1"
+version = "1.2.2"
 description = "Preset-driven Windows software-installation desktop app"
 authors = ["Sprout contributors"]
 edition = "2021"
@@ -37,7 +37,10 @@ winreg = "0.56.0"
 # Win32_Storage_FileSystem gates SHGetFileInfoW (ticket 40's icon extraction);
 # Win32_System_SystemInformation gates GetLocalTime (ticket 64's run-log
 # stamps — local wall clock without a chrono dependency, per the size budget).
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Environment", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", # Win32_Media gates timeBeginPeriod (ticket 63): 1 ms timer
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Environment", # Win32_System_LibraryLoader gates GetModuleHandleW, the module handle
+# the clip viewer's low-level mouse hook installs with (ADR-0029 owner:
+# clip_viewer/hook.rs).
+"Win32_System_LibraryLoader", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", # Win32_Media gates timeBeginPeriod (ticket 63): 1 ms timer
 # resolution while an auto-hide slide animates, or Sleep quantizes to ~15.6 ms
 # and the motion stutters.
 "Win32_Media",

@@ -64,6 +64,22 @@ const OWNERS = [
     symbols: ["ShellExecuteExW"],
     modules: [],
   },
+  {
+    // Spec 221 §B.6 / ADR-0029: the clip viewer owns one low-level mouse hook
+    // for its own lifetime. The dock/AppBar owner is not extended.
+    operation: "clip viewer outside-click hook (low-level mouse hook lifecycle)",
+    owners: ["src-tauri/src/clip_viewer/hook.rs"],
+    symbols: [
+      "SetWindowsHookExW",
+      "UnhookWindowsHookEx",
+      "CallNextHookEx",
+      "PostThreadMessageW",
+      "WindowFromPoint",
+      "WH_MOUSE_LL",
+      "MSLLHOOKSTRUCT",
+    ],
+    modules: [],
+  },
 ];
 
 const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

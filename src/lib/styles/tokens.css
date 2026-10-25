@@ -310,6 +310,23 @@ h3 {
   border: 0;
 }
 
+/* The one group-tint formula (research 0028; tickets 225, 241): an element that
+   sets --group-color and this class publishes the surfaces its cards read. A
+   whole accordion section uses it in the main app and in the dock's nested
+   mode; the dock's flat mode uses it per card, so a flattened child keeps its
+   own hue under the parent's single beam instead of taking the parent's
+   colour. Dark mode needs the higher percentage because the same alpha shifts
+   far less chroma over #191919 than over #ffffff (0028 addendum). */
+.group-tint {
+  --group-row-bg: color-mix(in oklab, var(--group-color) 8%, var(--bg-page));
+  --group-row-hover: color-mix(in oklab, var(--group-color) 14%, var(--bg-hover));
+  --group-row-hover-text: var(--text);
+}
+
+:root[data-theme="dark"] .group-tint {
+  --group-row-bg: color-mix(in oklab, var(--group-color) 14%, var(--bg-page));
+}
+
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;

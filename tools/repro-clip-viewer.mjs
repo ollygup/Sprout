@@ -7,13 +7,16 @@ import path from "node:path";
 import zlib from "node:zlib";
 import { setTimeout as sleep } from "node:timers/promises";
 
-// Ticket 226 evidence: drives the real app through CDP and checks the clip
-// viewer shell end to end — right-click from the main app and the dock, the
-// row menu's first item, one window reused across opens, monitor-aware
-// placement, remembered size, copy feedback, the missing-Clip empty state,
-// Esc/close-control dismissal, focus return, and the native window style
-// (visible, not always-on-top). Runs against a throwaway LOCALAPPDATA so it
-// never touches the user's Library. Exit: 0 green, 1 red, 2 infra.
+// Clip viewer evidence: drives the real app through CDP and checks the viewer
+// end to end — right-click from the main app and the dock, the row menu's
+// first item, one window reused across opens, monitor-aware placement,
+// remembered size, copy feedback, the missing-Clip empty state,
+// Esc/close-control dismissal, focus return, native window style (visible,
+// not always-on-top), and the zoom/pan surface (range clamp, fit, 100 %/DPR,
+// cursor-anchored Ctrl+wheel, wheel/Shift+wheel and arrow panning, drag-pan,
+// double-click toggle, keyboard shortcuts, and reduced motion). Runs against a
+// throwaway LOCALAPPDATA so it never touches the user's Library.
+// Exit: 0 green, 1 red, 2 infra.
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const TEMP_ROOT = path.join(os.tmpdir(), "opencode");
@@ -24,7 +27,8 @@ const USAGE = `Usage: node tools/repro-clip-viewer.mjs [options]
 
 Seeds image Clips in a throwaway app-data directory and checks the clip
 viewer: main/dock right-click, menu item, reuse, placement, size memory,
-copy feedback, missing Clip, Esc/close, focus return, native window style.
+copy feedback, missing Clip, Esc/close, focus return, native window style,
+and zoom/pan (range, fit, 100 %/DPR, cursor zoom, wheel/keys/drag, motion).
 
 Options:
   --mode dev|exe   app under test (default dev)
@@ -369,6 +373,70 @@ async function rightClick(cdp, expression, label) {
   });
 }
 
+async function wheelAt(cdp, { x, y, deltaY, modifiers = 0 }) {
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mouseWheel",
+    x,
+    y,
+    deltaX: 0,
+    deltaY,
+    modifiers,
+  });
+}
+
+/** A real double-click: Chromium emits `dblclick` on the second release. */
+async function doubleClickAt(cdp, x, y) {
+  for (const clickCount of [1, 2]) {
+    await cdp.send("Input.dispatchMouseEvent", {
+      type: "mousePressed",
+      x,
+      y,
+      button: "left",
+      buttons: 1,
+      clickCount,
+    });
+    await cdp.send("Input.dispatchMouseEvent", {
+      type: "mouseReleased",
+      x,
+      y,
+      button: "left",
+      buttons: 0,
+      clickCount,
+    });
+  }
+}
+
+/** A real pointer drag through Chromium's input pipeline, so the page's
+ *  pointer capture and pointermove path runs instead of a synthetic event. */
+async function dragMouse(cdp, from, to) {
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mousePressed",
+    x: from.x,
+    y: from.y,
+    button: "left",
+    buttons: 1,
+    clickCount: 1,
+  });
+  const steps = 4;
+  for (let i = 1; i <= steps; i++) {
+    await cdp.send("Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x: from.x + ((to.x - from.x) * i) / steps,
+      y: from.y + ((to.y - from.y) * i) / steps,
+      button: "left",
+      buttons: 1,
+    });
+  }
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mouseReleased",
+    x: to.x,
+    y: to.y,
+    button: "left",
+    buttons: 0,
+    clickCount: 1,
+  });
+}
+
 async function click(cdp, expression, label) {
   const clicked = await cdp.eval(`(() => {
     const el = ${expression};
@@ -387,6 +455,20 @@ const SEED = (pngA, pngB) => `(async () => {
   const second = await inv("create_clip_image", { name: "Dock probe", dataBase64: ${JSON.stringify(pngB)} });
   const text = await inv("create_clip", { clip: { name: "Text probe", content: "just words", show_in_dock: true } });
   return { first: first.id, second: second.id, text: text.id };
+})()`;
+
+const ZOOM_PROBE = `(() => {
+  const img = document.querySelector("img.viewer__image");
+  const r = img?.getBoundingClientRect();
+  const readout = document.querySelector('button[aria-label^="Zoom level"] output');
+  return {
+    percent: readout?.textContent?.trim() ?? null,
+    live: readout?.getAttribute("aria-live") ?? null,
+    labels: [...document.querySelectorAll("button")].map((b) => b.getAttribute("aria-label")),
+    image: r ? { left: r.left, top: r.top, width: r.width, height: r.height } : null,
+    dpr: devicePixelRatio,
+    inner: { w: innerWidth, h: innerHeight },
+  };
 })()`;
 
 const VIEWER_PROBE = `(() => {
@@ -464,6 +546,74 @@ function resizeNativeWindow(width, height) {
   );
 }
 
+/** Real left click at an absolute physical screen point. A low-level mouse
+ *  hook only sees input that entered the system queue, so CDP cannot stand in
+ *  for the outside-click check. */
+function clickAt(x, y) {
+  const out = spawnSync(
+    "powershell.exe",
+    [
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      WINDOW_HELPER,
+      "-ClickX",
+      String(x),
+      "-ClickY",
+      String(y),
+    ],
+    { encoding: "utf8" }
+  );
+  const text = (out.stdout ?? "").trim();
+  return text ? JSON.parse(text) : { clicked: false };
+}
+
+/** What a click at this physical point would hit, reduced to its root window.
+ *  Proves the "inside" click is aimed at the viewer and is not blocked by a
+ *  window stacked above it. */
+function hitTest(x, y) {
+  const out = spawnSync(
+    "powershell.exe",
+    [
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      WINDOW_HELPER,
+      "-HitX",
+      String(x),
+      "-HitY",
+      String(y),
+    ],
+    { encoding: "utf8" }
+  );
+  const text = (out.stdout ?? "").trim();
+  return text ? JSON.parse(text) : null;
+}
+
+/** Give a window the foreground without sending any mouse input: the path a
+ *  click on an elevated window takes when UIPI blocks the hook (ticket 228).
+ *  `exact` is needed to single out the main window ("Sprout") from the dock. */
+function activateWindow(title, exact = false) {
+  const args = [
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    WINDOW_HELPER,
+    "-Activate",
+    "-TitleLike",
+    title,
+  ];
+  if (exact) args.push("-ExactTitle");
+  const out = spawnSync("powershell.exe", args, { encoding: "utf8" });
+  const text = (out.stdout ?? "").trim();
+  if (!text) return null;
+  const parsed = JSON.parse(text);
+  return Array.isArray(parsed) ? parsed[0] : parsed;
+}
+
 async function waitForViewerTarget(port, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -528,8 +678,10 @@ async function main() {
       mobile: false,
     });
 
-    const pngA = makePng(64, 48, 40).toString("base64");
-    const pngB = makePng(40, 64, 120).toString("base64");
+    // Large enough that fit lands below 100 % and 100 % overflows the stage,
+    // so fit/100 %/panning all have room to move.
+    const pngA = makePng(2400, 1800, 40).toString("base64");
+    const pngB = makePng(1800, 2400, 120).toString("base64");
     const seeded = await cdp.eval(SEED(pngA, pngB));
     console.log(`seeded: ${JSON.stringify(seeded)}`);
 
@@ -610,6 +762,11 @@ async function main() {
       20_000,
       "viewer content"
     );
+    // The harness process can own the OS foreground, leaving the viewer
+    // stacked behind the terminal; rendering and input routing must be tested
+    // with the viewer actually in front, as it is for a user.
+    activateWindow("Clip viewer");
+    await sleep(400);
     const probe = await viewer.eval(VIEWER_PROBE);
     console.log(`viewer: ${JSON.stringify(probe)}`);
     await capture(viewer, args.shots, "viewer-main.png");
@@ -631,6 +788,335 @@ async function main() {
       ok: probe.dragRegion && probe.imageAlt === "Preview of Viewer probe",
       label: "frameless chrome carries a drag region and image alt text",
       detail: `drag=${probe.dragRegion} alt=${probe.imageAlt}`,
+    });
+
+    // 3b. Zoom and pan on the real window.
+    const zoomBase = await viewer.eval(ZOOM_PROBE);
+    const zoomLabels = zoomBase.labels ?? [];
+    checks.push({
+      ok:
+        ["Zoom out", "Zoom in", "Fit", "Actual size (100%)", "Reset zoom"].every(
+          (label) => zoomLabels.includes(label)
+        ) &&
+        zoomBase.live === "polite" &&
+        /^\d+%$/.test(zoomBase.percent ?? ""),
+      label: "zoom controls are labeled buttons with an announced percentage",
+      detail: `readout=${zoomBase.percent} live=${zoomBase.live} labels=${zoomLabels.filter(Boolean).join("|")}`,
+    });
+    const fitPercent = Number((zoomBase.percent ?? "").replace("%", ""));
+    checks.push({
+      ok: fitPercent > 25 && fitPercent < 100,
+      label: "opens fitted inside the 25–800 % range",
+      detail: `${zoomBase.percent} in ${zoomBase.inner.w}x${zoomBase.inner.h} CSS at dpr=${zoomBase.dpr}`,
+    });
+
+    await pressKey(viewer, "1", "Digit1", 49);
+    await sleep(600);
+    let zoomState = await viewer.eval(ZOOM_PROBE);
+    checks.push({
+      ok: zoomState.percent === "100%",
+      label: "1 goes to 100 %",
+      detail: `${zoomBase.percent} → ${zoomState.percent}`,
+    });
+    checks.push({
+      ok: Math.abs(zoomState.image.width * zoomState.dpr - 2400) <= 2,
+      label: "100 % is one image pixel per physical pixel at the real DPI",
+      detail: `${zoomState.image.width.toFixed(1)} CSS × ${zoomState.dpr} = ${(zoomState.image.width * zoomState.dpr).toFixed(1)} physical for a 2400 px image`,
+    });
+
+    // Ctrl+wheel at an off-centre cursor: the image point under it stays put.
+    const anchor = {
+      x: Math.round(zoomState.inner.w * 0.35),
+      y: Math.round(zoomState.inner.h * 0.45),
+    };
+    const fractionUnder = (rect) => (anchor.x - rect.left) / rect.width;
+    const beforeFraction = fractionUnder(zoomState.image);
+    await wheelAt(viewer, { ...anchor, deltaY: -120, modifiers: 2 });
+    await sleep(600);
+    zoomState = await viewer.eval(ZOOM_PROBE);
+    const wheeledPercent = Number((zoomState.percent ?? "").replace("%", ""));
+    checks.push({
+      ok:
+        wheeledPercent > 100 &&
+        Math.abs(fractionUnder(zoomState.image) - beforeFraction) < 0.02,
+      label: "Ctrl+wheel zooms in at the cursor and holds the anchored pixel",
+      detail: `${wheeledPercent}% anchored fraction ${beforeFraction.toFixed(3)} → ${fractionUnder(zoomState.image).toFixed(3)}`,
+    });
+
+    // A trackpad pinch arrives as fine-grained ctrl+wheel deltas.
+    await pressKey(viewer, "0", "Digit0", 48);
+    await sleep(300);
+    const fineBase = Number(
+      ((await viewer.eval(ZOOM_PROBE)).percent ?? "").replace("%", "")
+    );
+    await wheelAt(viewer, { ...anchor, deltaY: -20, modifiers: 2 });
+    await sleep(300);
+    const fineAfter = Number(
+      ((await viewer.eval(ZOOM_PROBE)).percent ?? "").replace("%", "")
+    );
+    checks.push({
+      ok: fineAfter > fineBase && fineAfter - fineBase <= 5,
+      label: "fine-grained ctrl+wheel (trackpad pinch) makes a small zoom step",
+      detail: `${fineBase}% → ${fineAfter}% for deltaY −20`,
+    });
+
+    // Wheel panning at 100 %, where the image overflows both axes.
+    await pressKey(viewer, "1", "Digit1", 49);
+    await sleep(300);
+    let panBase = await viewer.eval(ZOOM_PROBE);
+    const wheelPoint = {
+      x: Math.round(panBase.inner.w / 2),
+      y: Math.round(panBase.inner.h * 0.45),
+    };
+    await wheelAt(viewer, { ...wheelPoint, deltaY: 120 });
+    await sleep(300);
+    let panned = await viewer.eval(ZOOM_PROBE);
+    checks.push({
+      ok: Math.abs(panned.image.top - (panBase.image.top - 120)) <= 2,
+      label: "plain wheel pans vertically",
+      detail: `top ${panBase.image.top.toFixed(1)} → ${panned.image.top.toFixed(1)}`,
+    });
+
+    panBase = panned;
+    await wheelAt(viewer, { ...wheelPoint, deltaY: 120, modifiers: 8 });
+    await sleep(300);
+    panned = await viewer.eval(ZOOM_PROBE);
+    checks.push({
+      ok: Math.abs(panned.image.left - (panBase.image.left - 120)) <= 2,
+      label: "Shift+wheel pans horizontally",
+      detail: `left ${panBase.image.left.toFixed(1)} → ${panned.image.left.toFixed(1)}`,
+    });
+
+    // Arrow-key panning.
+    panBase = panned;
+    await pressKey(viewer, "ArrowLeft", "ArrowLeft", 37);
+    await sleep(300);
+    panned = await viewer.eval(ZOOM_PROBE);
+    checks.push({
+      ok: Math.abs(panned.image.left - (panBase.image.left - 48)) <= 2,
+      label: "arrow keys pan a zoomed image",
+      detail: `left ${panBase.image.left.toFixed(1)} → ${panned.image.left.toFixed(1)}`,
+    });
+
+    // Drag-pan through real pointer events.
+    panBase = panned;
+    await dragMouse(
+      viewer,
+      { x: wheelPoint.x, y: wheelPoint.y },
+      { x: wheelPoint.x - 60, y: wheelPoint.y - 40 }
+    );
+    await sleep(300);
+    panned = await viewer.eval(ZOOM_PROBE);
+    checks.push({
+      ok:
+        Math.abs(panned.image.left - (panBase.image.left - 60)) <= 3 &&
+        Math.abs(panned.image.top - (panBase.image.top - 40)) <= 3,
+      label: "drag-pan moves the image with the pointer",
+      detail: `left ${panBase.image.left.toFixed(1)} → ${panned.image.left.toFixed(1)}, top ${panBase.image.top.toFixed(1)} → ${panned.image.top.toFixed(1)}`,
+    });
+
+    // Ctrl+0 resets to fit and centre.
+    await pressKey(viewer, "0", "Digit0", 48, 2);
+    await sleep(350);
+    const reset = await viewer.eval(ZOOM_PROBE);
+    checks.push({
+      ok:
+        reset.percent === zoomBase.percent &&
+        Math.abs(reset.image.left + reset.image.width / 2 - reset.inner.w / 2) <= 2,
+      label: "Ctrl+0 resets to fit and centres",
+      detail: `${reset.percent}, centre ${(reset.image.left + reset.image.width / 2).toFixed(1)} vs ${(reset.inner.w / 2).toFixed(1)}`,
+    });
+
+    // Double-click toggles fit ↔ 100 % at the cursor.
+    const togglePoint = {
+      x: Math.round(reset.inner.w / 2),
+      y: Math.round(reset.inner.h * 0.45),
+    };
+    await doubleClickAt(viewer, togglePoint.x, togglePoint.y);
+    await sleep(350);
+    const toggledIn = await viewer.eval(ZOOM_PROBE);
+    await doubleClickAt(viewer, togglePoint.x, togglePoint.y);
+    await sleep(350);
+    const toggledOut = await viewer.eval(ZOOM_PROBE);
+    checks.push({
+      ok: toggledIn.percent === "100%" && toggledOut.percent === zoomBase.percent,
+      label: "double-click toggles fit ↔ 100 %",
+      detail: `${zoomBase.percent} → ${toggledIn.percent} → ${toggledOut.percent}`,
+    });
+
+    // The released range clamps at both ends.
+    await viewer.eval(`(() => {
+      const out = [...document.querySelectorAll("button")].find((b) => b.getAttribute("aria-label") === "Zoom out");
+      for (let i = 0; i < 30; i++) out.click();
+      return true;
+    })()`);
+    await sleep(400);
+    const floor = (await viewer.eval(ZOOM_PROBE)).percent;
+    await viewer.eval(`(() => {
+      const inBtn = [...document.querySelectorAll("button")].find((b) => b.getAttribute("aria-label") === "Zoom in");
+      for (let i = 0; i < 60; i++) inBtn.click();
+      return true;
+    })()`);
+    await sleep(400);
+    const ceiling = (await viewer.eval(ZOOM_PROBE)).percent;
+    checks.push({
+      ok: floor === "25%" && ceiling === "800%",
+      label: "zoom clamps at 25 % and 800 %",
+      detail: `${floor} … ${ceiling}`,
+    });
+    await pressKey(viewer, "0", "Digit0", 48);
+    await sleep(300);
+
+    // Reduced motion removes the zoom transition but not the controls.
+    await viewer.send("Emulation.setEmulatedMedia", {
+      features: [{ name: "prefers-reduced-motion", value: "reduce" }],
+    });
+    await sleep(250);
+    const motionBefore = await viewer.eval(ZOOM_PROBE);
+    const motion = await viewer.eval(`(() => {
+      const img = document.querySelector("img.viewer__image");
+      return getComputedStyle(img).transitionDuration;
+    })()`);
+    // Chrome serializes tiny durations in seconds ("1e-05s" for 0.01ms), so
+    // compare the parsed value against "not perceptible" rather than a string.
+    const durationSeconds = (value) =>
+      Math.max(
+        ...String(value)
+          .split(",")
+          .map((part) => {
+            const m = part.trim().match(/^([\d.eE+-]+)(ms|s)$/);
+            return m ? parseFloat(m[1]) * (m[2] === "ms" ? 1e-3 : 1) : NaN;
+          })
+      );
+    await viewer.eval(`(() => {
+      [...document.querySelectorAll("button")].find((b) => b.getAttribute("aria-label") === "Zoom in").click();
+      return true;
+    })()`);
+    await sleep(300);
+    const motionAfter = await viewer.eval(ZOOM_PROBE);
+    checks.push({
+      ok:
+        durationSeconds(motion) <= 0.001 &&
+        motionAfter.percent !== motionBefore.percent,
+      label: "reduced motion drops the zoom animation but keeps the controls",
+      detail: `transition=${motion} (${(durationSeconds(motion) * 1000).toFixed(3)}ms) ${motionBefore.percent} → ${motionAfter.percent}`,
+    });
+    await viewer.send("Emulation.setEmulatedMedia", { features: [] });
+    await pressKey(viewer, "0", "Digit0", 48);
+    await sleep(250);
+
+    // 100 % stays one image pixel per physical pixel across 100/150/200 % DPI.
+    // A real scaling change keeps the window's physical size and changes its
+    // CSS size, so the page sees a resize *and* a new devicePixelRatio — the
+    // pair the viewer re-measures. Emulating only deviceScaleFactor at a fixed
+    // CSS size never fires that resize, so it would test nothing.
+    const dprViewport = await viewer.eval(
+      `({ w: innerWidth, h: innerHeight, dpr: devicePixelRatio })`
+    );
+    const physical = {
+      w: Math.round(dprViewport.w * dprViewport.dpr),
+      h: Math.round(dprViewport.h * dprViewport.dpr),
+    };
+    const physicalByDpr = {};
+    for (const dpr of [1, 1.5, 2]) {
+      await viewer.send("Emulation.setDeviceMetricsOverride", {
+        width: Math.round(physical.w / dpr),
+        height: Math.round(physical.h / dpr),
+        deviceScaleFactor: dpr,
+        mobile: false,
+      });
+      await sleep(350);
+      await pressKey(viewer, "1", "Digit1", 49);
+      await sleep(300);
+      const atDpr = await viewer.eval(ZOOM_PROBE);
+      physicalByDpr[dpr] = {
+        physical: atDpr.image.width * atDpr.dpr,
+        css: atDpr.image.width,
+        stage: `${atDpr.inner.w}x${atDpr.inner.h}`,
+      };
+    }
+    await viewer.send("Emulation.clearDeviceMetricsOverride");
+    await sleep(300);
+    checks.push({
+      ok: [1, 1.5, 2].every(
+        (dpr) => Math.abs(physicalByDpr[dpr].physical - 2400) <= 3
+      ),
+      label: "100 % stays one image pixel per physical pixel at 100/150/200 % DPI",
+      detail: [1, 1.5, 2]
+        .map(
+          (dpr) =>
+            `${dpr * 100}%=${physicalByDpr[dpr].physical.toFixed(1)}px ` +
+            `(${physicalByDpr[dpr].css.toFixed(0)} CSS @ ${physicalByDpr[dpr].stage})`
+        )
+        .join(" "),
+    });
+    await pressKey(viewer, "0", "Digit0", 48);
+    await sleep(300);
+
+    // The window floor is 480x360 physical — 320 CSS wide at 150 % scaling,
+    // which is narrower than one row of labeled controls. Nothing may clip.
+    await viewer.send("Emulation.setDeviceMetricsOverride", {
+      width: 320,
+      height: 240,
+      deviceScaleFactor: 1.5,
+      mobile: false,
+    });
+    await sleep(400);
+    const narrow = await viewer.eval(`(() => {
+      const foot = document.querySelector(".viewer__foot");
+      const stage = document.querySelector(".viewer__stage");
+      const actions = document.querySelector(".viewer__actions");
+      const stepper = document.querySelector(".viewer__stepper");
+      const presets = document.querySelector(".viewer__presets");
+      const buttons = [...foot.querySelectorAll("button")];
+      const zoomButtons = [
+        ...foot.querySelectorAll(".viewer__stepper button, .viewer__presets button"),
+      ];
+      const vw = innerWidth;
+      const w = (el) => (el ? Math.round(el.getBoundingClientRect().width) : 0);
+      const tops = zoomButtons
+        .map((b) => b.getBoundingClientRect().top)
+        .sort((a, b) => a - b);
+      // Buttons in one row differ by a pixel or two (33px text buttons vs
+      // 30px icon buttons, both centred); rows are >10px apart.
+      const rows = tops.filter((t, i) => i === 0 || t - tops[i - 1] > 10).length;
+      const clipped = buttons
+        .filter((b) => {
+          const r = b.getBoundingClientRect();
+          return r.left < -0.5 || r.right > vw + 0.5;
+        })
+        .map((b) => b.getAttribute("aria-label") || b.textContent.trim());
+      return {
+        vw,
+        rows,
+        clipped,
+        overflow: foot.scrollWidth - foot.clientWidth,
+        foot: Math.round(foot.getBoundingClientRect().height),
+        stage: Math.round(stage.getBoundingClientRect().height),
+        widths: {
+          actions: w(actions),
+          stepper: w(stepper),
+          presets: w(presets),
+          copy: w(buttons.at(-1)),
+        },
+      };
+    })()`);
+    await capture(viewer, args.shots, "viewer-narrow.png");
+    await viewer.send("Emulation.clearDeviceMetricsOverride");
+    await sleep(300);
+    checks.push({
+      ok:
+        narrow.clipped.length === 0 &&
+        narrow.overflow <= 1 &&
+        narrow.rows <= 2 &&
+        narrow.stage >= 80,
+      label: "narrow window folds the toolbar to two rows and keeps the image",
+      detail:
+        `${narrow.vw} CSS, rows=${narrow.rows}, overflow=${narrow.overflow}, ` +
+        `clipped=${narrow.clipped.join(", ") || "none"}, ` +
+        `foot=${narrow.foot}px, stage=${narrow.stage}px, ` +
+        `stepper=${narrow.widths.stepper}px presets=${narrow.widths.presets}px ` +
+        `copy=${narrow.widths.copy}px actions=${narrow.widths.actions}px`,
     });
 
     // 4. Native window style: visible, not always-on-top.
@@ -802,6 +1288,139 @@ async function main() {
     await pressKey(viewer, "Escape", "Escape", 27);
     await waitForNoViewer(port, 10_000);
     checks.push({ ok: true, label: "Esc closes the empty state", detail: "viewer gone" });
+
+    // 11. Outside-click hook (ticket 228). CDP's Input domain never enters the
+    //     system queue, so these checks send real mouse_event input at absolute
+    //     screen coordinates and read native rects; opening by command keeps
+    //     the page state irrelevant. Every wait skips the 200 ms open grace.
+    //     The floating dock is always-on-top and can cover the viewer, so the
+    //     checks close it first: they test the viewer's input routing, not how
+    //     two always-on-top windows stack.
+    await cdp
+      .eval(
+        `window.__TAURI_INTERNALS__.invoke("close_quick_launch_window").catch(() => "already closed")`
+      )
+      .catch(() => {});
+    await sleep(900);
+    const openFromMain = async () => {
+      await cdp.eval(
+        `window.__TAURI_INTERNALS__.invoke("open_clip_viewer", { id: ${seeded.first}, source: "main" })`
+      );
+      const target = await attach(await waitForViewerTarget(port, 20_000));
+      viewer?.close();
+      viewer = target;
+      await waitFor(viewer, `!!document.querySelector("img.viewer__image")`, 20_000, "viewer for hook");
+      activateWindow("Clip viewer");
+      await sleep(650);
+    };
+    await cdp.eval(`(() => {
+      window.__outsideClicks = 0;
+      document.addEventListener("pointerdown", () => { window.__outsideClicks += 1; }, true);
+      return true;
+    })()`);
+
+    await openFromMain();
+    const hookWindows = nativeWindows("Sprout");
+    const hookViewer = hookWindows.find((w) => (w.title ?? "").includes("Clip viewer"));
+    const hookMain = hookWindows.find((w) => w.title === "Sprout");
+    if (!hookViewer || !hookMain) {
+      throw new Error("outside-click probe could not find the viewer and main windows");
+    }
+    // The viewer is centred over the main window; only a strip of the main
+    // window is exposed. Try the rail edges, then the top strip above it, and
+    // pick the first point whose root window really is the main window.
+    const outsideCandidates = [
+      { x: hookMain.left + 24, y: Math.round((hookMain.top + hookMain.bottom) / 2) },
+      { x: hookMain.right - 24, y: Math.round((hookMain.top + hookMain.bottom) / 2) },
+      { x: Math.round((hookMain.left + hookMain.right) / 2), y: hookMain.top + 10 },
+    ].filter(
+      (p) =>
+        !(p.x >= hookViewer.left && p.x <= hookViewer.right && p.y >= hookViewer.top && p.y <= hookViewer.bottom)
+    );
+    let outside = null;
+    let outsideHit = null;
+    for (const point of outsideCandidates) {
+      const hit = hitTest(point.x, point.y);
+      if (hit?.root === hookMain.hwnd) {
+        outside = point;
+        outsideHit = hit;
+        break;
+      }
+    }
+    if (!outside) throw new Error("no exposed main-window point outside the viewer");
+    await cdp.eval(`window.__outsideClicks = 0; true`);
+    const outsideClick = clickAt(outside.x, outside.y);
+    let outsideClosed = false;
+    try {
+      await waitForNoViewer(port, 8000);
+      outsideClosed = true;
+    } catch {}
+    await sleep(500);
+    const outsideForeground = foregroundWindow();
+    const outsideDelivered = await cdp.eval(`window.__outsideClicks ?? 0`);
+    checks.push({
+      ok: outsideClosed && outsideDelivered >= 1 && outsideForeground.title === "Sprout",
+      label: "a real click outside closes the viewer and still reaches the window underneath",
+      detail: `click=${outsideClick.clicked} at ${outside.x},${outside.y} target=${outsideHit?.rootTitle}/${outsideHit?.root} main=${hookMain.hwnd} closed=${outsideClosed} main-pointerdown=${outsideDelivered} foreground=${outsideForeground.title}`,
+    });
+
+    await openFromMain();
+    const insideWindows = nativeWindows("Sprout");
+    const insideViewer = insideWindows.find((w) => (w.title ?? "").includes("Clip viewer"));
+    if (!insideViewer) throw new Error("inside-click probe could not find the viewer window");
+    // The floating dock is always-on-top and can overlap the viewer's centre,
+    // so pick a point whose root window really is the viewer instead of
+    // assuming the centre is visible.
+    const insideCandidates = [
+      { fx: 0.08, fy: 0.45 },
+      { fx: 0.15, fy: 0.45 },
+      { fx: 0.3, fy: 0.45 },
+      { fx: 0.5, fy: 0.45 },
+      { fx: 0.25, fy: 0.6 },
+      { fx: 0.5, fy: 0.6 },
+    ].map(({ fx, fy }) => ({
+      x: Math.round(insideViewer.left + (insideViewer.right - insideViewer.left) * fx),
+      y: Math.round(insideViewer.top + (insideViewer.bottom - insideViewer.top) * fy),
+    }));
+    let insidePoint = null;
+    let insideHit = null;
+    for (const point of insideCandidates) {
+      const hit = hitTest(point.x, point.y);
+      if (hit?.root === insideViewer.hwnd) {
+        insidePoint = point;
+        insideHit = hit;
+        break;
+      }
+    }
+    if (!insidePoint) {
+      const seen = insideCandidates
+        .map((p) => `${p.x},${p.y}=${hitTest(p.x, p.y)?.rootTitle ?? "?"}`)
+        .join(" ");
+      throw new Error(`no visible point inside the viewer to click (${seen})`);
+    }
+    const insideForeground = foregroundWindow();
+    const insideClick = clickAt(insidePoint.x, insidePoint.y);
+    await sleep(900);
+    checks.push({
+      ok: (await viewerCount(port)) === 1,
+      label: "a real click inside the viewer leaves it open",
+      detail: `click=${insideClick.clicked} at ${insidePoint.x},${insidePoint.y} root=${insideHit.rootTitle}/${insideHit.root} viewer=${insideViewer.hwnd} foreground=${insideForeground.title} viewers=${await viewerCount(port)}`,
+    });
+
+    // Focus-loss fallback: activation without any mouse input is the same path
+    // a click on an elevated (UIPI-blocked) foreground window takes.
+    const activation = activateWindow("Sprout", true);
+    let fallbackClosed = false;
+    try {
+      await waitForNoViewer(port, 8000);
+      fallbackClosed = true;
+    } catch {}
+    await sleep(300);
+    checks.push({
+      ok: fallbackClosed,
+      label: "losing the foreground to another window closes the viewer (UIPI fallback path)",
+      detail: `activated=${activation?.activated ?? "?"} foregroundAfter=${activation?.foregroundAfter ?? "?"} title=${activation?.title ?? "?"} closed=${fallbackClosed}`,
+    });
     dock.close();
   } catch (e) {
     infraError = e;

@@ -81,6 +81,10 @@
     // Ticket 226 — image Clip / clip viewer glyph (picture frame + horizon)
     image:
       '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-4.5-4.5L6 21"/>',
+    // Ticket 232 — the six-dot drag grip (Notion's handle): two columns of
+    // three filled dots, so it reads as "hold and move" at 14 px.
+    grip:
+      '<g fill="currentColor" stroke="none"><circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/></g>',
   };
 </script>
 

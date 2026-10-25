@@ -20,6 +20,12 @@ import {
 } from "./api";
 import { createGroupCollapse } from "./groupCollapse.svelte";
 import { normalizeGroupColor } from "./groupColor";
+import {
+  childGroups,
+  groupHasChildren,
+  moveIntoDestinations,
+  siblingGroups,
+} from "./collectionTree";
 import type {
   ContextMenuItem,
   ContextMenuState,
@@ -290,6 +296,12 @@ export function createCollectionGroups(options: {
       return removing;
     },
 
+    /** True while the remove confirmation is up for a parent — the copy then
+     *  explains that the whole subtree's structure goes and every item stays. */
+    get removingHasChildren() {
+      return removing !== null && groupHasChildren(list, removing.id);
+    },
+
     requestRemove(group: Group) {
       removing = group;
     },
@@ -339,8 +351,68 @@ export function createCollectionGroups(options: {
       });
     },
 
-    reorderGroup(id: number, toPosition: number) {
-      return guarded(() => moveGroup(id, toPosition).then(host.reload));
+    /** Reorder/reparent through the one transactional move contract. The
+     *  reload runs in `finally`, so a refused drop still shows the unchanged
+     *  tree beside the page's error line — never a half-applied order. */
+    reorderGroup(id: number, parentId: number | null, toPosition: number) {
+      return guarded(async () => {
+        try {
+          await moveGroup(id, parentId, toPosition);
+        } finally {
+          await host.reload();
+        }
+      });
+    },
+
+    /** The keyboard reparent path (spec 221 C.7): "Move into…" sends a child
+     *  back to the top level or into another top-level group, and an item-only
+     *  top-level group into another parent. Position is the destination's end
+     *  (the backend clamps); a failure lands on the page's error line and the
+     *  reload shows the unchanged tree. */
+    moveInto(group: Group, parentId: number | null) {
+      return guarded(async () => {
+        const position =
+          parentId === null
+            ? list.filter(
+                (sibling) =>
+                  sibling.parent_id === null && sibling.id !== group.id,
+              ).length
+            : childGroups(list, parentId).filter(
+                (sibling) => sibling.id !== group.id,
+              ).length;
+        await moveGroup(group.id, parentId, position);
+        if (parentId === null) {
+          host.flash(t("groups.unnested").replace("{name}", group.name));
+        } else {
+          const destination = list.find((candidate) => candidate.id === parentId);
+          host.flash(
+            t("groups.nested")
+              .replace("{name}", group.name)
+              .replace("{group}", destination?.name ?? t("groups.menuGroupFallback")),
+          );
+        }
+        await host.reload();
+      });
+    },
+
+    /** The "Move into…" flyout rows, or null when the group cannot move
+     *  (it has children) or has nowhere to go. `null` destination = top level. */
+    moveIntoChildren(group: Group): ContextMenuItem[] | null {
+      const destinations = moveIntoDestinations(list, group);
+      if (destinations === null || destinations.length === 0) return null;
+      return destinations.map((destination) =>
+        destination === null
+          ? {
+              label: t("menu.topLevel"),
+              icon: "chevron-up",
+              onselect: () => this.moveInto(group, null),
+            }
+          : {
+              label: destination.name,
+              swatch: destination.color,
+              onselect: () => this.moveInto(group, destination.id),
+            },
+      );
     },
 
     /** The "Move to group" flyout (ticket 106): Ungrouped ✓ | groups in user
@@ -370,15 +442,18 @@ export function createCollectionGroups(options: {
       ];
     },
 
-    /** One ⋯ menu per group header, on the round's ordering standard
-     *  (ticket 106): Rename, order, separator, Remove danger-last. The page
-     *  owns the toggle-off check against its own menu state. */
+    /** One ⋯ menu per group header, at either level, on the round's ordering
+     *  standard (ticket 106): Rename, Color, the "Move into…" keyboard
+     *  reparent path, sibling-scoped order, separator, Remove danger-last.
+     *  The page owns the toggle-off check against its own menu state. */
     groupMenu(
       group: Group,
       anchor: HTMLButtonElement,
       viaKeyboard: boolean
     ): ContextMenuState & { groupId: number } {
-      const index = list.indexOf(group);
+      const siblings = siblingGroups(list, group);
+      const index = siblings.findIndex((sibling) => sibling.id === group.id);
+      const moveInto = this.moveIntoChildren(group);
       return {
         groupId: group.id,
         open: true,
@@ -397,17 +472,28 @@ export function createCollectionGroups(options: {
             swatch: group.color,
             onselect: () => this.openColor(group),
           },
+          ...(moveInto
+            ? [
+                {
+                  label: t("menu.moveInto"),
+                  icon: "folder",
+                  children: moveInto,
+                },
+              ]
+            : []),
           {
             label: t("menu.moveUp"),
             icon: "chevron-up",
             disabled: index <= 0,
-            onselect: () => this.reorderGroup(group.id, index - 1),
+            onselect: () =>
+              this.reorderGroup(group.id, group.parent_id, index - 1),
           },
           {
             label: t("menu.moveDown"),
             icon: "chevron-down",
-            disabled: index >= list.length - 1,
-            onselect: () => this.reorderGroup(group.id, index + 1),
+            disabled: index >= siblings.length - 1,
+            onselect: () =>
+              this.reorderGroup(group.id, group.parent_id, index + 1),
           },
           { label: "", separator: true, onselect: () => {} },
           {
@@ -420,33 +506,4 @@ export function createCollectionGroups(options: {
       };
     },
   };
-}
-
-/** The ungrouped-first view every grouped list renders: plain rows first,
- *  then one entry per group in user order. While a filter is active, empty
- *  sections drop out so no section header floats over nothing. */
-export function groupView<T extends { group_id: number | null }>(
-  groups: Group[],
-  items: T[],
-  matches: (item: T) => boolean,
-  filtering: boolean
-): { ungrouped: T[]; sections: { group: Group; rows: T[] }[] } {
-  return {
-    ungrouped: items.filter((i) => i.group_id === null && matches(i)),
-    sections: groups
-      .map((g) => ({
-        group: g,
-        rows: items.filter((i) => i.group_id === g.id && matches(i)),
-      }))
-      .filter((s) => !filtering || s.rows.length > 0),
-  };
-}
-
-/** A group's total membership — count badges keep showing it even while a
- *  filter hides some of the section's rows. */
-export function countMembers<T extends { group_id: number | null }>(
-  items: T[],
-  groupId: number
-): number {
-  return items.filter((i) => i.group_id === groupId).length;
 }

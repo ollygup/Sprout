@@ -33,6 +33,8 @@ use crate::{
     AppState,
 };
 
+mod hook;
+
 /// The viewer's stable label — the event handler in `lib.rs` keys on it and
 /// the capability scope names it.
 pub const CLIP_VIEWER_WINDOW: &str = "clip-viewer";
@@ -117,6 +119,9 @@ pub fn open(app: &AppHandle, id: i64, source: Option<&str>) -> Result<(), String
         let _ = window.unminimize();
         if window.set_focus().is_ok() {
             let _ = window.emit("clip-viewer-open", id);
+            if let Ok(hwnd) = window.hwnd() {
+                hook::arm(app, hwnd.0);
+            }
             return Ok(());
         }
         // A lingering destroyed handle: drop it so the create path below can
@@ -126,7 +131,10 @@ pub fn open(app: &AppHandle, id: i64, source: Option<&str>) -> Result<(), String
 
     let work = work_area_for(app, &source);
     let (width, height) = clamp_for_work(stored, &work);
-    create_window(app, &work, width, height).map_err(|e| e.to_string())?;
+    let window = create_window(app, &work, width, height).map_err(|e| e.to_string())?;
+    if let Ok(hwnd) = window.hwnd() {
+        hook::arm(app, hwnd.0);
+    }
     Ok(())
 }
 
@@ -134,6 +142,9 @@ pub fn open(app: &AppHandle, id: i64, source: Option<&str>) -> Result<(), String
 /// the size is remembered, the window destroyed, and focus returns to the
 /// window that invoked it. A no-op when no viewer is open.
 pub fn close(app: &AppHandle) -> Result<(), String> {
+    // No hook may outlive the window, and disarming first also makes the
+    // focus move below unable to re-enter the close path.
+    hook::disarm();
     let Some(window) = clip_viewer_window(app) else {
         return Ok(());
     };
@@ -162,6 +173,25 @@ pub fn close(app: &AppHandle) -> Result<(), String> {
     focus_source(app, &source);
     window.destroy().map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Closes the viewer only while the open that decided to close still owns it
+/// (spec 221 §B.7): a retarget from the dock bumps the generation, so the
+/// click that requested the new image cannot tear down the window it raised.
+pub(crate) fn close_generation(app: &AppHandle, generation: u64) {
+    if hook::is_current(generation) {
+        let _ = close(app);
+    }
+}
+
+/// Focus-loss fallback entry for the window event handler (see [`hook`]).
+pub(crate) fn note_focus_lost(app: &AppHandle) {
+    hook::note_focus_lost(app);
+}
+
+/// Drops a hook left behind by a destroy that bypassed the close command.
+pub(crate) fn forget_hook() {
+    hook::disarm();
 }
 
 /// Only the two real invoking windows may steer placement; anything else

@@ -367,6 +367,7 @@ const FULL_SCOPE_SECTIONS = [
   "dialog.",
   "menu.",
   "groups.",
+  "drag.",
   "features.",
   "select.",
   "dockfilter.",

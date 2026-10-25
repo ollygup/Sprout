@@ -746,8 +746,31 @@ export function deleteGroup(id: number): Promise<void> {
   return invoke<void>("delete_group", { id });
 }
 
-export function moveGroup(id: number, toPosition: number): Promise<void> {
-  return invoke<void>("move_group", { id, toPosition });
+/** The one reparent/reorder path: `parentId` null is the top level. The
+ *  backend validates depth, collection, and sibling-name collisions. */
+export function moveGroup(
+  id: number,
+  parentId: number | null,
+  toPosition: number
+): Promise<void> {
+  return invoke<void>("move_group", { id, parentId, toPosition });
+}
+
+/** One transactional drop (ticket 232): assigns the item to a group (or
+ *  ungrouped) and moves it to a global list position. A refusal leaves the
+ *  item and the list untouched. */
+export function placeItem(
+  collection: GroupsCollection,
+  itemId: number,
+  groupId: number | null,
+  toPosition: number
+): Promise<void> {
+  return invoke<void>("place_item", {
+    collection,
+    itemId,
+    groupId,
+    toPosition,
+  });
 }
 
 /** An item joins a group of its own collection only; cross-collection

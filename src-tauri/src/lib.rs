@@ -1908,17 +1908,40 @@ fn delete_group(app: AppHandle, state: State<'_, AppState>, id: i64) -> Result<(
     Ok(())
 }
 
-/// Moves a Group to another position within its collection's order, clamped
-/// (ticket 89).
+/// The one reparent/reorder command (spec 221 §C.2): moves a Group under
+/// `parent_id` (or the top level) at `to_position`, clamped, renumbering both
+/// sibling sets in one transaction. Depth-2 and collision rules live in
+/// `groups::move_group` and come back as readable messages.
 #[tauri::command]
 fn move_group(
     app: AppHandle,
     state: State<'_, AppState>,
     id: i64,
+    parent_id: Option<i64>,
     to_position: i64,
 ) -> Result<(), String> {
     let conn = lock(&state)?;
-    groups::move_group(&conn, id, to_position).map_err(|e| e.to_string())?;
+    groups::move_group(&conn, id, parent_id, to_position)?;
+    drop(conn);
+    emit_quick_launch_changed(&app);
+    Ok(())
+}
+
+/// The drag & drop drop command (ticket 232): one transaction assigns the
+/// item to `group_id` (or ungrouped) and moves it to `to_position` in the
+/// collection's global order. Validation and rollback live in
+/// `groups::place_item`.
+#[tauri::command]
+fn place_item(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    collection: groups::Collection,
+    item_id: i64,
+    group_id: Option<i64>,
+    to_position: i64,
+) -> Result<(), String> {
+    let conn = lock(&state)?;
+    groups::place_item(&conn, collection, item_id, group_id, to_position)?;
     drop(conn);
     emit_quick_launch_changed(&app);
     Ok(())
@@ -3758,9 +3781,22 @@ pub fn run() {
             // its close request remembers the size, destroys it, and returns
             // focus to the invoking window. It is never hidden to the tray.
             if window.label() == clip_viewer::CLIP_VIEWER_WINDOW {
-                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                    api.prevent_close();
-                    let _ = clip_viewer::close(window.app_handle());
+                match event {
+                    tauri::WindowEvent::CloseRequested { api, .. } => {
+                        api.prevent_close();
+                        let _ = clip_viewer::close(window.app_handle());
+                    }
+                    // The outside-click hook is the primary dismissal; focus
+                    // loss is the fallback when the hook cannot be installed
+                    // or UIPI makes it unreliable (ADR-0029).
+                    tauri::WindowEvent::Focused(false) => {
+                        clip_viewer::note_focus_lost(window.app_handle());
+                    }
+                    // A destroy that bypasses the close command (a stale
+                    // handle, a process-level teardown) must still leave no
+                    // hook installed.
+                    tauri::WindowEvent::Destroyed => clip_viewer::forget_hook(),
+                    _ => {}
                 }
                 return;
             }
@@ -4060,6 +4096,7 @@ pub fn run() {
             set_group_color,
             delete_group,
             move_group,
+            place_item,
             assign_to_group,
             unassign_from_group,
             update_groups_enabled,

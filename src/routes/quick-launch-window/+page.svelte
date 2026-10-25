@@ -97,6 +97,14 @@
     type ContextMenuState,
   } from "$lib/components/ContextMenu.svelte";
   import GroupAccordion from "$lib/components/GroupAccordion.svelte";
+  import {
+    dockGroupColor,
+    dockGroupMode,
+    dockGroupSections,
+    dockSectionCount,
+    flattenDockRows,
+    type DockGroupMode,
+  } from "$lib/dockGroupLayout";
   import Icon from "$lib/components/Icon.svelte";
   import IconButton from "$lib/components/IconButton.svelte";
   import SproutMark from "$lib/components/SproutMark.svelte";
@@ -2426,14 +2434,7 @@
     dockEntries.filter((e) => e.group_id === null)
   );
 
-  const launchSections = $derived(
-    launchGroups
-      .map((g) => ({
-        group: g,
-        rows: dockEntries.filter((e) => e.group_id === g.id),
-      }))
-      .filter((s) => s.rows.length > 0)
-  );
+  const launchSections = $derived(dockGroupSections(launchGroups, dockEntries));
 
   const actionsGrouped = $derived(actionGroupsOn && actionGroups.length > 0);
 
@@ -2441,27 +2442,43 @@
     dockActions.filter((a) => a.group_id === null)
   );
 
-  const actionSections = $derived(
-    actionGroups
-      .map((g) => ({
-        group: g,
-        rows: dockActions.filter((a) => a.group_id === g.id),
-      }))
-      .filter((s) => s.rows.length > 0)
-  );
+  const actionSections = $derived(dockGroupSections(actionGroups, dockActions));
 
   const clipsGrouped = $derived(clipGroupsOn && clipGroups.length > 0);
 
   const clipsUngrouped = $derived(dockClips.filter((c) => c.group_id === null));
 
-  const clipSections = $derived(
-    clipGroups
-      .map((g) => ({
-        group: g,
-        rows: dockClips.filter((c) => c.group_id === g.id),
-      }))
-      .filter((s) => s.rows.length > 0)
-  );
+  const clipSections = $derived(dockGroupSections(clipGroups, dockClips));
+
+  // ------------------- ticket 231: nested-vs-flat group layout ----------
+  // The mode is the tab panel's *content* width, not the window's: a
+  // container query owns the 420 px line and publishes it as a custom
+  // property; this observer mirrors the computed value into the render so
+  // Svelte can choose between child sub-headers and one flattened list.
+  // A hidden tab measures 0 and is ignored — the next visible pass wins.
+  let dockMode = $state<DockGroupMode>("flat");
+
+  function dockGroupsMode(node: HTMLElement) {
+    const read = () => {
+      if (node.clientWidth <= 0) return;
+      const sentinel = getComputedStyle(node)
+        .getPropertyValue("--dock-group-mode")
+        .trim();
+      dockMode =
+        sentinel === "nested" || sentinel === "flat"
+          ? sentinel
+          : dockGroupMode(node.getBoundingClientRect().width);
+    };
+    read();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(read);
+    observer.observe(node);
+    return {
+      destroy() {
+        observer.disconnect();
+      },
+    };
+  }
 
   /** True while any launch run is in flight — Start all and the entry rows
    *  share one backend pipeline whose runs are single-flight, so every
@@ -2739,7 +2756,7 @@
     </div>
   {/if}
 
-  {#snippet launchRow(entry: LaunchEntry)}
+  {#snippet launchRow(entry: LaunchEntry, groupColor?: string | null)}
     <!-- Ticket 93: one entry, one click. The accessible name carries the verb so screen readers hear what the
          click does ("Start Spotify", not "Spotify, button").
          Ticket 134: thin adapter over the shared QuickLaunchRow shell — badge, name and Starting…
@@ -2748,6 +2765,7 @@
     <QuickLaunchRow
       mainLabel={t("launch.startName").replace("{name}", entry.name)}
       disabled={startInFlight}
+      {groupColor}
       onmain={() => startEntry(entry)}
     >
       <span
@@ -2784,7 +2802,7 @@
     </QuickLaunchRow>
   {/snippet}
 
-  {#snippet actionRow(action: QuickAction)}
+  {#snippet actionRow(action: QuickAction, groupColor?: string | null)}
     <!-- Ticket 130: `[flex text | fixed full-height icon Run/Stop]` — the text side opens the
          details dialog, the icon button alone runs/stops. Two sibling buttons, never nested.
          Ticket 134: thin adapter over the shared QuickLaunchRow shell — the details verb, the
@@ -2797,6 +2815,7 @@
       tipId={`qlw-tip-action-${action.id}`}
       tipName={action.name}
       tipBody={action.command}
+      {groupColor}
       onmain={() => (detailsAction = action)}
     >
       <span class="qlw__action-name">{action.name}</span>
@@ -2824,7 +2843,7 @@
     </QuickLaunchRow>
   {/snippet}
 
-  {#snippet clipRow(clip: Clip)}
+  {#snippet clipRow(clip: Clip, groupColor?: string | null)}
     {@const title = clipName(clip)}
     <!-- Ticket 134: thin adapter over the shared QuickLaunchRow shell — badge, title, excerpt
          and the tooltip text stay collection content; the shell owns the card box and tip.
@@ -2835,6 +2854,7 @@
       tipId={`qlw-tip-clip-${clip.id}`}
       tipName={title}
       tipBody={clip.image ? clipImageMeta(clip.image) : clip.content}
+      {groupColor}
       onmain={() => copy(clip)}
       oncontextmenu={(e) => openClipContextMenu(e, clip)}
     >
@@ -2908,34 +2928,80 @@
                     {/each}
                   </ul>
                 {:else}
-                  {#if launchUngrouped.length > 0}
-                    <ul class="qlw__entries">
-                      {#each launchUngrouped as entry (entry.id)}
-                        {@render launchRow(entry)}
-                      {/each}
-                    </ul>
-                  {/if}
-                  {#each launchSections as section (section.group.id)}
-                    <!-- The shared GroupAccordion in its flush strip variant:
-                         sections exist only while they have members —
-                         nothing here can fill an empty one (research 0004
-                         rule 2). -->
-                    <GroupAccordion
-                      flush
-                      open={launchCollapse.isOpen(section.group.id)}
-                      controls={`qlw-group-${section.group.id}`}
-                      name={section.group.name}
-                      count={section.rows.length}
-                      color={section.group.color}
-                      onToggle={() => launchCollapse.toggle(section.group.id)}
-                    >
+                  <div class="qlw__groups" use:dockGroupsMode>
+                    {#if launchUngrouped.length > 0}
                       <ul class="qlw__entries">
-                        {#each section.rows as entry (entry.id)}
+                        {#each launchUngrouped as entry (entry.id)}
                           {@render launchRow(entry)}
                         {/each}
                       </ul>
-                    </GroupAccordion>
-                  {/each}
+                    {/if}
+                    {#each launchSections as section (section.group.id)}
+                      <!-- The shared GroupAccordion in its flush strip variant:
+                           sections exist only while they have members —
+                           nothing here can fill an empty one (research 0004
+                           rule 2). Wide enough for two levels, the parent
+                           carries indented static child sub-headers; below
+                           the breakpoint the subtree flattens (ticket 231). -->
+                      <GroupAccordion
+                        flush
+                        open={launchCollapse.isOpen(section.group.id)}
+                        controls={`qlw-group-${section.group.id}`}
+                        name={section.group.name}
+                        count={dockSectionCount(section)}
+                        color={section.group.color}
+                        onToggle={() => launchCollapse.toggle(section.group.id)}
+                      >
+                        {#if dockMode === "flat"}
+                          <ul class="qlw__entries">
+                            {#each flattenDockRows(section) as entry (entry.id)}
+                              {@render launchRow(
+                                entry,
+                                dockGroupColor(launchGroups, entry.group_id),
+                              )}
+                            {/each}
+                          </ul>
+                        {:else}
+                          {#if section.rows.length > 0}
+                            <ul class="qlw__entries">
+                              {#each section.rows as entry (entry.id)}
+                                {@render launchRow(
+                                  entry,
+                                  dockGroupColor(launchGroups, entry.group_id),
+                                )}
+                              {/each}
+                            </ul>
+                          {/if}
+                          {#each section.children as child (child.group.id)}
+                            <!-- Children collapse on their own now that the
+                                 strip has the width to show a chevron: the
+                                 parent still collapses the whole subtree
+                                 (ticket 231, amended). -->
+                            <GroupAccordion
+                              flush
+                              nested
+                              open={launchCollapse.isOpen(child.group.id)}
+                              controls={`qlw-group-${child.group.id}`}
+                              name={child.group.name}
+                              count={child.rows.length}
+                              color={child.group.color}
+                              onToggle={() =>
+                                launchCollapse.toggle(child.group.id)}
+                            >
+                              <ul class="qlw__entries">
+                                {#each child.rows as entry (entry.id)}
+                                  {@render launchRow(
+                                    entry,
+                                    dockGroupColor(launchGroups, entry.group_id),
+                                  )}
+                                {/each}
+                              </ul>
+                            </GroupAccordion>
+                          {/each}
+                        {/if}
+                      </GroupAccordion>
+                    {/each}
+                  </div>
                 {/if}
               </div>
             </div>
@@ -2964,30 +3030,70 @@
                   {/each}
                 </ul>
               {:else}
-                {#if actionsUngrouped.length > 0}
-                  <ul class="qlw__actions">
-                    {#each actionsUngrouped as action (action.id)}
-                      {@render actionRow(action)}
-                    {/each}
-                  </ul>
-                {/if}
-                {#each actionSections as section (section.group.id)}
-                  <GroupAccordion
-                    flush
-                    open={actionCollapse.isOpen(section.group.id)}
-                    controls={`qlw-actions-group-${section.group.id}`}
-                    name={section.group.name}
-                    count={section.rows.length}
-                    color={section.group.color}
-                    onToggle={() => actionCollapse.toggle(section.group.id)}
-                  >
+                <div class="qlw__groups" use:dockGroupsMode>
+                  {#if actionsUngrouped.length > 0}
                     <ul class="qlw__actions">
-                      {#each section.rows as action (action.id)}
+                      {#each actionsUngrouped as action (action.id)}
                         {@render actionRow(action)}
                       {/each}
                     </ul>
-                  </GroupAccordion>
-                {/each}
+                  {/if}
+                  {#each actionSections as section (section.group.id)}
+                    <GroupAccordion
+                      flush
+                      open={actionCollapse.isOpen(section.group.id)}
+                      controls={`qlw-actions-group-${section.group.id}`}
+                      name={section.group.name}
+                      count={dockSectionCount(section)}
+                      color={section.group.color}
+                      onToggle={() => actionCollapse.toggle(section.group.id)}
+                    >
+                      {#if dockMode === "flat"}
+                        <ul class="qlw__actions">
+                          {#each flattenDockRows(section) as action (action.id)}
+                            {@render actionRow(
+                              action,
+                              dockGroupColor(actionGroups, action.group_id),
+                            )}
+                          {/each}
+                        </ul>
+                      {:else}
+                        {#if section.rows.length > 0}
+                          <ul class="qlw__actions">
+                            {#each section.rows as action (action.id)}
+                              {@render actionRow(
+                                action,
+                                dockGroupColor(actionGroups, action.group_id),
+                              )}
+                            {/each}
+                          </ul>
+                        {/if}
+                        {#each section.children as child (child.group.id)}
+                          <GroupAccordion
+                            flush
+                            nested
+                            open={actionCollapse.isOpen(child.group.id)}
+                            controls={`qlw-actions-group-${child.group.id}`}
+                            name={child.group.name}
+                            count={child.rows.length}
+                            color={child.group.color}
+                            onToggle={() =>
+                              actionCollapse.toggle(child.group.id)}
+                          >
+                            <ul class="qlw__actions">
+                              {#each child.rows as action (action.id)}
+                                {@render actionRow(
+                                  action,
+                                  dockGroupColor(actionGroups, action.group_id),
+                                )}
+                              {/each}
+                            </ul>
+                          </GroupAccordion>
+                        {/each}
+                      {/if}
+                    </GroupAccordion>
+                  {/each}
+                </div>
               {/if}
             </div>
           {/if}
@@ -3004,30 +3110,69 @@
                   {/each}
                 </ul>
               {:else}
-                {#if clipsUngrouped.length > 0}
-                  <ul class="qlw__clips">
-                    {#each clipsUngrouped as clip (clip.id)}
-                      {@render clipRow(clip)}
-                    {/each}
-                  </ul>
-                {/if}
-                {#each clipSections as section (section.group.id)}
-                  <GroupAccordion
-                    flush
-                    open={clipCollapse.isOpen(section.group.id)}
-                    controls={`qlw-clips-group-${section.group.id}`}
-                    name={section.group.name}
-                    count={section.rows.length}
-                    color={section.group.color}
-                    onToggle={() => clipCollapse.toggle(section.group.id)}
-                  >
+                <div class="qlw__groups" use:dockGroupsMode>
+                  {#if clipsUngrouped.length > 0}
                     <ul class="qlw__clips">
-                      {#each section.rows as clip (clip.id)}
+                      {#each clipsUngrouped as clip (clip.id)}
                         {@render clipRow(clip)}
                       {/each}
                     </ul>
-                  </GroupAccordion>
-                {/each}
+                  {/if}
+                  {#each clipSections as section (section.group.id)}
+                    <GroupAccordion
+                      flush
+                      open={clipCollapse.isOpen(section.group.id)}
+                      controls={`qlw-clips-group-${section.group.id}`}
+                      name={section.group.name}
+                      count={dockSectionCount(section)}
+                      color={section.group.color}
+                      onToggle={() => clipCollapse.toggle(section.group.id)}
+                    >
+                      {#if dockMode === "flat"}
+                        <ul class="qlw__clips">
+                          {#each flattenDockRows(section) as clip (clip.id)}
+                            {@render clipRow(
+                              clip,
+                              dockGroupColor(clipGroups, clip.group_id),
+                            )}
+                          {/each}
+                        </ul>
+                      {:else}
+                        {#if section.rows.length > 0}
+                          <ul class="qlw__clips">
+                            {#each section.rows as clip (clip.id)}
+                              {@render clipRow(
+                                clip,
+                                dockGroupColor(clipGroups, clip.group_id),
+                              )}
+                            {/each}
+                          </ul>
+                        {/if}
+                        {#each section.children as child (child.group.id)}
+                          <GroupAccordion
+                            flush
+                            nested
+                            open={clipCollapse.isOpen(child.group.id)}
+                            controls={`qlw-clips-group-${child.group.id}`}
+                            name={child.group.name}
+                            count={child.rows.length}
+                            color={child.group.color}
+                            onToggle={() => clipCollapse.toggle(child.group.id)}
+                          >
+                            <ul class="qlw__clips">
+                              {#each child.rows as clip (clip.id)}
+                                {@render clipRow(
+                                  clip,
+                                  dockGroupColor(clipGroups, clip.group_id),
+                                )}
+                              {/each}
+                            </ul>
+                          </GroupAccordion>
+                        {/each}
+                      {/if}
+                    </GroupAccordion>
+                  {/each}
+                </div>
               {/if}
             </div>
           {/if}
@@ -3577,10 +3722,43 @@
     flex: 1;
     min-height: 0;
     overflow-y: auto;
+    overflow-x: hidden;
     display: flex;
     flex-direction: column;
     align-items: stretch;
     gap: var(--space-3);
+    /* Ticket 231: the tab panel's content box is the layout container for
+       the group mode. Padding (the `--padded` variant) and the scrollbar are
+       outside that box, so the 420 px line measures the width rows actually
+       get — never the window's. */
+    container-type: inline-size;
+  }
+
+  /* The group-mode sentinel: a container query cannot read a custom property,
+     so the line lives once in CSS and this property carries the answer to
+     the page's ResizeObserver. */
+  .qlw__groups {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    min-width: 0;
+    --dock-group-mode: flat;
+  }
+
+  /* The grouped view's leading gutter belongs to the view, not to a group's
+     colour: the loose rows above the sections take the same step the groups
+     reserve for their bars, so turning a group's colour on or off never moves
+     any row (ticket 234). */
+  .qlw__groups > .qlw__entries,
+  .qlw__groups > .qlw__actions,
+  .qlw__groups > .qlw__clips {
+    padding-left: var(--space-2);
+  }
+
+  @container (min-width: 420px) {
+    .qlw__groups {
+      --dock-group-mode: nested;
+    }
   }
 
   .qlw__list--padded {
@@ -3601,6 +3779,7 @@
     list-style: none;
     margin: 0;
     padding: 0;
+    min-width: 0;
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
@@ -3649,6 +3828,7 @@
     list-style: none;
     margin: 0;
     padding: 0;
+    min-width: 0;
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
@@ -3680,6 +3860,7 @@
     list-style: none;
     margin: 0;
     padding: 0;
+    min-width: 0;
     display: flex;
     flex-direction: column;
     gap: var(--space-2);

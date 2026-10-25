@@ -12,15 +12,19 @@
     listQuickActionFiles,
     listQuickActions,
     moveQuickAction,
+    placeItem,
     runQuickAction,
     runQuickActionFix,
     updateQuickAction,
   } from "$lib/api";
   import {
-    countMembers,
     createCollectionGroups,
-    groupView,
   } from "$lib/collectionGroups.svelte";
+  import {
+    collectionTree,
+    countMembers,
+    subtreeCount,
+  } from "$lib/collectionTree";
   import {
     isDockVisible,
     isFilterActive,
@@ -30,6 +34,12 @@
     shouldShowDockFilter,
     type DockVisibility,
   } from "$lib/dockVisibility";
+  import { createCollectionDrag } from "$lib/collectionDrag.svelte";
+  import {
+    resolveGroupDrop,
+    resolveItemDrop,
+    type ItemDropSuccess,
+  } from "$lib/dropTargets";
   import {
     quickActionRuns,
     stopActionRun,
@@ -41,6 +51,8 @@
   import GroupNameDialog from "$lib/components/GroupNameDialog.svelte";
   import GroupColorDialog from "$lib/components/GroupColorDialog.svelte";
   import GroupAccordion from "$lib/components/GroupAccordion.svelte";
+  import DragGrip from "$lib/components/DragGrip.svelte";
+  import DragOverlay from "$lib/components/DragOverlay.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import IconButton from "$lib/components/IconButton.svelte";
   import ConfirmDialog from "$lib/components/ConfirmDialog.svelte";
@@ -129,6 +141,47 @@
       reload: () => load(),
     },
   });
+
+  // Drag & drop (tickets 232–233): the shared controller, one per page.
+  const drag = createCollectionDrag({
+    enabled: () => !reorderBlocked,
+    resolveItem: (dragId, target) =>
+      resolveItemDrop({
+        dragId,
+        order: quickActions.map((action) => action.id),
+        filtering: reorderBlocked,
+        overRow: target.overRow,
+        hasAppendTarget: target.hasAppendTarget,
+        appendGroupId: target.appendGroupId,
+      }),
+    resolveGroup: (dragId, target) =>
+      resolveGroupDrop({
+        dragId,
+        groups: groups.groups,
+        filtering: reorderBlocked,
+        overHeaderId: target.overHeaderId,
+        overSlot: target.overSlot,
+        overTopLevelArea: target.overTopLevelArea,
+      }),
+    commitItem: (dragId, drop) => void placeAction(dragId, drop),
+    commitGroup: (dragId, drop) =>
+      void groups.reorderGroup(dragId, drop.parentId, drop.position),
+  });
+
+  /** One transactional action drop; a refusal reloads the stored list. */
+  async function placeAction(itemId: number, drop: ItemDropSuccess) {
+    busy = true;
+    error = "";
+    try {
+      await placeItem("action", itemId, drop.groupId, drop.position);
+    } catch (e) {
+      console.error(e);
+      error = String(e);
+    } finally {
+      await load();
+      busy = false;
+    }
+  }
 
   // One menu serves action rows and group headers; which kind it belongs to
   // rides on whichever id is set.
@@ -593,11 +646,14 @@
     }
     const groupMenu = groups.groupMenu(group, anchor, viaKeyboard);
     // Group order is order too: refuse it under filters like action moves.
+    // Reparenting changes sibling order, so "Move into…" pauses with them.
     menu = reorderBlocked
       ? {
           ...groupMenu,
           items: groupMenu.items.map((item) =>
-            item.label === t("menu.moveUp") || item.label === t("menu.moveDown")
+            item.label === t("menu.moveUp") ||
+            item.label === t("menu.moveDown") ||
+            item.label === t("menu.moveInto")
               ? { ...item, disabled: true }
               : item
           ),
@@ -638,14 +694,29 @@
     filter = "";
     dockVisibility = "all";
   }
-  const listView = $derived(
-    groupView(groups.groups, quickActions, matchesBoth, isFiltering)
+  const tree = $derived(
+    collectionTree(groups.groups, quickActions, matchesBoth, isFiltering)
   );
 </script>
 
 <svelte:head>
   <title>{t("nav.actions")} — Sprout</title>
 </svelte:head>
+
+{#snippet groupActions(group: Group)}
+  <IconButton
+    icon="dots"
+    label={t("groups.menuLabel").replace("{name}", group.name)}
+    quiet
+    data-ctx-trigger
+    onclick={(e) =>
+      openGroupMenu(
+        group,
+        e.currentTarget as HTMLButtonElement,
+        e.detail === 0
+      )}
+  />
+{/snippet}
 
 {#snippet actionRow(action: QuickAction)}
   <!-- Row click opens centered details dialog — same grammar Products use (research 0006 pattern 13).
@@ -657,6 +728,8 @@
     class="rack__row"
     role="button"
     tabindex="0"
+    data-drop-row={action.id}
+    data-drop-group={action.group_id ?? ""}
     aria-label={t("dialog.aboutName").replace("{name}", action.name)}
     onclick={() => openDetails(action)}
     onkeydown={(e) => {
@@ -666,6 +739,18 @@
       }
     }}
   >
+    <DragGrip
+      label={t("drag.grip").replace("{name}", action.name)}
+      disabled={reorderBlocked}
+      onstart={(event) =>
+        drag.start(event, {
+          kind: "item",
+          id: action.id,
+          label: action.name,
+        })}
+      onmenu={(event) =>
+        openRowMenu(action, event.currentTarget as HTMLButtonElement, true)}
+    />
     <span class="rack__badge" aria-hidden="true">
       <Icon name="terminal" size={14} />
     </span>
@@ -807,57 +892,120 @@
         </Button>
       </div>
     </EmptyState>
-  {:else if grouped}
-    {#if listView.ungrouped.length > 0}
-      <ul class="rack">
-        {#each listView.ungrouped as action (action.id)}
-          {@render actionRow(action)}
+  {:else}
+    <div class="rack-area" data-drop-top-level>
+      {#if grouped}
+        {#if tree.ungrouped.length > 0}
+          <ul class="rack">
+            {#each tree.ungrouped as action (action.id)}
+              {@render actionRow(action)}
+            {/each}
+          </ul>
+        {/if}
+        {#each tree.sections as section (section.group.id)}
+          {#snippet grip()}
+            <DragGrip
+              label={t("drag.grip").replace("{name}", section.group.name)}
+              disabled={reorderBlocked}
+              onstart={(event) =>
+                drag.start(event, {
+                  kind: "group",
+                  id: section.group.id,
+                  label: section.group.name,
+                })}
+              onmenu={(event) =>
+                openGroupMenu(
+                  section.group,
+                  event.currentTarget as HTMLButtonElement,
+                  true,
+                )}
+            />
+          {/snippet}
+          <GroupAccordion
+            grip={grip}
+            open={sectionOpen(section.group.id)}
+            controls={`qa-group-${section.group.id}`}
+            name={section.group.name}
+            count={subtreeCount(quickActions, groups.groups, section.group.id)}
+            color={section.group.color}
+            groupId={section.group.id}
+            onToggle={() => groups.collapse.toggle(section.group.id)}
+          >
+            {#snippet actions()}
+              {@render groupActions(section.group)}
+            {/snippet}
+            {#if section.rows.length > 0 || section.children.length === 0}
+              <ul class="rack">
+                {#each section.rows as action (action.id)}
+                  {@render actionRow(action)}
+                {/each}
+                {#if section.rows.length === 0}
+                  <li class="rack__hint" data-drop-empty-group={section.group.id}>
+                    {t("actions.emptyGroupHint")}
+                  </li>
+                {/if}
+              </ul>
+            {/if}
+            {#each section.children as child (child.group.id)}
+              {#snippet grip()}
+                <DragGrip
+                  label={t("drag.grip").replace("{name}", child.group.name)}
+                  disabled={reorderBlocked}
+                  onstart={(event) =>
+                    drag.start(event, {
+                      kind: "group",
+                      id: child.group.id,
+                      label: child.group.name,
+                    })}
+                  onmenu={(event) =>
+                    openGroupMenu(
+                      child.group,
+                      event.currentTarget as HTMLButtonElement,
+                      true,
+                    )}
+                />
+              {/snippet}
+              <GroupAccordion
+                grip={grip}
+                nested
+                open={sectionOpen(child.group.id)}
+                controls={`qa-group-${child.group.id}`}
+                name={child.group.name}
+                count={countMembers(quickActions, child.group.id)}
+                color={child.group.color}
+                groupId={child.group.id}
+                parentId={section.group.id}
+                onToggle={() => groups.collapse.toggle(child.group.id)}
+              >
+                {#snippet actions()}
+                  {@render groupActions(child.group)}
+                {/snippet}
+                <ul class="rack">
+                  {#each child.rows as action (action.id)}
+                    {@render actionRow(action)}
+                  {/each}
+                  {#if child.rows.length === 0}
+                    <li class="rack__hint" data-drop-empty-group={child.group.id}>
+                      {t("actions.emptyGroupHint")}
+                    </li>
+                  {/if}
+                </ul>
+              </GroupAccordion>
+            {/each}
+          </GroupAccordion>
         {/each}
-      </ul>
-    {/if}
-    {#each listView.sections as section (section.group.id)}
-      <GroupAccordion
-        open={sectionOpen(section.group.id)}
-        controls={`qa-group-${section.group.id}`}
-        name={section.group.name}
-        count={countMembers(quickActions, section.group.id)}
-        color={section.group.color}
-        onToggle={() => groups.collapse.toggle(section.group.id)}
-      >
-        {#snippet actions()}
-          <IconButton
-            icon="dots"
-            label={t("groups.menuLabel").replace("{name}", section.group.name)}
-            quiet
-            data-ctx-trigger
-            onclick={(e) =>
-              openGroupMenu(
-                section.group,
-                e.currentTarget as HTMLButtonElement,
-                e.detail === 0
-              )}
-          />
-        {/snippet}
+      {:else}
         <ul class="rack">
-          {#each section.rows as action (action.id)}
+          {#each matchingActions as action (action.id)}
             {@render actionRow(action)}
           {/each}
-          {#if section.rows.length === 0}
-            <li class="rack__hint">
-              {t("actions.emptyGroupHint")}
-            </li>
-          {/if}
         </ul>
-      </GroupAccordion>
-    {/each}
-  {:else}
-    <ul class="rack">
-      {#each matchingActions as action (action.id)}
-        {@render actionRow(action)}
-      {/each}
-    </ul>
+      {/if}
+    </div>
   {/if}
 </section>
+
+<DragOverlay drag={drag.drag} message={drag.message} />
 
 <ConfirmDialog
   open={deleting !== null}
@@ -881,7 +1029,9 @@
   oncancel={() => groups.cancelRemove()}
 >
   <p>
-    <strong>{groups.removing?.name}</strong>{t("dialog.removeGroupBody").replace("{noun}", t("groups.noun.actions"))}
+    <strong>{groups.removing?.name}</strong>{groups.removingHasChildren
+      ? t("dialog.removeParentBody")
+      : t("dialog.removeChildBody")}
   </p>
 </ConfirmDialog>
 
@@ -1109,7 +1259,14 @@
     gap: var(--space-2);
   }
 
+  /* Room below the tree for the top-level drop target (ticket 233). */
+  .rack-area {
+    min-height: 96px;
+    padding-bottom: var(--space-6);
+  }
+
   .rack__row {
+    position: relative;
     display: flex;
     align-items: center;
     gap: var(--space-3);
@@ -1132,6 +1289,15 @@
     background: var(--group-row-hover, var(--bg-hover));
     border-color: var(--border-strong);
     --row-text: var(--group-row-hover-text, var(--text-muted));
+  }
+
+  /* The card's drag grip fades in from its leading gutter (ticket 232). The
+     grip's strip is a descendant of the row, so hovering the strip keeps this
+     `:hover` alive: the card stays lit while the pointer travels to the
+     handle, and the handle stays visible. */
+  .rack__row:hover,
+  .rack__row:focus-within {
+    --grip-opacity: 1;
   }
 
   .rack__row:focus-visible {
