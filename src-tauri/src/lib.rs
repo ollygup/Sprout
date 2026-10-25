@@ -106,6 +106,17 @@ fn lock<'a>(state: &'a State<'a, AppState>) -> Result<std::sync::MutexGuard<'a, 
     state.db.lock().map_err(|e| e.to_string())
 }
 
+/// Command errors cross the boundary as text. Library contention is the one
+/// case worth rewording: SQLite's "database is locked" is the main app and the
+/// worker overlapping a write (ADR-0003), and repeating the action once the
+/// other write finishes succeeds.
+fn command_error(e: &(dyn std::error::Error + 'static)) -> String {
+    match e.downcast_ref::<rusqlite::Error>() {
+        Some(sql) => db::error_text(sql),
+        None => e.to_string(),
+    }
+}
+
 /// Emits `quick-launch-changed` only to the Quick Launch window when its HWND
 /// is still valid — avoids `PostMessage failed ; Invalid window handle` spam
 /// when the main window has just been destroyed (close→reopen race, vite HMR
@@ -151,7 +162,7 @@ fn list_products(
     query: Option<String>,
 ) -> Result<Vec<ProductRecord>, String> {
     let conn = lock(&state)?;
-    db::list_products(&conn, query.as_deref()).map_err(|e| e.to_string())
+    db::list_products(&conn, query.as_deref()).map_err(|e| command_error(&e))
 }
 
 /// Adds a Product to the Library.
@@ -159,7 +170,7 @@ fn list_products(
 fn create_product(state: State<'_, AppState>, product: Product) -> Result<(), String> {
     db::validate_product(&product)?;
     let conn = lock(&state)?;
-    db::create_product(&conn, &product).map_err(|e| e.to_string())
+    db::create_product(&conn, &product).map_err(|e| command_error(&e))
 }
 
 /// Updates a Product in place (same id, new metadata/env wiring).
@@ -167,7 +178,7 @@ fn create_product(state: State<'_, AppState>, product: Product) -> Result<(), St
 fn update_product(state: State<'_, AppState>, product: Product) -> Result<(), String> {
     db::validate_product(&product)?;
     let conn = lock(&state)?;
-    db::update_product(&conn, &product).map_err(|e| e.to_string())
+    db::update_product(&conn, &product).map_err(|e| command_error(&e))
 }
 
 /// The delete prompt's impact: how many local Presets reference a Product.
@@ -182,7 +193,7 @@ pub struct ProductPresetImpact {
 #[tauri::command]
 fn delete_product(state: State<'_, AppState>, id: String) -> Result<(), String> {
     let conn = lock(&state)?;
-    db::delete_product(&conn, &id).map_err(|e| e.to_string())
+    db::delete_product(&conn, &id).map_err(|e| command_error(&e))
 }
 
 /// The count behind the delete prompt: local Presets that reference the
@@ -196,7 +207,7 @@ fn product_presets_impact(
 ) -> Result<ProductPresetImpact, String> {
     let conn = lock(&state)?;
     Ok(ProductPresetImpact {
-        preset_count: db::count_presets_using_product(&conn, &id).map_err(|e| e.to_string())?,
+        preset_count: db::count_presets_using_product(&conn, &id).map_err(|e| command_error(&e))?,
     })
 }
 
@@ -218,7 +229,7 @@ fn show_winget(id: String) -> Result<WingetShow, String> {
 #[tauri::command]
 fn list_presets(state: State<'_, AppState>) -> Result<Vec<PresetRecord>, String> {
     let conn = lock(&state)?;
-    db::list_presets(&conn).map_err(|e| e.to_string())
+    db::list_presets(&conn).map_err(|e| command_error(&e))
 }
 
 /// Adds a Preset to the Library, validated first. Locally authored presets
@@ -247,14 +258,14 @@ fn create_preset(state: State<'_, AppState>, preset: PresetRecord) -> Result<(),
 fn update_preset(state: State<'_, AppState>, preset: PresetRecord) -> Result<(), String> {
     preset.preset.validate()?;
     let conn = lock(&state)?;
-    db::update_preset(&conn, &preset).map_err(|e| e.to_string())
+    db::update_preset(&conn, &preset).map_err(|e| command_error(&e))
 }
 
 /// Removes a Preset from the Library.
 #[tauri::command]
 fn delete_preset(state: State<'_, AppState>, id: String) -> Result<(), String> {
     let conn = lock(&state)?;
-    db::delete_preset(&conn, &id).map_err(|e| e.to_string())
+    db::delete_preset(&conn, &id).map_err(|e| command_error(&e))
 }
 
 /// Writes a Library Preset to `path` as a single self-contained `.sprout.json`.
@@ -364,7 +375,7 @@ async fn compute_plan(
         let mut presets = Vec::new();
         for id in &preset_ids {
             let record = db::get_preset(&conn, id)
-                .map_err(|e| e.to_string())?
+                .map_err(|e| command_error(&e))?
                 .ok_or_else(|| {
                     format!("Preset '{id}' is no longer in the library — refresh and try again")
                 })?;
@@ -405,7 +416,7 @@ async fn quick_install_plan(
     let (product, engine) = {
         let conn = lock(&state)?;
         let product = db::get_product(&conn, &product_id)
-            .map_err(|e| e.to_string())?
+            .map_err(|e| command_error(&e))?
             .ok_or_else(|| {
                 format!("Product '{product_id}' is no longer in the library — refresh and try again")
             })?;
@@ -455,7 +466,7 @@ fn start_run(
 fn quick_install(state: State<'_, AppState>, product_id: String) -> Result<StartRun, String> {
     let conn = lock(&state)?;
     let product = db::get_product(&conn, &product_id)
-        .map_err(|e| e.to_string())?
+        .map_err(|e| command_error(&e))?
         .ok_or_else(|| {
             format!("Product '{product_id}' is no longer in the library — refresh and try again")
         })?;
@@ -486,7 +497,7 @@ fn launch_run(preset_names: Vec<String>, requirements: Vec<Requirement>) -> Resu
         preset_names,
         requirements,
     };
-    std::fs::write(dir.join("request.json"), serde_json::to_vec(&request).map_err(|e| e.to_string())?)
+    std::fs::write(dir.join("request.json"), serde_json::to_vec(&request).map_err(|e| command_error(&e))?)
         .map_err(|e| format!("cannot write the run request: {e}"))?;
 
     let exe = std::env::current_exe().map_err(|e| format!("cannot locate sprout-windows-desktop.exe: {e}"))?;
@@ -560,7 +571,7 @@ fn get_active_run() -> Result<Option<ActiveRunInfo>, String> {
 #[tauri::command]
 fn get_run(state: State<'_, AppState>, run_id: String) -> Result<Option<RunRecord>, String> {
     let conn = lock(&state)?;
-    db::get_run(&conn, &run_id).map_err(|e| e.to_string())
+    db::get_run(&conn, &run_id).map_err(|e| command_error(&e))
 }
 
 /// Lists every Run's summary row, newest first — the History screen (ticket
@@ -568,7 +579,7 @@ fn get_run(state: State<'_, AppState>, run_id: String) -> Result<Option<RunRecor
 #[tauri::command]
 fn list_runs(state: State<'_, AppState>) -> Result<Vec<RunSummary>, String> {
     let conn = lock(&state)?;
-    db::list_runs(&conn).map_err(|e| e.to_string())
+    db::list_runs(&conn).map_err(|e| command_error(&e))
 }
 
 /// Loads the persisted knobs (default timeout, log retention) with their
@@ -707,7 +718,7 @@ fn destroy_main_window(app: AppHandle) -> Result<(), String> {
                 *t = Some(std::time::Instant::now());
             }
         }
-        window.destroy().map_err(|e| e.to_string())?;
+        window.destroy().map_err(|e| command_error(&e))?;
     }
     Ok(())
 }
@@ -718,7 +729,7 @@ fn destroy_main_window(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 fn minimize_main_window(app: AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("main") {
-        window.minimize().map_err(|e| e.to_string())?;
+        window.minimize().map_err(|e| command_error(&e))?;
     }
     Ok(())
 }
@@ -728,11 +739,11 @@ fn minimize_main_window(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 fn toggle_main_window_maximize(app: AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("main") {
-        let maximized = window.is_maximized().map_err(|e| e.to_string())?;
+        let maximized = window.is_maximized().map_err(|e| command_error(&e))?;
         if maximized {
-            window.unmaximize().map_err(|e| e.to_string())?;
+            window.unmaximize().map_err(|e| command_error(&e))?;
         } else {
-            window.maximize().map_err(|e| e.to_string())?;
+            window.maximize().map_err(|e| command_error(&e))?;
         }
     }
     Ok(())
@@ -744,7 +755,7 @@ fn toggle_main_window_maximize(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 fn main_window_is_maximized(app: AppHandle) -> Result<bool, String> {
     if let Some(window) = app.get_webview_window("main") {
-        return window.is_maximized().map_err(|e| e.to_string());
+        return window.is_maximized().map_err(|e| command_error(&e));
     }
     Ok(false)
 }
@@ -765,7 +776,7 @@ fn update_native_frame(
     if let Some(window) = app.get_webview_window("main") {
         window
             .set_decorations(native_frame == "on")
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| command_error(&e))?;
     }
     Ok(())
 }
@@ -834,7 +845,7 @@ fn open_folder(path: String) -> Result<(), String> {
 #[tauri::command]
 fn list_launch_entries(state: State<'_, AppState>) -> Result<Vec<launch::LaunchEntry>, String> {
     let conn = lock(&state)?;
-    launch::list_launch_entries(&conn).map_err(|e| e.to_string())
+    launch::list_launch_entries(&conn).map_err(|e| command_error(&e))
 }
 
 /// Appends a Launch entry at the end of the Quick Launch list (ticket 38).
@@ -848,10 +859,10 @@ fn create_launch_entry(
 ) -> Result<launch::LaunchEntry, String> {
     launch::validate_launch_entry(&entry)?;
     let conn = lock(&state)?;
-    if let Some(existing) = launch::colliding_entry(&conn, &entry, None).map_err(|e| e.to_string())? {
+    if let Some(existing) = launch::colliding_entry(&conn, &entry, None).map_err(|e| command_error(&e))? {
         return Err(format!("\"{existing}\" is already in Quick Launch with this target."));
     }
-    let created = launch::create_launch_entry(&conn, &entry).map_err(|e| e.to_string())?;
+    let created = launch::create_launch_entry(&conn, &entry).map_err(|e| command_error(&e))?;
     drop(conn);
     emit_quick_launch_changed(&app);
     Ok(created)
@@ -868,11 +879,11 @@ fn update_launch_entry(
     launch::validate_launch_entry(&entry.entry)?;
     let conn = lock(&state)?;
     if let Some(existing) =
-        launch::colliding_entry(&conn, &entry.entry, Some(entry.id)).map_err(|e| e.to_string())?
+        launch::colliding_entry(&conn, &entry.entry, Some(entry.id)).map_err(|e| command_error(&e))?
     {
         return Err(format!("\"{existing}\" is already in Quick Launch with this target."));
     }
-    launch::update_launch_entry(&conn, &entry).map_err(|e| e.to_string())?;
+    launch::update_launch_entry(&conn, &entry).map_err(|e| command_error(&e))?;
     drop(conn);
     emit_quick_launch_changed(&app);
     Ok(())
@@ -886,7 +897,7 @@ fn delete_launch_entry(
     id: i64,
 ) -> Result<(), String> {
     let conn = lock(&state)?;
-    launch::delete_launch_entry(&conn, id).map_err(|e| e.to_string())?;
+    launch::delete_launch_entry(&conn, id).map_err(|e| command_error(&e))?;
     drop(conn);
     emit_quick_launch_changed(&app);
     Ok(())
@@ -901,7 +912,7 @@ fn move_launch_entry(
     to_position: i64,
 ) -> Result<(), String> {
     let conn = lock(&state)?;
-    launch::move_launch_entry(&conn, id, to_position).map_err(|e| e.to_string())?;
+    launch::move_launch_entry(&conn, id, to_position).map_err(|e| command_error(&e))?;
     drop(conn);
     emit_quick_launch_changed(&app);
     Ok(())
@@ -942,7 +953,7 @@ fn start_quick_launch(
     ids: Option<Vec<i64>>,
 ) -> Result<(), String> {
     let conn = lock(&state)?;
-    let saved = launch::list_launch_entries(&conn).map_err(|e| e.to_string())?;
+    let saved = launch::list_launch_entries(&conn).map_err(|e| command_error(&e))?;
     drop(conn);
     let entries = match ids {
         None => {
@@ -962,7 +973,7 @@ fn start_quick_launch(
 #[tauri::command]
 fn start_dock_quick_launch(state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
     let conn = lock(&state)?;
-    let entries = launch::list_dock_launch_entries(&conn).map_err(|e| e.to_string())?;
+    let entries = launch::list_dock_launch_entries(&conn).map_err(|e| command_error(&e))?;
     drop(conn);
     if entries.is_empty() {
         return Err("No entries are shown in the dock — show an entry in the dock first.".into());
@@ -982,7 +993,7 @@ fn start_dock_quick_launch(state: State<'_, AppState>, app: AppHandle) -> Result
 fn start_launch_entry(state: State<'_, AppState>, app: AppHandle, id: i64) -> Result<(), String> {
     let conn = lock(&state)?;
     let entry = launch::list_launch_entries(&conn)
-        .map_err(|e| e.to_string())?
+        .map_err(|e| command_error(&e))?
         .into_iter()
         .find(|entry| entry.id == id)
         .ok_or_else(|| "That entry is gone from the Quick Launch list — try again.".to_string())?;
@@ -1073,7 +1084,7 @@ fn notify_launch_summary(app: &AppHandle, report: &launch::LaunchReport) -> Resu
         .title("Quick Launch done")
         .body(launch::launch_summary_body(report))
         .show()
-        .map_err(|e| e.to_string())
+        .map_err(|e| command_error(&e))
 }
 
 /// Pure helper for ticket 123 white-screen: whether the window handle should be
@@ -1465,7 +1476,7 @@ fn list_quick_actions(
     state: State<'_, AppState>,
 ) -> Result<Vec<quick_actions::QuickAction>, String> {
     let conn = lock(&state)?;
-    quick_actions::list_quick_actions(&conn).map_err(|e| e.to_string())
+    quick_actions::list_quick_actions(&conn).map_err(|e| command_error(&e))
 }
 
 /// Appends a Quick Action at the end of the list, validated first — a blank
@@ -1481,11 +1492,11 @@ fn create_quick_action(
     quick_actions::validate_quick_action(&action)?;
     let conn = lock(&state)?;
     if let Some(existing) =
-        quick_actions::colliding_action(&conn, &action, None).map_err(|e| e.to_string())?
+        quick_actions::colliding_action(&conn, &action, None).map_err(|e| command_error(&e))?
     {
         return Err(format!("\"{existing}\" already runs this exact command."));
     }
-    let created = quick_actions::create_quick_action(&conn, &action).map_err(|e| e.to_string())?;
+    let created = quick_actions::create_quick_action(&conn, &action).map_err(|e| command_error(&e))?;
     drop(conn);
     emit_quick_launch_changed(&app);
     Ok(created)
@@ -1504,11 +1515,11 @@ fn update_quick_action(
     let conn = lock(&state)?;
     if let Some(existing) =
         quick_actions::colliding_action(&conn, &action.action, Some(action.id))
-            .map_err(|e| e.to_string())?
+            .map_err(|e| command_error(&e))?
     {
         return Err(format!("\"{existing}\" already runs this exact command."));
     }
-    quick_actions::update_quick_action(&conn, &action).map_err(|e| e.to_string())?;
+    quick_actions::update_quick_action(&conn, &action).map_err(|e| command_error(&e))?;
     drop(conn);
     emit_quick_launch_changed(&app);
     Ok(())
@@ -1522,7 +1533,7 @@ fn delete_quick_action(
     id: i64,
 ) -> Result<(), String> {
     let conn = lock(&state)?;
-    quick_actions::delete_quick_action(&conn, id).map_err(|e| e.to_string())?;
+    quick_actions::delete_quick_action(&conn, id).map_err(|e| command_error(&e))?;
     drop(conn);
     emit_quick_launch_changed(&app);
     Ok(())
@@ -1537,7 +1548,7 @@ fn move_quick_action(
     to_position: i64,
 ) -> Result<(), String> {
     let conn = lock(&state)?;
-    quick_actions::move_quick_action(&conn, id, to_position).map_err(|e| e.to_string())?;
+    quick_actions::move_quick_action(&conn, id, to_position).map_err(|e| command_error(&e))?;
     drop(conn);
     emit_quick_launch_changed(&app);
     Ok(())
@@ -1601,7 +1612,7 @@ fn get_quick_action_file(
 #[tauri::command]
 fn list_clips(state: State<'_, AppState>) -> Result<Vec<clips::Clip>, String> {
     let conn = lock(&state)?;
-    clips::list_clips(&conn).map_err(|e| e.to_string())
+    clips::list_clips(&conn).map_err(|e| command_error(&e))
 }
 
 /// Appends a Clip at the end of the list, validated first — blank text never
@@ -1616,14 +1627,14 @@ fn create_clip(
 ) -> Result<clips::Clip, String> {
     clips::validate_clip(&clip)?;
     let conn = lock(&state)?;
-    if let Some(existing) = clips::colliding_clip(&conn, &clip.content, None).map_err(|e| e.to_string())? {
+    if let Some(existing) = clips::colliding_clip(&conn, &clip.content, None).map_err(|e| command_error(&e))? {
         return Err(if existing.is_empty() {
             "A clip with this text already exists.".into()
         } else {
             format!("This text is already saved as \"{existing}\".")
         });
     }
-    let created = clips::create_clip(&conn, &clip).map_err(|e| e.to_string())?;
+    let created = clips::create_clip(&conn, &clip).map_err(|e| command_error(&e))?;
     drop(conn);
     emit_quick_launch_changed(&app);
     Ok(created)
@@ -1640,7 +1651,7 @@ fn update_clip(
     clips::validate_clip(&clip.clip)?;
     let conn = lock(&state)?;
     if let Some(existing) =
-        clips::colliding_clip(&conn, &clip.clip.content, Some(clip.id)).map_err(|e| e.to_string())?
+        clips::colliding_clip(&conn, &clip.clip.content, Some(clip.id)).map_err(|e| command_error(&e))?
     {
         return Err(if existing.is_empty() {
             "A clip with this text already exists.".into()
@@ -1648,7 +1659,7 @@ fn update_clip(
             format!("This text is already saved as \"{existing}\".")
         });
     }
-    clips::update_clip(&conn, &clip).map_err(|e| e.to_string())?;
+    clips::update_clip(&conn, &clip).map_err(|e| command_error(&e))?;
     drop(conn);
     emit_quick_launch_changed(&app);
     Ok(())
@@ -1663,7 +1674,7 @@ fn delete_clip(
     id: i64,
 ) -> Result<(), String> {
     let conn = lock(&state)?;
-    clips::delete_clip(&conn, id).map_err(|e| e.to_string())?;
+    clips::delete_clip(&conn, id).map_err(|e| command_error(&e))?;
     drop(conn);
     emit_quick_launch_changed(&app);
     Ok(())
@@ -1678,7 +1689,7 @@ fn move_clip(
     to_position: i64,
 ) -> Result<(), String> {
     let conn = lock(&state)?;
-    clips::move_clip(&conn, id, to_position).map_err(|e| e.to_string())?;
+    clips::move_clip(&conn, id, to_position).map_err(|e| command_error(&e))?;
     drop(conn);
     emit_quick_launch_changed(&app);
     Ok(())
@@ -1695,7 +1706,7 @@ fn copy_clip(app: AppHandle, state: State<'_, AppState>, id: i64) -> Result<(), 
     use tauri_plugin_clipboard_manager::ClipboardExt;
     let conn = lock(&state)?;
     let clip = clips::get_clip(&conn, id)
-        .map_err(|e| e.to_string())?
+        .map_err(|e| command_error(&e))?
         .ok_or_else(|| "This clip no longer exists — refresh and try again".to_string())?;
     drop(conn);
     if clip.clip.image.is_some() && clip.clip.content.trim().is_empty() {
@@ -1720,7 +1731,7 @@ fn store_image_clip(
 ) -> Result<clips::Clip, String> {
     clips::validate_image_bytes(bytes)?;
     let conn = lock(state)?;
-    let created = clips::create_clip_image(&conn, name, bytes).map_err(|e| e.to_string())?;
+    let created = clips::create_clip_image(&conn, name, bytes).map_err(|e| command_error(&e))?;
     drop(conn);
     emit_quick_launch_changed(app);
     Ok(created)
@@ -1754,10 +1765,10 @@ fn update_clip_image(
     show_in_dock: bool,
 ) -> Result<(), String> {
     let conn = lock(&state)?;
-    if !clips::has_clip_image(&conn, id).map_err(|e| e.to_string())? {
+    if !clips::has_clip_image(&conn, id).map_err(|e| command_error(&e))? {
         return Err("That clip isn't an image clip — refresh and try again.".into());
     }
-    clips::update_clip_image(&conn, id, &name, show_in_dock).map_err(|e| e.to_string())?;
+    clips::update_clip_image(&conn, id, &name, show_in_dock).map_err(|e| command_error(&e))?;
     drop(conn);
     emit_quick_launch_changed(&app);
     Ok(())
@@ -1782,7 +1793,7 @@ fn copy_clip_image(
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     use tauri_plugin_clipboard_manager::ClipboardExt;
     let conn = lock(&state)?;
-    let has = clips::has_clip_image(&conn, id).map_err(|e| e.to_string())?;
+    let has = clips::has_clip_image(&conn, id).map_err(|e| command_error(&e))?;
     drop(conn);
     if !has {
         return Err("That clip has no image to copy — refresh and try again.".into());
@@ -1810,7 +1821,7 @@ fn copy_clip_image(
 #[tauri::command]
 fn get_clip(state: State<'_, AppState>, id: i64) -> Result<Option<clips::Clip>, String> {
     let conn = lock(&state)?;
-    clips::get_clip(&conn, id).map_err(|e| e.to_string())
+    clips::get_clip(&conn, id).map_err(|e| command_error(&e))
 }
 
 /// Opens the single clip viewer, or retargets the one already open: the
@@ -1825,7 +1836,7 @@ fn get_clip(state: State<'_, AppState>, id: i64) -> Result<Option<clips::Clip>, 
 async fn open_clip_viewer(app: AppHandle, id: i64, source: Option<String>) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || clip_viewer::open(&app, id, source.as_deref()))
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| command_error(&e))?
 }
 
 /// Consumes the pending clip-viewer request once, covering the create → mount
@@ -1851,7 +1862,7 @@ fn list_groups(
     collection: groups::Collection,
 ) -> Result<Vec<groups::Group>, String> {
     let conn = lock(&state)?;
-    groups::list_groups(&conn, collection).map_err(|e| e.to_string())
+    groups::list_groups(&conn, collection).map_err(|e| command_error(&e))
 }
 
 /// Appends a Group at the end of its collection's order, name validated
@@ -1902,7 +1913,7 @@ fn set_group_color(
 #[tauri::command]
 fn delete_group(app: AppHandle, state: State<'_, AppState>, id: i64) -> Result<(), String> {
     let conn = lock(&state)?;
-    groups::delete_group(&conn, id).map_err(|e| e.to_string())?;
+    groups::delete_group(&conn, id).map_err(|e| command_error(&e))?;
     drop(conn);
     emit_quick_launch_changed(&app);
     Ok(())
@@ -1959,7 +1970,7 @@ fn assign_to_group(
     group_id: i64,
 ) -> Result<(), String> {
     let conn = lock(&state)?;
-    groups::assign_item(&conn, collection, item_id, group_id).map_err(|e| e.to_string())?;
+    groups::assign_item(&conn, collection, item_id, group_id).map_err(|e| command_error(&e))?;
     drop(conn);
     emit_quick_launch_changed(&app);
     Ok(())
@@ -1974,7 +1985,7 @@ fn unassign_from_group(
     item_id: i64,
 ) -> Result<(), String> {
     let conn = lock(&state)?;
-    groups::unassign_item(&conn, collection, item_id).map_err(|e| e.to_string())?;
+    groups::unassign_item(&conn, collection, item_id).map_err(|e| command_error(&e))?;
     drop(conn);
     emit_quick_launch_changed(&app);
     Ok(())
@@ -2039,7 +2050,7 @@ fn run_quick_action(
 ) -> Result<QuickActionRunOutcome, String> {
     let conn = lock(&state)?;
     let action = quick_actions::get_quick_action(&conn, id)
-        .map_err(|e| e.to_string())?
+        .map_err(|e| command_error(&e))?
         .ok_or_else(|| {
             "This quick action is no longer in the list — refresh and try again".to_string()
         })?;
@@ -2285,7 +2296,7 @@ fn stop_quick_action(state: State<'_, AppState>, id: i64) -> Result<(), String> 
         .ok_or_else(|| "This quick action is not running.".to_string())?;
     let conn = lock(&state)?;
     let action = quick_actions::get_quick_action(&conn, id)
-        .map_err(|e| e.to_string())?
+        .map_err(|e| command_error(&e))?
         .ok_or_else(|| {
             "This quick action is no longer in the list — refresh and try again".to_string()
         })?;
@@ -2344,7 +2355,7 @@ fn run_quick_action_fix(
 ) -> Result<quick_actions::PreFixResult, String> {
     let conn = lock(&state)?;
     let action = quick_actions::get_quick_action(&conn, id)
-        .map_err(|e| e.to_string())?
+        .map_err(|e| command_error(&e))?
         .ok_or_else(|| {
             "This quick action is no longer in the list — refresh and try again".to_string()
         })?;
@@ -2716,7 +2727,7 @@ fn ai_verify_revision(
     baseline: String,
 ) -> Result<Option<String>, String> {
     let conn = lock(&state)?;
-    let actions = quick_actions::list_quick_actions(&conn).map_err(|e| e.to_string())?;
+    let actions = quick_actions::list_quick_actions(&conn).map_err(|e| command_error(&e))?;
     match actions.into_iter().find(|action| action.id == action_id) {
         None => Ok(Some("The action this revision was diagnosed against no longer exists — it was deleted. The proposal is kept for review; save it as a new action instead.".into())),
         Some(action) => {
@@ -2850,7 +2861,7 @@ async fn detect_prerequisites(
 /// the AppBar is released first so the edge is never left occupied.
 #[tauri::command]
 fn close_quick_launch_window(app: AppHandle) -> Result<(), String> {
-    quick_window::close(&app).map_err(|e| e.to_string())
+    quick_window::close(&app).map_err(|e| command_error(&e))
 }
 
 /// The frontend's view of the live dock state (tickets 53 & 59): the edge and
@@ -2966,7 +2977,7 @@ fn set_display_dock_edge(
     // Write through the EDID-keyed helper (ticket 110) — virtual displays fall
     // back to the device name with no visible difference.
     let key = per_display_key(identity.as_deref(), &device_name);
-    db::save_dock_edge(&conn, &key, &edge).map_err(|e| e.to_string())
+    db::save_dock_edge(&conn, &key, &edge).map_err(|e| command_error(&e))
 }
 
 #[tauri::command]
@@ -2991,7 +3002,7 @@ fn set_display_dock_mode(
     let displays = appbar::cached_displays();
     let (device_name, identity) = resolve_display_keys(&display, &displays);
     let key = per_display_key(identity.as_deref(), &device_name);
-    db::save_dock_mode(&conn, &key, &mode).map_err(|e| e.to_string())
+    db::save_dock_mode(&conn, &key, &mode).map_err(|e| command_error(&e))
 }
 
 /// The remembered dock width % for one display (ticket 128): the per-monitor
@@ -3022,7 +3033,7 @@ fn set_display_dock_width_pct(
     let displays = appbar::cached_displays();
     let (device_name, identity) = resolve_display_keys(&display, &displays);
     let key = per_display_key(identity.as_deref(), &device_name);
-    db::save_dock_width_pct(&conn, &key, pct).map_err(|e| e.to_string())
+    db::save_dock_width_pct(&conn, &key, pct).map_err(|e| command_error(&e))
 }
 
 /// The remembered bezel tab Y ratio for one display (spec 214, ADR-0020):
@@ -3053,7 +3064,7 @@ fn set_display_bezel_y_ratio(
     let displays = appbar::cached_displays();
     let (device_name, identity) = resolve_display_keys(&display, &displays);
     let key = per_display_key(identity.as_deref(), &device_name);
-    db::save_bezel_y_ratio(&conn, &key, ratio).map_err(|e| e.to_string())
+    db::save_bezel_y_ratio(&conn, &key, ratio).map_err(|e| command_error(&e))
 }
 
 /// The bezel collapsed tab's visible width (spec 214): Svelte reads it here
@@ -3238,7 +3249,7 @@ fn set_companion_height_ratio_for_display(
     let displays = appbar::cached_displays();
     let (device_name, identity) = resolve_display_keys(&display, &displays);
     let key = per_display_key(identity.as_deref(), &device_name);
-    db::save_companion_height_ratio(&conn, &key, ratio).map_err(|e| e.to_string())?;
+    db::save_companion_height_ratio(&conn, &key, ratio).map_err(|e| command_error(&e))?;
     drop(conn);
     emit_quick_launch_changed(&app);
     Ok(())
@@ -3452,7 +3463,7 @@ fn get_quick_launch_dock_state(app: AppHandle) -> Result<DockStateView, String> 
 fn debug_quick_launch_window_rect(app: AppHandle) -> Result<(i32, i32, i32, i32), String> {
     let window = quick_window::quick_launch_window(&app)
         .ok_or_else(|| "Quick Launch window is not open".to_string())?;
-    let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+    let hwnd = window.hwnd().map_err(|e| command_error(&e))?;
     match appbar::window_rect(hwnd.0) {
         Some(r) => Ok((r.left, r.top, r.right, r.bottom)),
         None => Err("cannot read the Quick Launch window rectangle".to_string()),
@@ -3462,7 +3473,7 @@ fn debug_quick_launch_window_rect(app: AppHandle) -> Result<(i32, i32, i32, i32)
 fn pending_eligibility(app: &AppHandle) -> Result<(bool, bool), String> {
     let window = quick_window::quick_launch_window(&app)
         .ok_or_else(|| "Quick Launch window is not open".to_string())?;
-    let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+    let hwnd = window.hwnd().map_err(|e| command_error(&e))?;
     let device = appbar::monitor_key(hwnd.0)
         .ok_or_else(|| "cannot identify the current monitor".to_string())?;
     let displays = appbar::cached_displays();

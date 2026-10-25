@@ -116,8 +116,9 @@ pub fn run_worker() {
     // The machine-local default install directory (ticket 34, ADR-0009) is a
     // Settings value read here, at run time — the run honors whatever the
     // settings said when it started, with per-Product overrides (ticket 36)
-    // riding inside the requirement. A failed read (locked DB) just means
-    // winget's own default directory.
+    // riding inside the requirement. WAL reads never wait on the main app's
+    // writes; a failed read (unreadable database) just means winget's own
+    // default directory.
     let install_dir = crate::db::init()
         .ok()
         .map(|conn| crate::settings::load(&conn).install_dir)
@@ -150,7 +151,10 @@ pub fn run_worker() {
             Ok(()) => (record.outcome, None),
             Err(e) => (
                 RunOutcome::Failed,
-                Some(format!("the run finished but its results could not be persisted: {e}")),
+                Some(format!(
+                    "the run finished but its results could not be persisted: {}",
+                    crate::db::error_text(&e)
+                )),
             ),
         },
         Err(e) => (RunOutcome::Failed, Some(e)),

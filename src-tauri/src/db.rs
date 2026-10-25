@@ -32,6 +32,16 @@ pub fn db_path() -> PathBuf {
     data_dir().join("sprout.db")
 }
 
+/// How long a writer waits for the other process's transaction before SQLite
+/// reports contention. The main app and the elevated worker both write this
+/// Library (ADR-0003), so an overlap is normal — it just has to outlast it.
+const BUSY_TIMEOUT_MS: u32 = 5_000;
+
+/// Shown instead of SQLite's "database is locked" when contention outlives
+/// [`BUSY_TIMEOUT_MS`]: the action itself is safe to repeat.
+pub const CONTENTION_MESSAGE: &str =
+    "Sprout is busy saving something else. Try again in a moment.";
+
 /// Opens the database at `dir/sprout.db`, creating `dir` and `dir/logs` and
 /// the schema on first use.
 pub fn init() -> Result<Connection> {
@@ -49,9 +59,44 @@ pub fn init_at(dir: &PathBuf) -> Result<Connection> {
         })?;
 
     let conn = Connection::open(dir.join("sprout.db"))?;
+    // Every connection waits, then either writes or reports after the wait —
+    // never fails a write that only overlapped the other process's.
+    conn.busy_timeout(std::time::Duration::from_millis(BUSY_TIMEOUT_MS.into()))?;
+    // WAL keeps readers (the main app's lists) out of the writer's way. The
+    // pragma persists in the file, so this also converts an existing
+    // rollback-journal database; a refused conversion must stop the open
+    // rather than continue with an unexpected journal mode.
+    let mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
+    if !mode.eq_ignore_ascii_case("wal") {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+            Some(format!(
+                "Sprout could not switch its library to WAL journal mode (got '{mode}')"
+            )),
+        ));
+    }
     conn.pragma_update(None, "foreign_keys", "ON")?;
     migrate(&conn)?;
     Ok(conn)
+}
+
+/// Whether a Library failure is transient contention between the main app and
+/// the worker (ADR-0003) — the same action can simply be retried.
+pub fn is_contention(e: &rusqlite::Error) -> bool {
+    matches!(
+        e.sqlite_error_code(),
+        Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+    )
+}
+
+/// User-facing text for a Library failure: contention asks for a retry, every
+/// other failure keeps SQLite's own message.
+pub fn error_text(e: &rusqlite::Error) -> String {
+    if is_contention(e) {
+        CONTENTION_MESSAGE.to_string()
+    } else {
+        e.to_string()
+    }
 }
 
 fn migrate(conn: &Connection) -> Result<()> {
@@ -2986,6 +3031,118 @@ mod tests {
         upsert_meta(&conn, &dock_key(KEY_BEZEL_Y_RATIO_PREFIX, device), "parked").unwrap();
         upsert_meta(&conn, &dock_key(KEY_BEZEL_Y_RATIO_PREFIX, identity), "parked").unwrap();
         assert_eq!(load_bezel_y_ratio_identified(&conn, Some(identity), device), None);
+    }
+
+    #[test]
+    fn every_connection_opens_in_wal_with_the_busy_timeout() {
+        let dir = test_dir();
+        let first = init_at(&dir).unwrap();
+        let second = init_at(&dir).unwrap();
+
+        // Both of Sprout's writers (main app + elevated worker) open through
+        // init_at; neither may carry a different journal mode or no wait.
+        for conn in [&first, &second] {
+            assert_eq!(journal_mode(conn), "wal");
+            let busy: i64 = conn
+                .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(busy, i64::from(BUSY_TIMEOUT_MS));
+            let foreign_keys: i64 = conn
+                .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(foreign_keys, 1);
+        }
+    }
+
+    #[test]
+    fn an_existing_database_converts_to_wal_and_keeps_its_rows() {
+        let dir = test_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        {
+            let raw = Connection::open(dir.join("sprout.db")).unwrap();
+            assert_ne!(journal_mode(&raw), "wal");
+            raw.execute_batch(
+                "CREATE TABLE before_wal (value TEXT NOT NULL);
+                 INSERT INTO before_wal (value) VALUES ('kept');",
+            )
+            .unwrap();
+        }
+
+        let conn = init_at(&dir).unwrap();
+        assert_eq!(journal_mode(&conn), "wal");
+        let kept: String = conn
+            .query_row("SELECT value FROM before_wal", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(kept, "kept");
+    }
+
+    #[test]
+    fn a_second_writer_waits_for_the_open_transaction() {
+        let dir = test_dir();
+        let holder = init_at(&dir).unwrap();
+        let waiter = init_at(&dir).unwrap();
+
+        holder.execute("BEGIN IMMEDIATE", []).unwrap();
+        holder
+            .execute("INSERT INTO meta (key, value) VALUES ('holder', '1')", [])
+            .unwrap();
+
+        let committer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            holder.execute("COMMIT", []).unwrap();
+            holder
+        });
+
+        // Without the busy timeout this write fails with SQLITE_BUSY the
+        // moment it meets the holder's transaction.
+        waiter
+            .execute("INSERT INTO meta (key, value) VALUES ('waiter', '1')", [])
+            .unwrap();
+
+        let holder = committer.join().unwrap();
+        let written: i64 = waiter
+            .query_row(
+                "SELECT COUNT(*) FROM meta WHERE key IN ('holder', 'waiter')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(written, 2, "both writes land once the lock is released");
+        drop(holder);
+    }
+
+    #[test]
+    fn contention_reads_as_a_retry_but_real_failures_keep_their_message() {
+        let busy = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            Some("database is locked".into()),
+        );
+        assert!(is_contention(&busy));
+        assert_eq!(error_text(&busy), CONTENTION_MESSAGE);
+
+        let locked = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_LOCKED),
+            None,
+        );
+        assert!(is_contention(&locked));
+
+        let read_only = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_READONLY),
+            Some("attempt to write a readonly database".into()),
+        );
+        assert!(!is_contention(&read_only));
+        assert!(
+            error_text(&read_only).contains("readonly"),
+            "non-contention failures keep SQLite's own message"
+        );
+    }
+
+    fn journal_mode(conn: &Connection) -> String {
+        conn.query_row("PRAGMA journal_mode", [], |row| {
+            let mode: String = row.get(0)?;
+            Ok(mode.to_ascii_lowercase())
+        })
+        .unwrap()
     }
 }
 
