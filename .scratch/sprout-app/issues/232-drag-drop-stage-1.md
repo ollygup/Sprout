@@ -6,7 +6,7 @@
 
 **Blocked by:** 230 — Nested groups main-app UI.
 
-**Status:** done — amended 2026-10-24 (grip grab area); manual pointer/DPI pass still pending a human
+**Status:** done — amended 2026-10-24 (grip grab area); manual pointer/DPI pass validated by the user 2026-10-26
 
 - [x] A six-dot grip appears on hover/focus on cards and top-level group headers; only the grip starts a drag, and the rest of the card/header stays clickable.
 - [x] The grip is a focusable button with an accessible name/instructions; the ⋯ menu remains the complete keyboard path (Move up/down, Move to group, Move into…).

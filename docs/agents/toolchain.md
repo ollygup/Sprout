@@ -8,6 +8,7 @@
 - Node.js v24.19.0, npm 11 — invoke as `npm.cmd` (PowerShell execution policy blocks `npm.ps1`).
 - WebView2 runtime present.
 - App data is created lazily on first launch under `%LOCALAPPDATA%\Sprout` (sprout.db + logs\) — never ship or commit it.
+- `C:\Sprout` in the commands below is the VM workspace path; a standalone clone substitutes its own root. The commands themselves are unchanged, and `node tools/ownership-gate.mjs` is path-agnostic (root from `process.argv[2]`, else the script's own location).
 
 ## Parallel batches
 

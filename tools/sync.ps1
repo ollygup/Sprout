@@ -38,12 +38,24 @@ $ErrorActionPreference = "Stop"
 $share = "\\vmware-host\Shared Folders\Projects\Sprout"
 $local = "C:\Sprout"
 $stateFile = Join-Path $local ".sync-state.json"
+# An unreachable share lists as an empty tree, so -Down would "succeed" with zero
+# files and write an empty snapshot - silently disarming the guard every later
+# -Up relies on (everything local then looks new and hits the copy ceiling).
+# Fail before touching the state file. See the snapshot/divergence rules in
+# docs/agents/working-copy.md.
+if (-not (Test-Path -LiteralPath $share)) {
+    Write-Error "Share unreachable: $share - refusing to sync. Nothing was copied and the snapshot was not touched."
+    exit 1
+}
 # Same list as the AGENTS.md robocopy /XD (minus .git) - checked against
 # EVERY path segment, so nested build dirs like src-tauri\target are caught.
 # dist/ rides along too: local-only installer output (releases publish from
 # CI), never share content.
 $excludeSegments = @("node_modules", "target", "build", "dist", ".svelte-kit", ".vscode", ".codegraph", ".git")
-$excludeFiles = @(".sync-state.json")
+# .sprout-workspace declares this machine's workspace mode. It is machine-local
+# by definition, so it must never ride to the share: a share copy would flip the
+# other device's rule set. See docs/agents/working-copy.md.
+$excludeFiles = @(".sync-state.json", ".sprout-workspace")
 # Loose run artifacts that must never ride to the share - screenshots/logs
 # spilled by repro runs. Top-level .scratch only: the issue tracker under
 # .scratch/sprout-app stays synced.

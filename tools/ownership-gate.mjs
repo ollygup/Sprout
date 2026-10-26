@@ -65,10 +65,12 @@ const OWNERS = [
     modules: [],
   },
   {
-    // Spec 221 §B.6 / ADR-0029: the clip viewer owns one low-level mouse hook
-    // for its own lifetime. The dock/AppBar owner is not extended.
-    operation: "clip viewer outside-click hook (low-level mouse hook lifecycle)",
-    owners: ["src-tauri/src/clip_viewer/hook.rs"],
+    // Spec 221 §B.6 / spec 214 ticket 243 / ADR-0029: one low-level mouse
+    // hook slot serves both windows that close on an outside click — the clip
+    // viewer and the open bezel panel. The dock/AppBar owner is not extended;
+    // consumers call this module's arm/disarm interface.
+    operation: "outside-click close hook (shared low-level mouse hook lifecycle)",
+    owners: ["src-tauri/src/outside_click_hook.rs"],
     symbols: [
       "SetWindowsHookExW",
       "UnhookWindowsHookEx",

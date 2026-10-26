@@ -963,6 +963,12 @@ export function getBezelOpenWidth(monitorWidthPx: number, pct: number): Promise<
   return invoke<number>("get_bezel_open_width", { monitorWidthPx, pct });
 }
 
+/** Arms/disarms the native outside-click close for the open bezel panel
+ *  (ticket 243): armed only while the window occupies the open rect. */
+export function setBezelOutsideClose(active: boolean): Promise<void> {
+  return invoke<void>("set_bezel_outside_close", { active });
+}
+
 /** Applies the complete saved dock/Companion state after Settings batch writes. */
 export function reconcileQuickLaunchSettings(): Promise<void> {
   return invoke<void>("reconcile_quick_launch_settings");

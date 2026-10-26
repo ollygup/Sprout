@@ -22,7 +22,7 @@ Historical events and operational claims were not inferred from source.
 - 0009 Machine-local install directory — `amended 2026-09-05` (per-Product directory travels in local Plan/request; verify failure can erase location note)
 - 0023 Plan: merge-identical, conflict-on-difference, never downgrade — `amended 2026-09-05` (merge equality narrower; pinned version/scope not passed; mixed unresolved entry gap)
 - 0024 RunOutcome dominance + honesty notes — `amended 2026-09-05` (cancellation overrides prior failures; notes and verification trailers are incomplete)
-- 0029 One source of truth per Windows command — `new 2026-09-05`, `amended 2026-10-24` (accepted ownership constraint; implementation candidates under review; clip viewer owns its outside-click mouse hook in `clip_viewer/hook.rs`)
+- 0029 One source of truth per Windows command — `new 2026-09-05`, `amended 2026-10-24`, `amended 2026-10-26` (accepted ownership constraint; implementation candidates under review; one shared outside-click hook in `outside_click_hook.rs` serves the clip viewer and the open bezel panel)
 
 ## Distribution, data, portability
 

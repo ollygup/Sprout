@@ -1,5 +1,7 @@
 # Worker session — agent reference
 
+> **VM workspace only** — read this only when `.sprout-workspace` contains `vm`. A standalone clone has no coordinator/sync split to exempt.
+
 > Read this file when: you were spawned as a ticket worker under a
 > coordinator in a parallel batch. Otherwise skip it — normal sessions use
 > AGENTS.md Core directly, and the coordinator protocol lives in

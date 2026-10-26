@@ -577,6 +577,43 @@ pub fn docked_state(app: &AppHandle) -> Option<DockState> {
     app.state::<AppState>().dock.lock().ok()?.clone()
 }
 
+/// Arms or disarms "close the open bezel panel on an outside click" (ticket
+/// 217's click-outside rule, extended to clicks that never reach the webview).
+/// The frontend owns the panel's open/close state and its geometry, so it calls
+/// this right after the open rect lands and after the panel shrinks back; a
+/// hook left armed against the collapsed tab would dismiss a panel that is not
+/// there. Only bezel mode arms it — fixed and auto-hide bars have no panel.
+///
+/// The shared hook slot is bezel-targeted: disarming here must never remove
+/// the clip viewer's hook when both windows happen to be open (ADR-0029).
+pub fn set_bezel_outside_close(app: &AppHandle, active: bool) -> Result<(), String> {
+    if !active {
+        crate::outside_click_hook::disarm_target(crate::outside_click_hook::Target::Bezel);
+        return Ok(());
+    }
+    let Some(current) = docked_state(app) else {
+        return Err("Quick Launch is not docked".to_string());
+    };
+    if current.mode != "bezel" {
+        return Err("outside-click close applies to bezel mode only".to_string());
+    }
+    let hwnd = current_edge_hwnd(app)?;
+    crate::outside_click_hook::arm(app, hwnd, crate::outside_click_hook::Target::Bezel);
+    Ok(())
+}
+
+/// The bezel hook's close path: the click landed outside the open panel, so
+/// ask the frontend to run the same closer Esc and the tab toggle use. The hook
+/// is dropped first — a burst of clicks must not queue repeated closes — and
+/// placement stays in the frontend (ADR-0019 keeps the dock driver out of
+/// bezel reveal/close motion).
+pub(crate) fn request_bezel_close(app: &AppHandle) {
+    crate::outside_click_hook::disarm_target(crate::outside_click_hook::Target::Bezel);
+    if let Some(window) = quick_launch_window(app) {
+        let _ = window.emit("bezel-close-requested", ());
+    }
+}
+
 /// Resolves the dock preferences for `monitor` the way `dock(None)` does
 /// (ticket 59): the monitor's remembered edge/mode, falling back to the
 /// Settings defaults. Pure — never persists anything.
@@ -1027,6 +1064,10 @@ pub fn undock(app: &AppHandle) -> Result<(), String> {
     if !is_docked(app) {
         return Ok(());
     }
+    // Leaving the dock takes the bezel panel with it (the window is reshaped
+    // back to the floating palette), so the outside-click close must not stay
+    // armed against a window that no longer has a panel.
+    crate::outside_click_hook::disarm_target(crate::outside_click_hook::Target::Bezel);
     let window = quick_launch_window(app)
         .ok_or_else(|| "Quick Launch window is not open".to_string())?;
     let hwnd = window.hwnd().map_err(|e| e.to_string())?;
@@ -1085,6 +1126,10 @@ pub fn set_dock_mode(app: &AppHandle, mode: &str) -> Result<(), String> {
     if current.mode == mode {
         return Ok(());
     }
+    // A mode change reshapes the bar: a panel left open in the old mode has no
+    // successor in the new one, so the outside-click close is dropped here
+    // rather than left armed against the transition.
+    crate::outside_click_hook::disarm_target(crate::outside_click_hook::Target::Bezel);
     // The live state is updated before the registration so the driver's next
     // tick (~16 ms) already sees the requested mode and starts the transition
     // — the flip itself places nothing, and `settled = None` tells the drift
@@ -1365,6 +1410,9 @@ pub fn release_dock(app: &AppHandle) -> Result<(), String> {
     let Some(current) = dock.take() else {
         return Ok(());
     };
+    // The dock (and with it any open bezel panel) is going away: drop the
+    // bezel close hook before the window is reshaped or destroyed.
+    crate::outside_click_hook::disarm_target(crate::outside_click_hook::Target::Bezel);
     if let Some(window) = quick_launch_window(app) {
         if let Ok(hwnd) = window.hwnd() {
             // Release any auto-hide registration on the docked edge too — the

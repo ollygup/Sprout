@@ -1,5 +1,7 @@
 # Parallel tickets — agent reference
 
+> **VM workspace only** — read this only when `.sprout-workspace` contains `vm`. A standalone clone uses normal git branches and pull requests.
+
 > Read this file when: you coordinate 2+ concurrent tickets in one batch.
 > Workers read `worker.md`; planning and ticket slicing use `planning.md`.
 

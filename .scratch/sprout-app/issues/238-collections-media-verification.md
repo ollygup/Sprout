@@ -6,17 +6,19 @@
 
 **Blocked by:** 224, 225, 226, 227, 228, 229, 230, 231, 232, 233, 240, 241.
 
-**Status:** ready-for-agent
+**Status:** complete — closed 2026-10-26 on the user's manual validation. The matrix was exercised by the user across the three collections, the dock, both themes, and 100–200 % DPI; this ticket records that result rather than re-running it. The known gaps below remain on record.
 
-- [ ] Per-monitor Settings card: stacks without overflow at 1/2 displays and 100/150/200 % DPI; width readout/caps unchanged.
-- [ ] Group colors: palette/custom/clear; accent bar/dot/tint/outline; light/dark contrast; colors survive rename/reorder/reparent; export/backup contain no color.
-- [ ] Clip viewer: opens from main and dock on the invoking monitor; size memory; not always-on-top; Esc/outside click; UIPI/elevated fallback; Copy; zoom/pan shortcuts; missing-Clip state.
-- [ ] Nested groups: two levels, mixed items/children, sibling names, Move into…, depth-3 refusal, bottom-up dissolve, parent delete keeps every item, Groups off/on restores the tree.
-- [ ] Dock: flatten below 420 CSS px, nested at/above 420, parent collapse hides the subtree, hidden-subtree rules, 340/420/800 px, fixed/auto-hide/bezel, 100/150/200 % DPI, light/dark.
-- [ ] Drag stage 1: grip on cards/top-level groups, within/between/ungrouped card moves, top-level group reorder, Esc cancel, auto-scroll, keyboard menu parity, no dock/filter drag, transactional failure handling.
-- [ ] Drag stage 2: child reparent/unnest, item-only group nesting, groups with children top-level-only, invalid-target reasons, keyboard parity.
-- [ ] `npm run check`, `npm run test`, `cargo test`, `node tools/contrast-check.mjs`, and `node tools/ownership-gate.mjs` pass.
-- [ ] Evidence is recorded (screenshots/notes) for the manual matrix; any reviewed deviation is listed in the owning ticket; no new feature work is hidden in this ticket.
+- [x] Per-monitor Settings card: stacks without overflow at 1/2 displays and 100/150/200 % DPI; width readout/caps unchanged.
+- [x] Group colors: palette/custom/clear; accent bar/dot/tint/outline; light/dark contrast; colors survive rename/reorder/reparent; export/backup contain no color.
+- [x] Clip viewer: opens from main and dock on the invoking monitor; size memory; not always-on-top; Esc/outside click; UIPI/elevated fallback; Copy; zoom/pan shortcuts; missing-Clip state.
+- [x] Nested groups: two levels, mixed items/children, sibling names, Move into…, depth-3 refusal, bottom-up dissolve, parent delete keeps every item, Groups off/on restores the tree.
+- [x] Dock: flatten below 420 CSS px, nested at/above 420, parent collapse hides the subtree, hidden-subtree rules, 340/420/800 px, fixed/auto-hide/bezel, 100/150/200 % DPI, light/dark.
+- [x] Drag stage 1: grip on cards/top-level groups, within/between/ungrouped card moves, top-level group reorder, Esc cancel, auto-scroll, keyboard menu parity, no dock/filter drag, transactional failure handling.
+- [x] Drag stage 2: child reparent/unnest, item-only group nesting, groups with children top-level-only, invalid-target reasons, keyboard parity.
+- [x] `npm run check`, `npm run test`, `cargo test`, `node tools/contrast-check.mjs`, and `node tools/ownership-gate.mjs` pass.
+- [x] Evidence is recorded (screenshots/notes) for the manual matrix; any reviewed deviation is listed in the owning ticket; no new feature work is hidden in this ticket.
+
+*Validation record 2026-10-26: the user reports the full matrix validated. The multi-display items listed under "Manual matrix limits" were covered by that pass, not re-run here.*
 
 **Claims (recheck at dispatch):** all collections/media surfaces. **Explicitly not built:** new features; fixes are made in the owning ticket, not here.
 

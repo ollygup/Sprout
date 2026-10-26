@@ -1,5 +1,7 @@
 # Releases — agent reference
 
+> **VM workspace only** — read this only when `.sprout-workspace` contains `vm`. A standalone clone publishes through its normal release process.
+
 > Read this file when: you cut a release, bump the app version, or build a
 > local installer artifact. Otherwise skip it.
 

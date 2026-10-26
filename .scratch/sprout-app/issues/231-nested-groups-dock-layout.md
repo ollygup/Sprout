@@ -6,7 +6,7 @@
 
 **Blocked by:** 230 — Nested groups main-app UI.
 
-**Status:** done — amended 2026-10-24 (children collapse, per-card colour); manual width/DPI/theme pass still pending a human
+**Status:** done — amended 2026-10-24 (children collapse, per-card colour); manual width/DPI/theme pass validated by the user 2026-10-26
 
 - [x] The layout mode is driven by the tab panel's **content width** via a container query, not the window width or a new size constant.
 - [x] At ≥ 420 CSS px: parent header, direct items, then each child sub-header indented and always expanded. The parent chevron collapses the entire subtree. ~~child groups have no chevron~~ Superseded 2026-10-24: the child sub-header now carries its own chevron and collapses independently — at that width the strip has room for it, and "always expanded" removed a control the parent level already had.

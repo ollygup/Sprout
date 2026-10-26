@@ -326,4 +326,23 @@ describe("bezel peek/open/close interaction (spec 214)", () => {
     expect(drag).not.toContain("ev.clientY - startClientY");
     expect(drag).not.toContain("startClientY");
   });
+
+  it("closes on an outside click that never reaches the webview (ticket 243)", () => {
+    // A button-down in another app is invisible to the page, so the native
+    // hook reports it; the page then runs the same closer Esc uses.
+    expect(PAGE_SOURCE).toContain('listen("bezel-close-requested"');
+    expect(PAGE_SOURCE).toContain("closeBezelPanel()).then(");
+    // Armed with the open placement, disarmed with every other one — queued
+    // with the move so a fast open→close cannot deliver a stale arm.
+    const rect = fnBody("placeBezelRect");
+    expect(rect).toContain("await syncBezelOutsideClose(kind, gen)");
+    const sync = fnBody("syncBezelOutsideClose");
+    expect(sync).toContain("gen !== bezelPlaceGen");
+    expect(sync).toContain('setBezelOutsideClose(kind === "open")');
+    // A route unmount must never leave the hook behind the panel.
+    expect(PAGE_SOURCE).toContain("void setBezelOutsideClose(false)");
+    expect(API_SOURCE).toContain('invoke<void>("set_bezel_outside_close", { active })');
+    // Focus loss stays inert — the hook's own focus path is viewer-only.
+    expect(PAGE_SOURCE).not.toContain('addEventListener("blur"');
+  });
 });

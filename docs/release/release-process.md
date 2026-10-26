@@ -1,5 +1,7 @@
 # Release process
 
+> **VM workspace only** — read this only when `.sprout-workspace` contains `vm`. A standalone clone publishes through its normal release process.
+
 Division of labor between this working copy (`C:\Sprout`) and the git master
 (the shared folder; remote: https://github.com/ollygup/Sprout).
 

@@ -21,6 +21,7 @@ mod import_export;
  mod launch;
  mod logs;
  mod ordered_list;
+ mod outside_click_hook;
  mod plan;
 mod presence;
 mod quick_actions;
@@ -3105,6 +3106,19 @@ fn get_bezel_open_width(monitor_width_px: i32, pct: u32) -> i32 {
     crate::constants::window::dock_width_px_for_mode(monitor_width_px, pct, "bezel")
 }
 
+/// Arms or disarms "close the open bezel panel on an outside click" (ticket
+/// 217's click-outside rule, extended to clicks that never enter the webview).
+/// The frontend owns the panel's open/close state and its window geometry, so
+/// it calls this immediately after the open rect lands and after it shrinks
+/// back: the hook compares mouse points against the live top-level window, and
+/// a stale hook after the close would fire against a tab-sized window. Only
+/// bezel mode may arm it — fixed and auto-hide bars have no panel to dismiss.
+/// The click itself is never swallowed (ADR-0029 keeps the hook in one owner).
+#[tauri::command]
+fn set_bezel_outside_close(app: AppHandle, active: bool) -> Result<(), String> {
+    quick_window::set_bezel_outside_close(&app, active)
+}
+
 /// Applies the final saved global + per-monitor picture after the Settings
 /// screen finishes its batch writes, then publishes one definitive refresh.
 #[tauri::command]
@@ -4132,6 +4146,7 @@ pub fn run() {
             get_bezel_tab_height,
             get_bezel_tab_y,
             get_bezel_open_width,
+            set_bezel_outside_close,
             reconcile_quick_launch_settings,
             #[cfg(debug_assertions)]
             debug_quick_launch_window_rect,

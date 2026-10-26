@@ -6,7 +6,7 @@
 
 **Blocked by:** 235 — Workspace marker and VM overlay.
 
-**Status:** ready-for-agent
+**Status:** deferred 2026-10-26 — skipped by user decision; not built. 239 no longer depends on this ticket, and its fork-checklist check was dropped rather than left waiting on a document that will not exist. The gap stays deliberate: a fork that publishes releases unmodified can still be overwritten by upstream (223's Further Notes, "Fork updater risk").
 
 - [ ] `docs/release/forking.md` explains that a fork is a repository origin, not a workspace mode; a fork can be standalone or VM (only if the hardcoded VM paths actually match).
 - [ ] The checklist covers redirecting the updater's repository slug and any embedded owner identity to the fork, and verifying no upstream `ollygup/Sprout` URL or upstream key remains.

@@ -19,3 +19,5 @@
 **Explicitly not built:**
 
 - Backend geometry/caps (ticket 215); Y persistence (ticket 216); Settings knobs (ticket 218); dictionary/translation (tickets 219–220)
+
+**Follow-up 2026-10-26:** this ticket's click-outside path is the in-window pointer handler — a click that lands in another application never reaches the webview, so the panel stayed open. [243 — Bezel outside-click close across windows](243-bezel-outside-click-close.md) completes the same rule with the shared native hook; focus loss still never closes.

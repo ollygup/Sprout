@@ -1,11 +1,63 @@
-# Working copy and sync — agent reference
+# VM workspace and sync — agent reference
 
-> Read this file when AGENTS.md Core sync isn't enough: you hit a
-> `SHARE-NEWER` divergence, join work already in progress (snapshot check),
-> or need the snapshot location / raw-robocopy fallback. Routine session
-> boundaries (-Down first, -Up at close, ADR read, ownership gate) live in
-> AGENTS.md Core so a session can start with zero extra reads; the wording
-> here is authoritative — keep both identical.
+> Read this file when: `.sprout-workspace` contains `vm` (it then applies to
+> every session), or you are setting up, repairing, or clearing VM mode. A
+> standalone clone never reads it. This file owns the VM rules — the working
+> copy, the share, the sync triggers, the no-git rule, the snapshot, and the
+> robocopy fallback. `AGENTS.md` only points here; do not duplicate this text
+> there.
+
+## Workspace marker
+
+- `.sprout-workspace` at the repo root is the only mode switch. Its entire
+  content is one word: `vm` or `standalone` (trimmed, case-insensitive).
+  Absent or any other content means unconfigured: standalone rules apply for
+  the session, the agent reports it, and the user chooses once.
+- The marker is machine-local. `tools/sync.ps1` excludes it and `.gitignore`
+  ignores it, so it must never reach the share or git.
+- Clearing VM mode means deleting the marker; the clone returns to standalone.
+  That touches neither the database, the logs, the working tree, nor the share.
+
+## VM setup
+
+Setup verifies this machine; it does not configure it. Nothing here creates,
+moves, or reparents a directory automatically, and there is no apply mode.
+
+1. Run the read-only check:
+   `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "tools\vm-setup.ps1"`
+   It verifies the working copy is exactly `C:\Sprout`, the share is
+   reachable, `tools\sync.ps1` and `tools\ownership-gate.mjs` exist, and
+   `node`, `npm.cmd`, and `cargo` are on PATH.
+2. When the repo is not at `C:\Sprout`, VM mode is unavailable there. Show the
+   human the remedies the check prints and let them choose:
+   - keep the checkout where it is: create `C:\Sprout` as a directory junction
+     (needs no elevation; builds work through it);
+   - or move the checkout to `C:\Sprout` for real.
+   When `C:\Sprout` already exists, stop — it must be inspected by hand first.
+   Removing a junction with `Remove-Item -Recurse` can delete the tree it
+   points at; the safe removal is `cmd /c rmdir "C:\Sprout"`.
+3. When `C:\Sprout` does not exist at all, `-Down` bootstraps it: it creates
+   each copied file's parent directory, so a missing working copy is filled
+   from the share in one pass. This is the only supported path setup, and it
+   still requires the user's `vm` answer first — never run it to "try" VM mode.
+4. Only after every check passes: write `vm` as the marker's entire content.
+5. Run `-Down` (the normal session-start refresh; triggers below). If it
+   fails, delete the marker, report the failure, and leave the clone
+   standalone — a half-enabled VM workspace is worse than none.
+6. Verify: the marker is not on the share, a second `-Up` reports `0 copied`,
+   and the working copy still builds.
+
+Re-running setup is idempotent — it re-checks and reports; it does not rewrite
+the marker or run a destructive sync. Invalid marker content is reported, not
+silently overwritten.
+
+## Standalone (no marker, or `standalone`)
+
+None of this file applies: no `-Down`/`-Up`, no share, no snapshot; normal git
+is expected. The ownership gate still runs before a commit or pull request,
+and every universal rule in `AGENTS.md` still applies.
+
+## The VM topology
 
 - The repo has two homes:
   - **Master (source of truth, fallback):** `\\vmware-host\Shared Folders\Projects\Sprout`
@@ -24,6 +76,7 @@ tools\sync.ps1 -Up
 
 - Sync triggers are blocking, not background knowledge:
   - WHEN any working session starts → MUST run `-Down` as the FIRST action, before reading or editing anything.
+  - WHEN local edits exist and are not yet published → MUST run `-Up` BEFORE any `-Down`. `-Down` treats the share as newer and overwrites a differing local file, so a mid-session `-Down` silently reverts unpublished work; only the session-start `-Down` (which precedes edits) is safe.
   - WHEN any working session starts → MUST read `docs/adr/README.md` (the one-page decision index) after `-Down`, before planning. MUST then read in full any ADR whose area the task touches. MUST NOT re-litigate a recorded decision without appending a dated `## Amendment` stating what changed and why.
   - WHEN any unit of work completes (published tickets/spec/docs, a landed code change) AND WHEN the session ends → MUST run `-Up` — MUST NOT batch everything into one end-of-day sync.
   - WHEN any unit of work completes AND WHEN the session ends → MUST run `node tools/ownership-gate.mjs` (ADR-0029 ownership gate) and it MUST pass BEFORE running `-Up`. WHEN it fails → MUST fix the placement (extend the owner) or table the new owner — MUST NOT sync a violating tree.

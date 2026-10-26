@@ -51,6 +51,7 @@
     getBezelCollapsedWidth,
     getBezelPeekWidth,
     getBezelOpenWidth,
+    setBezelOutsideClose,
     getBezelTabHeight,
     getBezelTabY,
     getDisplayBezelYRatio,
@@ -1565,6 +1566,22 @@
     }
     return BEZEL_OPEN_PCT_FALLBACK;
   }
+  // The open rect is also the outside-click boundary (ticket 243): the native
+  // hook is armed only while the panel occupies it, so a hook left over from a
+  // previous open can never dismiss the parked tab. Queued with the move
+  // itself, so a fast open→close keeps arm and disarm in order. A failed arm
+  // is logged, not surfaced: the in-window pointer path and Esc still close.
+  async function syncBezelOutsideClose(
+    kind: "collapsed" | "peek" | "open",
+    gen: number,
+  ): Promise<void> {
+    if (gen !== bezelPlaceGen) return;
+    try {
+      await setBezelOutsideClose(kind === "open");
+    } catch (e) {
+      console.error(e);
+    }
+  }
   // Places the live window for one bezel presentation — collapsed tab, hover
   // peek, or full open panel. Geometry-only: peeking never flips `bezelOpen`,
   // so hover can never open the panel. Throws on failure; callers surface it
@@ -1604,6 +1621,7 @@
           h: info.height,
         };
         await tweenBezelWindow(win, from ?? to, to, gen, instant);
+        await syncBezelOutsideClose(kind, gen);
         return;
       }
       const width =
@@ -1633,6 +1651,7 @@
         };
       }
       await tweenBezelWindow(win, from ?? to, to, gen, instant);
+      await syncBezelOutsideClose(kind, gen);
     });
   }
   // Hover only peeks wider — the single writer of `bezelPeeking`, and the
@@ -2051,6 +2070,12 @@
     // Esc anywhere while open. Focus loss is deliberately not wired — alt-tab
     // and copy-paste out of the dock move focus without intent to dismiss
     // (research 0011 study D).
+    // Ticket 243: a button-down that landed in another window never reaches
+    // this webview at all, so the native hook reports it and runs the same
+    // closer Esc uses. It carries no payload — the panel is open or it is not.
+    listen("bezel-close-requested", () => closeBezelPanel()).then((fn) =>
+      unlisteners.push(fn),
+    );
     const onBezelPointerDown = (event: PointerEvent) => {
       if (!isBezelDock || !bezelOpen) return;
       const target = event.target as Node | null;
@@ -2076,6 +2101,9 @@
       clearTimeout(copiedTimer);
       clearTimeout(runNoticeTimer);
       cancelBezelUnpeek();
+      // The route can unmount with the panel still open (dev reload, window
+      // swap): the hook must never outlive the panel it closes.
+      void setBezelOutsideClose(false).catch(() => {});
       clearInterval(companionAudioTimer);
       clearInterval(companionSweeper);
       companionSweeper = undefined;

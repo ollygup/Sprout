@@ -207,3 +207,22 @@ Docs/config work is verified by a repeatable checklist, not by unit tests alone.
 - [ ] 239 runs the standalone and VM dry runs, including rollback and `0 copied`.
 - [ ] No app behavior, dependency, or manifest change ships.
 - [ ] No application behavior changed in this planning session.
+
+## Amendment 2026-10-25 — marker values, setup tiers, and setup-script scope
+
+Dispatch review of 235 changed five things. The original text above is preserved; this section is the current contract.
+
+1. **Marker values are explicit; absent is *unconfigured*, not standalone.** The marker's entire content is `vm` or `standalone` (trimmed, case-insensitive). Absent, empty, or invalid content selects standalone *rules* for the session but MUST be reported, and `AGENTS.md` MUST ask the user once which mode the clone is, then write the answer. Rationale: absence was indistinguishable from "deliberately standalone", so a lost or deleted marker was a silent downgrade — on the VM it would quietly stop the sync discipline and the no-git rule. Supersedes the Solution bullet "Absent → standalone" and §A.1. The marker still holds one fact; no paths, no manifest.
+2. **Session start is ask-once, never inference.** `AGENTS.md` MUST NOT infer the mode from the path, a mounted share, or git metadata. An unattended session (worker, coordinator batch, user unavailable) proceeds as standalone and MUST NOT write `vm`.
+3. **Non-`C:\Sprout` paths are handled in three tiers, none of them automatic.** (a) Missing `C:\Sprout`: `-Down` already bootstraps it (it creates each copied file's parent directory), so no new code is needed — document it, and assert anchor files in 239. (b) Repo elsewhere and the user wants to keep it: the check prints a `New-Item -ItemType Junction` remedy for the human to run. (c) `C:\Sprout` already exists: refuse, and require hand inspection before any change — `Remove-Item -Recurse` on a junction can delete the tree it points at, so removal is `cmd /c rmdir`. The existing-path check MUST run before `-Down`, which would otherwise write through a stale junction.
+4. **Setup gains one read-only script, and no apply mode.** `tools/vm-setup.ps1` verifies the root, share reachability, both tools, the toolchain, and the marker state; it never creates, moves, or reparents anything. This narrows "no new setup script" in Out of Scope to "no mutating setup script"; `sync.ps1` and `.gitignore` remain the only config changes. No `-Apply`, and no parameterization ticket: `C:\Sprout` and the share stay hardcoded. Revisit parameterization only when the share itself must move, or a second VM-hosted clone appears.
+5. **236 also owns `docs/agents/cleanup.md`.** It is not VM-only, and its hardcoded `C:\Sprout\src-tauri\target` path is the last non-VM file that assumes the VM root.
+
+Verification shift: 235 proves the check, the marker gate, the exclusions, and a `0 copied` `-Up`; 239 owns the standalone dry run, the rollback (delete the marker, confirm standalone), and the bootstrap anchor assertion.
+
+## Amendment 2026-10-26 — 237 deferred, 238 closed, sync guard hardened
+
+- **237 deferred by user decision**, not built: no fork release is planned. 239's dependency and fork-checklist AC were dropped in the same unit so the tracker carries no requirement nobody intends to meet. The upstream-updater risk recorded in Further Notes stands, now unmitigated by documentation.
+- **238 closed** 2026-10-26 on the user's manual validation; the manual passes recorded against 230–233 are marked validated there. 242 is unblocked.
+- **`sync.ps1` now refuses to run when the share is unreachable.** 239's rollback drill found that `-Down` against a missing share reported `Down: 0 copied`, exited 0, and wrote an empty snapshot — silently disarming the `SHARE-NEWER` guard, after which every local file looks new and `-Up` aborts at the copy ceiling. The guard runs before the state file is touched. `working-copy.md` also gained the rule that unpublished local edits require `-Up` before any `-Down` (a mid-session `-Down` reverted unpublished work during this ticket's own verification).
+- The dock outside-click close for bezel mode is a new application-behavior ticket, not part of this round (223's Out of Scope excludes app behavior).

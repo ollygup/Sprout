@@ -6,7 +6,7 @@
 
 **Blocked by:** 229 — Nested groups backend.
 
-**Status:** done — gates green except the manual visual pass (still pending a human)
+**Status:** done — gates green except the manual visual pass (~~still pending a human~~ validated by the user 2026-10-26, recorded in 238)
 
 - [x] The main app renders parent accordion → direct items → indented child accordions. Child groups are independently collapsible and default expanded; parent collapse hides the entire subtree.
 - [x] Parent count badge = total items in the subtree; child badge = its own items. Counts update after assign/unassign/delete.

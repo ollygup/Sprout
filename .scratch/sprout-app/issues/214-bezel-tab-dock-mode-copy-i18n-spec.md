@@ -83,6 +83,8 @@ One owner per area, existing seams preferred: bezel geometry + collapsed/open pl
 
 Claims above are estimates to recheck against code at dispatch (CodeGraph first). File overlap (Settings page across 218/219) is integration, not a dependency: 219 owns string keys, 218 owns control wiring; combined verification on the dock Settings group.
 
+**Post-delivery follow-up (2026-10-26):** [243 — Bezel outside-click close across windows](243-bezel-outside-click-close.md) extends 217's click-outside rule to button-downs that land in another window (the shared native hook). It changes no accepted design decision from this round — same modes, same click-gated open/close, focus loss still never closes.
+
 ## Acceptance and verification
 
 - [x] User confirmed third mode, click-only, peek-on-hover, ratio-based tab height, Y-drag with per-monitor identity memory, click-outside + Esc close, width grey-out with link, EN-first then zh-CN file-based dictionary incl. presence strings (grill R1–R2).

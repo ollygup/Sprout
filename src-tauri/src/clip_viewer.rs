@@ -33,7 +33,7 @@ use crate::{
     AppState,
 };
 
-mod hook;
+use crate::outside_click_hook;
 
 /// The viewer's stable label — the event handler in `lib.rs` keys on it and
 /// the capability scope names it.
@@ -120,7 +120,7 @@ pub fn open(app: &AppHandle, id: i64, source: Option<&str>) -> Result<(), String
         if window.set_focus().is_ok() {
             let _ = window.emit("clip-viewer-open", id);
             if let Ok(hwnd) = window.hwnd() {
-                hook::arm(app, hwnd.0);
+                outside_click_hook::arm(app, hwnd.0, outside_click_hook::Target::Viewer);
             }
             return Ok(());
         }
@@ -133,7 +133,7 @@ pub fn open(app: &AppHandle, id: i64, source: Option<&str>) -> Result<(), String
     let (width, height) = clamp_for_work(stored, &work);
     let window = create_window(app, &work, width, height).map_err(|e| e.to_string())?;
     if let Ok(hwnd) = window.hwnd() {
-        hook::arm(app, hwnd.0);
+        outside_click_hook::arm(app, hwnd.0, outside_click_hook::Target::Viewer);
     }
     Ok(())
 }
@@ -144,7 +144,7 @@ pub fn open(app: &AppHandle, id: i64, source: Option<&str>) -> Result<(), String
 pub fn close(app: &AppHandle) -> Result<(), String> {
     // No hook may outlive the window, and disarming first also makes the
     // focus move below unable to re-enter the close path.
-    hook::disarm();
+    outside_click_hook::disarm_target(outside_click_hook::Target::Viewer);
     let Some(window) = clip_viewer_window(app) else {
         return Ok(());
     };
@@ -179,19 +179,20 @@ pub fn close(app: &AppHandle) -> Result<(), String> {
 /// (spec 221 §B.7): a retarget from the dock bumps the generation, so the
 /// click that requested the new image cannot tear down the window it raised.
 pub(crate) fn close_generation(app: &AppHandle, generation: u64) {
-    if hook::is_current(generation) {
+    if outside_click_hook::is_current(generation) {
         let _ = close(app);
     }
 }
 
-/// Focus-loss fallback entry for the window event handler (see [`hook`]).
+/// Focus-loss fallback entry for the window event handler (see
+/// [`crate::outside_click_hook`]).
 pub(crate) fn note_focus_lost(app: &AppHandle) {
-    hook::note_focus_lost(app);
+    outside_click_hook::note_focus_lost(app);
 }
 
 /// Drops a hook left behind by a destroy that bypassed the close command.
 pub(crate) fn forget_hook() {
-    hook::disarm();
+    outside_click_hook::disarm_target(outside_click_hook::Target::Viewer);
 }
 
 /// Only the two real invoking windows may steer placement; anything else

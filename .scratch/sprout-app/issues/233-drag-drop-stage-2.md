@@ -6,7 +6,7 @@
 
 **Blocked by:** 232 — Drag & drop stage 1; 230 — Nested groups main-app UI.
 
-**Status:** done — amended 2026-10-24 (whole-card nest target); manual tree/pointer pass still pending a human
+**Status:** done — amended 2026-10-24 (whole-card nest target); manual tree/pointer pass validated by the user 2026-10-26
 
 - [x] Child groups drag between parents and to the top level; item-only top-level groups drag into another top-level group; groups with children reorder at the top level only.
 - [x] Drop on a group header nests into that group (when eligible); drop on an insertion line reorders at that level; drop on the top-level empty area unnests. Dropping on the current parent is a no-op. *Amended 2026-10-24: "on a group header" widens to the whole top-level card — a 16 px band under the header and the card's bottom 16 px stay as sibling insertion slots, and a child's body stays a sibling slot at its own level.*
